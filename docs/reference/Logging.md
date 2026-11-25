@@ -18,6 +18,8 @@ The folder has mode `0700` and each file `0600`. It is outside every workspace a
 | --- | --- |
 | The TUI | `alyosha-tui.<date>.log` |
 | `alyosha acp` | `alyosha-acp.<date>.log` |
+| `alyosha acp --guest` | `alyosha-acp-guest.<date>.log` |
+| `alyosha acp --group` | `alyosha-acp-group.<date>.log` |
 | `alyosha-telegram` | `alyosha-telegram.<date>.log` |
 | `alyosha-qq` | `alyosha-qq.<date>.log` |
 | `alyosha-schedule` | `alyosha-schedule.<date>.log` |

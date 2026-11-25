@@ -19,6 +19,7 @@ timeout_minutes = 60
 # owner_id = 123456789
 # workspace = "/home/you/work/alyosha-home"
 # token = "..."
+# trusted_groups = [-1001234567890]   # groups whose members get your full powers
 
 # The QQ bridge (docs/develop/QQBridge.md).
 # [qq]
@@ -26,6 +27,7 @@ timeout_minutes = 60
 # owner_openid = ""
 # workspace = "/home/you/work/alyosha-qq"
 # secret = "..."
+# trusted_groups = ["<group_openid>"]  # groups whose members get your full powers
 
 # Scheduled tasks (docs/develop/Schedule.md).
 [mcp.servers.schedule]

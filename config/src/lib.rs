@@ -126,6 +126,9 @@ pub struct TelegramConfig {
     pub workspace: PathBuf,
     /// The bot token from @BotFather.
     pub token: Secret,
+    /// Group chat IDs whose members get the owner's full powers.
+    #[serde(default)]
+    pub trusted_groups: Vec<i64>,
 }
 
 /// `[qq]`, needed only by `alyosha-qq`.
@@ -141,6 +144,9 @@ pub struct QqConfig {
     /// Characters per QQ message.
     #[serde(default = "default_reply_chunk")]
     pub reply_chunk: u32,
+    /// `group_openid`s whose members get the owner's full powers.
+    #[serde(default)]
+    pub trusted_groups: Vec<String>,
 }
 
 fn default_reply_chunk() -> u32 {
@@ -498,6 +504,7 @@ timeout_minutes = 60
 owner_id = 123456789
 workspace = "/home/mjli/Projects/alyosha-home"
 token = "telegram-token-1234"
+trusted_groups = [-1001234567890]
 
 [qq]
 app_id = "102000000"
@@ -575,11 +582,13 @@ API_TOKEN = "mcp-token-3456"
             Path::new("/home/mjli/Projects/alyosha-home")
         );
         assert_eq!(telegram.token.expose(), "telegram-token-1234");
+        assert_eq!(telegram.trusted_groups, [-1001234567890]);
         let qq = config.qq.as_ref().unwrap();
         assert_eq!(qq.app_id, "102000000");
         assert_eq!(qq.owner_openid, "openid-5678");
         assert_eq!(qq.secret.expose(), "qq-secret-9012");
         assert_eq!(qq.reply_chunk, 1500);
+        assert!(qq.trusted_groups.is_empty());
         let search = &config.mcp.servers["search"];
         assert_eq!(search.command, "open-websearch");
         assert!(search.args.is_empty());

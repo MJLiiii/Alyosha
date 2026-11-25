@@ -2,7 +2,7 @@
 
 use std::{process::ExitCode, sync::Arc};
 
-use alyosha_bridge::Bridge;
+use alyosha_bridge::{Bridge, guests::GroupSpawners};
 use alyosha_config::Paths;
 use alyosha_qq::gateway::{QqApi, Settings, listen, run};
 use alyosha_schedule::Schedule;
@@ -65,9 +65,15 @@ fn main() -> ExitCode {
             reply_chunk: qq.reply_chunk as usize,
             schedule: Schedule::new(&paths.data_dir),
             timezone: config.timezone,
-            guests: Some(Arc::new(|| {
-                Bridge::spawn_with(std::path::Path::new("alyosha"), &["acp", "--guest"])
-            })),
+            groups: GroupSpawners {
+                guest: Some(Arc::new(|| {
+                    Bridge::spawn_with(std::path::Path::new("alyosha"), &["acp", "--guest"])
+                })),
+                trusted: Some(Arc::new(|| {
+                    Bridge::spawn_with(std::path::Path::new("alyosha"), &["acp", "--group"])
+                })),
+                trusted_groups: qq.trusted_groups.iter().cloned().collect(),
+            },
         };
         tokio::select! {
             code = run(api, bridge, events, messages, settings) => code,

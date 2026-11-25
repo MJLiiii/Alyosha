@@ -54,9 +54,21 @@ pub struct ServeOptions {
     pub log_file: Option<PathBuf>,
     /// How often to check for the nightly fresh session.
     pub renewal_check: Duration,
-    /// `alyosha acp --guest`: a group chat's guest session.
+    /// Whose session this process serves.
+    pub mode: Mode,
+}
+
+/// Whose session `alyosha acp` serves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    /// `alyosha acp`: the owner's session.
+    Owner,
+    /// `alyosha acp --guest`: an untrusted group chat's guest session.
     /// See `docs/develop/Channels.md#guest-mode`.
-    pub guest: bool,
+    Guest,
+    /// `alyosha acp --group`: a trusted group chat's full session.
+    /// See `docs/develop/Channels.md#group-mode`.
+    Group,
 }
 
 /// The connection's writer: one line per message, in order.
@@ -332,10 +344,12 @@ impl Agent {
             .unwrap_or_else(PoisonError::into_inner)
             .as_ref()
             .map(|name| {
-                if self.options.guest {
-                    format!("People write to you in a group chat through {name}.")
-                } else {
-                    format!("The owner is talking to you through {name}.")
+                match self.options.mode {
+                    Mode::Owner => format!("The owner is talking to you through {name}."),
+                    Mode::Guest => format!("People write to you in a group chat through {name}."),
+                    Mode::Group => format!(
+                        "People in a group chat your owner trusts write to you through {name}. Each message starts with the sender's display name."
+                    ),
                 }
             })
     }
@@ -368,7 +382,7 @@ impl Agent {
     }
 
     fn available_commands(&self, session_id: &str) {
-        if self.options.guest {
+        if self.options.mode == Mode::Guest {
             self.out.update(
                 session_id,
                 json!({"sessionUpdate": "available_commands_update", "availableCommands": []}),
@@ -405,7 +419,7 @@ impl Agent {
             .session_id
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = session_id.to_owned();
-        let started = if self.options.guest {
+        let started = if self.options.mode == Mode::Guest {
             // Startup warnings stay in the log, never in a group.
             warnings.clear();
             let mut started = session::start_guest(
@@ -509,7 +523,7 @@ impl Agent {
             }
         }
         let text = parts.join("\n\n");
-        if self.options.guest {
+        if self.options.mode == Mode::Guest {
             // A group member's message: never a command, always with its sender.
             let sender = &params["_meta"]["alyosha"]["sender"];
             let id_text = sender["id"].as_str().unwrap_or_default();
@@ -683,7 +697,7 @@ impl Agent {
             }
             self.renewing.store(true, Ordering::SeqCst);
             self.end_session().await;
-            let warnings = if self.options.guest {
+            let warnings = if self.options.mode == Mode::Guest {
                 Vec::new()
             } else {
                 vec![FRESH_SESSION_LINE.to_owned()]
@@ -707,9 +721,9 @@ fn chunk(text: &str) -> Value {
     json!({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": text}})
 }
 
-/// Runs `alyosha acp`, or `alyosha acp --guest` for a group chat, on
-/// standard input and output. Returns the exit status.
-pub fn run(guest: bool) -> u8 {
+/// Runs `alyosha acp`, or `alyosha acp --guest` or `--group` for a group
+/// chat, on standard input and output. Returns the exit status.
+pub fn run(mode: Mode) -> u8 {
     let paths = match Paths::from_env() {
         Ok(paths) => paths,
         Err(error) => {
@@ -724,10 +738,10 @@ pub fn run(guest: bool) -> u8 {
             return 2;
         }
     };
-    let program = if guest {
-        "alyosha-acp-guest"
-    } else {
-        "alyosha-acp"
+    let program = match mode {
+        Mode::Owner => "alyosha-acp",
+        Mode::Guest => "alyosha-acp-guest",
+        Mode::Group => "alyosha-acp-group",
     };
     let log_file = alyosha_config::logging::init(program, config.timezone, &paths).ok();
     let config_paths = paths.clone();
@@ -744,7 +758,7 @@ pub fn run(guest: bool) -> u8 {
         clock: Arc::new(crate::clock::SystemClock),
         log_file,
         renewal_check: Duration::from_secs(60),
-        guest,
+        mode,
     };
     let runtime = tokio::runtime::Runtime::new().expect("a Tokio runtime starts");
     runtime.block_on(serve(tokio::io::stdin(), tokio::io::stdout(), options));

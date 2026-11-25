@@ -180,6 +180,10 @@ async fn agent(
                     .as_str()
                     .unwrap()
                     .to_owned();
+                // A trusted group's prompt starts with the sender's name.
+                let text = text
+                    .strip_prefix("Bob: ")
+                    .map_or(text.clone(), str::to_owned);
                 match text.as_str() {
                     "hello" => out += &send(chunk("Hi there.")),
                     "tools" => {
@@ -250,13 +254,30 @@ async fn agent(
     }
 }
 
-/// The log of each guest agent the bridge started, in order.
+/// The log of each group agent the bridge started, in order.
 type GuestLogs = Arc<Mutex<Vec<Arc<Mutex<Vec<Value>>>>>>;
+
+/// A spawner of scripted agents that records each one's log in `logs`.
+fn spawner(logs: GuestLogs) -> alyosha_bridge::guests::SpawnGuest {
+    Arc::new(move || {
+        let (ours, theirs) = tokio::io::duplex(1 << 20);
+        let (agent_read, agent_write) = tokio::io::split(ours);
+        let (bridge_read, bridge_write) = tokio::io::split(theirs);
+        let log = Arc::new(Mutex::new(Vec::new()));
+        logs.lock().unwrap().push(log.clone());
+        tokio::spawn(agent(agent_read, agent_write, log));
+        Ok(Bridge::connect(bridge_read, bridge_write))
+    })
+}
+
+/// The trusted group of the tests.
+const TRUSTED: i64 = -300;
 
 struct Harness {
     api: Arc<BotApi>,
     log: Arc<Mutex<Vec<Value>>>,
     guests: GuestLogs,
+    trusted: GuestLogs,
     task: tokio::task::JoinHandle<u8>,
     _root: tempfile::TempDir,
 }
@@ -272,27 +293,24 @@ async fn start() -> Harness {
     let (bridge, events) = Bridge::connect(bridge_read, bridge_write);
     let root = tempfile::tempdir().unwrap();
     let guests: GuestLogs = Arc::default();
-    let spawned = guests.clone();
+    let trusted: GuestLogs = Arc::default();
     let settings = Settings {
         owner_id: OWNER,
         workspace: root.path().to_owned(),
         schedule: Schedule::new(root.path()),
         timezone: chrono_tz::Europe::Amsterdam,
-        guests: Some(Arc::new(move || {
-            let (ours, theirs) = tokio::io::duplex(1 << 20);
-            let (agent_read, agent_write) = tokio::io::split(ours);
-            let (bridge_read, bridge_write) = tokio::io::split(theirs);
-            let log = Arc::new(Mutex::new(Vec::new()));
-            spawned.lock().unwrap().push(log.clone());
-            tokio::spawn(agent(agent_read, agent_write, log));
-            Ok(Bridge::connect(bridge_read, bridge_write))
-        })),
+        groups: alyosha_bridge::guests::GroupSpawners {
+            guest: Some(spawner(guests.clone())),
+            trusted: Some(spawner(trusted.clone())),
+            trusted_groups: [TRUSTED.to_string()].into(),
+        },
     };
     let task = tokio::spawn(run(Api::new(&url, "TOKEN"), bridge, events, settings));
     Harness {
         api,
         log,
         guests,
+        trusted,
         task,
         _root: root,
     }
@@ -546,4 +564,80 @@ async fn group_mentions_go_to_each_group_guest_session() {
         .collect();
     answered.sort();
     assert_eq!(answered, [(-200, 3), (-100, 2)]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn trusted_groups_get_a_full_session_that_asks_the_owner() {
+    let harness = start().await;
+    harness
+        .api
+        .push(group_message(1, TRUSTED, 7, "@AlyoshaBot hello", true));
+    let api = harness.api.clone();
+    wait_for(|| {
+        api.calls("sendMessage").iter().any(|body| {
+            body["chat_id"] == TRUSTED
+                && body["text"] == "Hi there."
+                && body.get("reply_parameters").is_some()
+        })
+    })
+    .await;
+    assert!(
+        harness.guests.lock().unwrap().is_empty(),
+        "no guest session"
+    );
+    let trusted = harness.trusted.lock().unwrap()[0].clone();
+    let new = trusted
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|message| message["method"] == "session/new")
+        .cloned()
+        .unwrap();
+    let folder = harness
+        ._root
+        .path()
+        .join("groups")
+        .join(TRUSTED.to_string());
+    assert_eq!(new["params"]["cwd"], folder.display().to_string());
+    assert!(folder.is_dir());
+    let prompt = trusted
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|message| message["method"] == "session/prompt")
+        .cloned()
+        .unwrap();
+    assert_eq!(prompt["params"]["prompt"][0]["text"], "Bob: hello");
+    assert!(prompt["params"].get("_meta").is_none());
+
+    // Its approval goes to the owner, who answers the group's agent.
+    harness
+        .api
+        .push(group_message(2, TRUSTED, 7, "@AlyoshaBot approve", true));
+    wait_for(|| {
+        api.calls("sendMessage").iter().any(|body| {
+            body["chat_id"] == OWNER
+                && body["text"]
+                    == format!("In group {TRUSTED}:\n\nApprove? google.send\n\nto: anna")
+        })
+    })
+    .await;
+    harness.api.push(json!({"update_id": 3, "callback_query": {"id": "q1", "from": {"id": OWNER}, "data": "r1:0"}}));
+    wait_for(|| {
+        api.calls("sendMessage")
+            .iter()
+            .any(|body| body["chat_id"] == TRUSTED && body["text"] == "permission selected")
+    })
+    .await;
+    assert!(
+        trusted
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|message| message["id"] == 100 && message["result"]["outcome"]["optionId"] == "0")
+    );
+    assert!(
+        prompts(&harness.log).is_empty(),
+        "the owner's session hears nothing"
+    );
 }

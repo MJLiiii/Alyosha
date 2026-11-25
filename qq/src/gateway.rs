@@ -9,7 +9,7 @@ use std::{
 
 use alyosha_bridge::{
     Bridge, Event, Permission,
-    guests::{GuestEvent, GuestPool, IDLE_LIMIT, SpawnGuest},
+    guests::{GroupSpawners, GuestEvent, GuestPool, IDLE_LIMIT},
 };
 use alyosha_schedule::Schedule;
 use chrono::Utc;
@@ -352,11 +352,13 @@ pub struct Settings {
     pub reply_chunk: usize,
     pub schedule: Schedule,
     pub timezone: Tz,
-    /// Starts a group's guest session; `None` turns group chats off.
-    pub guests: Option<SpawnGuest>,
+    /// Starts groups' sessions, and names the trusted groups.
+    pub groups: GroupSpawners,
 }
 
 struct OpenRequest {
+    /// The trusted group whose session asked, or `None` for the owner's.
+    group: Option<String>,
     permission: Permission,
     options: Vec<String>,
 }
@@ -418,14 +420,17 @@ pub async fn run(
     }
     let seen = Seen::default();
     let (mut pool, mut guest_events) = GuestPool::new(
-        settings.guests.clone(),
+        settings.groups.clone(),
         "alyosha-qq",
         settings.workspace.clone(),
     );
     // Each open group prompt's group and the reply context of its mention.
     let mut group_replies: HashMap<String, (String, ReplyTo)> = HashMap::new();
+    // Each group's latest mention, which a finished job's reply answers.
+    let mut last_mention: HashMap<String, String> = HashMap::new();
     let mut idle_check = tokio::time::interval(Duration::from_secs(60));
-    let mut requests: HashMap<u64, OpenRequest> = HashMap::new();
+    // Open requests from every session, oldest first.
+    let mut requests: Vec<OpenRequest> = Vec::new();
     let mut expired_notice = false;
     let mut next_job = 1u64;
     let mut typing = tokio::time::interval(Duration::from_secs(50));
@@ -450,11 +455,13 @@ pub async fn run(
                             }
                             continue;
                         }
+                        tracing::info!(group = %message.group_openid, trusted = pool.is_trusted(&message.group_openid), "a group mention");
+                        last_mention.insert(message.group_openid.clone(), message.id.clone());
                         let key = format!("g{}:{}", message.group_openid, message.id);
                         group_replies.insert(key.clone(), (message.group_openid.clone(), reply));
                         let user = format!("qq-{}", message.member_openid);
                         if let Err(error) = pool.prompt(&message.group_openid, &key, &message.content, &user, &message.name).await {
-                            tracing::warn!(group = %message.group_openid, error = %error, "the guest session did not start");
+                            tracing::warn!(group = %message.group_openid, error = %error, "the group session did not start");
                             group_replies.remove(&key);
                         }
                         continue;
@@ -484,18 +491,23 @@ pub async fn run(
                     continue;
                 }
                 // An answer to an open request.
-                if let Some((&id, open)) = requests.iter().next()
+                if let Some(open) = requests.first()
                     && let Some(index) = parse_answer(&message.content, open.options.len())
                 {
+                    let open = requests.remove(0);
                     let option_id = open.permission.options[index].0.clone();
                     let name = open.options[index].clone();
-                    let key = open.permission.key.clone();
-                    bridge.forget_permission(&open.permission.tool_call_id);
-                    requests.remove(&id);
-                    bridge.answer(id, Some(&option_id));
+                    let asker = match &open.group {
+                        None => Some(&bridge),
+                        Some(group) => pool.bridge(group),
+                    };
+                    if let Some(asker) = asker {
+                        asker.forget_permission(&open.permission.tool_call_id);
+                        asker.answer(open.permission.request, Some(&option_id));
+                    }
                     let _ = deliver(&owner, &[format!("Answered: {name}")], &mut reply).await;
                     // Later replies for that prompt answer this message.
-                    if let Some(key) = key {
+                    if open.group.is_none() && let Some(key) = open.permission.key {
                         replies.lock().await.insert(key, reply);
                     }
                     continue;
@@ -509,7 +521,9 @@ pub async fn run(
                         let _ = deliver(&owner, &[text], &mut reply).await;
                     }
                     "/cancel" => {
-                        let open: Vec<u64> = requests.drain().map(|(id, _)| id).collect();
+                        // Only the private session's; groups' requests stay open.
+                        let open: Vec<u64> = requests.iter().filter(|open| open.group.is_none()).map(|open| open.permission.request).collect();
+                        requests.retain(|open| open.group.is_some());
                         bridge.cancel_with_requests(&open);
                     }
                     "/tasks" => {
@@ -549,14 +563,14 @@ pub async fn run(
                             None => deliver(&owner, &[text], &mut ReplyTo::scheduled()).await.is_none(),
                         };
                         if delivered {
-                            requests.insert(permission.request, OpenRequest { permission, options });
+                            requests.push(OpenRequest { group: None, permission, options });
                         } else {
                             // Undeliverable: answer at once rather than keep it.
                             bridge.answer(permission.request, None);
                         }
                     }
                     Event::PermissionExpired { tool_call_id } => {
-                        requests.retain(|_, open| open.permission.tool_call_id != tool_call_id);
+                        requests.retain(|open| open.group.is_some() || open.permission.tool_call_id != tool_call_id);
                         expired_notice = true;
                     }
                     Event::JobFinished { text, .. } => {
@@ -588,7 +602,34 @@ pub async fn run(
                         }
                     }
                     Event::Exited => pool.exited(&group, guest),
-                    // Guest sessions have no approver, jobs, or tool calls to show.
+                    // Only a trusted group's session asks the owner.
+                    Event::Permission(permission) if pool.is_trusted(&group) => {
+                        let options: Vec<String> = permission.options.iter().map(|(_, name)| name.clone()).collect();
+                        let text = permission_text(&permission.title, &permission.body, &options, chunk);
+                        let text = format!("In group {group}:\n\n{text}");
+                        if deliver(&owner, &[text], &mut ReplyTo::scheduled()).await.is_none() {
+                            requests.push(OpenRequest { group: Some(group.clone()), permission, options });
+                        } else if let Some(asker) = pool.bridge(&group) {
+                            // Undeliverable: answer at once rather than keep it.
+                            asker.answer(permission.request, None);
+                        }
+                    }
+                    Event::PermissionExpired { tool_call_id } => {
+                        let before = requests.len();
+                        requests.retain(|open| open.group.as_deref() != Some(group.as_str()) || open.permission.tool_call_id != tool_call_id);
+                        expired_notice |= requests.len() < before;
+                    }
+                    Event::JobFinished { text, .. } if pool.is_trusted(&group) => {
+                        let key = format!("gjob{next_job}");
+                        next_job += 1;
+                        let reply = last_mention.get(&group).map_or_else(ReplyTo::scheduled, |id| ReplyTo::message(id));
+                        group_replies.insert(key.clone(), (group.clone(), reply));
+                        if !pool.prompt_job(&group, &key, &text) {
+                            group_replies.remove(&key);
+                        }
+                    }
+                    // Guest sessions have no approver or jobs, and no group
+                    // gets tool calls shown.
                     _ => {}
                 }
             }

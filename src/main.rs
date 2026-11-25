@@ -2,7 +2,10 @@
 
 use std::process::ExitCode;
 
-use alyosha::gateway_admin::{self, GatewayFiles, StdTerminal};
+use alyosha::{
+    acp::Mode,
+    gateway_admin::{self, GatewayFiles, StdTerminal},
+};
 use alyosha_config::Paths;
 
 const USAGE: &str = "\
@@ -10,6 +13,7 @@ Usage:
   alyosha [path]          Start the TUI in a folder (default: here)
   alyosha acp             Serve one ACP agent connection on stdin and stdout
   alyosha acp --guest     The same, as a group chat's guest session
+  alyosha acp --group     The same, as a trusted group chat's full session
   alyosha gateway init    Create the GPROXY secrets file and data folder
   alyosha gateway login   Set up the model provider and sign in";
 
@@ -24,8 +28,9 @@ fn main() -> ExitCode {
         ["gateway", "init"] => gateway_init(),
         ["gateway", "login"] => gateway_login(),
         ["gateway", ..] => usage_error(),
-        ["acp"] => ExitCode::from(alyosha::acp::run(false)),
-        ["acp", "--guest"] => ExitCode::from(alyosha::acp::run(true)),
+        ["acp"] => ExitCode::from(alyosha::acp::run(Mode::Owner)),
+        ["acp", "--guest"] => ExitCode::from(alyosha::acp::run(Mode::Guest)),
+        ["acp", "--group"] => ExitCode::from(alyosha::acp::run(Mode::Group)),
         [] => ExitCode::from(alyosha::tui::run(None)),
         [path] if !path.starts_with('-') => {
             ExitCode::from(alyosha::tui::run(Some((*path).to_owned())))

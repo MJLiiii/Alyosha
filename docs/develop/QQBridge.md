@@ -24,6 +24,7 @@ owner_openid = ""                             # fill in from the log, see below
 workspace = "/home/mjli/work/alyosha-qq"      # absolute, not the Telegram bridge's
 reply_chunk = 1500                            # characters per message
 secret = "..."                                # the AppSecret
+trusted_groups = []                           # optional: group_openids with your powers
 ```
 
 Load it with `alyosha-config`, which refuses a file that others can read and checks every value. Refuse to start, with a clear error, if the `[qq]` section is missing. Never log the secret or an access token. [Configuration](../reference/Configuration.md#qq)
@@ -58,9 +59,11 @@ For a message from the owner, trim the text, then act as the Telegram bridge doe
 
 Handle `GROUP_AT_MESSAGE_CREATE` dispatches too, which use the intent the bridge already asks for. QQ sends them only for messages that @ the bot and removes the @ from `content`. In each, `d.id` is the message ID, `d.group_openid` the group, `d.author.member_openid` the sender, `d.author.member_nickname` the display name when present, and `d.content` the text. Skip duplicate message IDs as for private messages. [Group @ message event](https://bot.q.qq.com/wiki/develop/api-v2/autogen/event/group_at_message_create.html) · [Group chats design](../design/Channels.md#group-chats)
 
-Every group message goes to the group's guest session from the shared pool, the owner's included, as the Telegram bridge does: `initialize` with `alyosha-qq`, the sender `qq-<member_openid>`, and the nickname, or `QQ user` without one. A message with attachments and no text gets **Only text messages work for now.** [Telegram group chats](TelegramBridge.md#group-chats)
+A mention in a group whose `group_openid` is in `trusted_groups` goes to the group's full session, as in the Telegram bridge: `alyosha acp --group` in `<workspace>/groups/<group_openid>`, with `<nickname>: <text>` as the prompt, approvals sent to the owner's private chat after **In group <group_openid>:**, and finished jobs given to the group's session with the reply sent to the group as a reply to its latest mention, which falls back to an active message once that window has closed. The pool never stops it for being idle. A `/yes`, `/no`, or number from the owner answers the oldest open request, whichever session it came from; `/cancel` cancels only the private session and its requests. [Trusted groups](TelegramBridge.md#trusted-groups)
 
-Send the reply with `POST /v2/groups/{group_openid}/messages`, as passive replies to the mention's `msg_id` with `msg_seq` counting from 1, split into at most four parts as for private replies. QQ allows five replies within 60 minutes. If the window has closed, try the same request without `msg_id`. Log a reply that still fails, and drop it. Nothing is kept for later in a group, and there is no typing indicator. [Send a group message](https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_groups_group_openid_messages.post.html)
+Every other group message goes to the group's guest session from the shared pool, the owner's included, as the Telegram bridge does: `initialize` with `alyosha-qq`, the sender `qq-<member_openid>`, and the nickname, or `QQ user` without one. A message with attachments and no text gets **Only text messages work for now.** [Telegram group chats](TelegramBridge.md#group-chats)
+
+Send the reply with `POST /v2/groups/{group_openid}/messages`, as passive replies to the mention's `msg_id` with `msg_seq` counting from 1, split into at most four parts as for private replies. QQ allows five replies within 60 minutes. If the window has closed, try the same request without `msg_id`. Log a reply that still fails, and drop it. Nothing is kept for later in a group, and there is no typing indicator. Log the `group_openid` of every mention at info level, so the owner can copy it into `trusted_groups`. [Send a group message](https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_groups_group_openid_messages.post.html)
 
 ## Sending replies
 
@@ -111,6 +114,7 @@ These run under `cargo test` with a fake QQ API, serving both HTTP and the WebSo
 - Make the third passive send fail with `40034128`. Check that the rest go as active messages. Make those fail with `40034105`. Check that the text is sent first after the owner's next message.
 - Send two messages without waiting. Check that each reply uses its own message's `msg_id`.
 - Deliver a `GROUP_AT_MESSAGE_CREATE`. Check that the group's guest agent gets a prompt with a `qq-<member_openid>` sender and that the reply goes to the group endpoint with the mention's `msg_id`.
+- List a group in `trusted_groups` and deliver a mention from it. Check that a group-mode agent gets `<nickname>: <text>`, that its approval reaches the owner marked with the group, and that the owner's `/yes` answers the group's agent, not the owner's.
 
 With a real bot, which needs a registered bot, real-name QQ account, and network access, check what the documentation leaves unclear:
 

@@ -118,6 +118,10 @@ to remember. Keep the notes short. Never store secrets. Never reveal one person'
 to someone else.
 ```
 
+## Group mode
+
+`alyosha acp --group` serves the session of one trusted group chat. Bridges start one per trusted group. It is the normal mode above in every way but one: the channel line is "People in a group chat your owner trusts write to you through <client name>. Each message starts with the sender's display name." It has the workspace, sandbox, tools, memory, skills, jobs, approvals, and commands of a normal session, and `session/prompt` needs no `_meta`. The bridge puts the sender's name in front of the text, so a member's message never starts with `/`. Log to the `alyosha-acp-group` log file. [Trusted groups](../design/Channels.md#trusted-groups)
+
 ## Verification
 
 These run under `cargo test` with an in-process ACP client and the scripted model from the turn fixture. [Turn fixture](AgentLoop.md#verification-with-a-scripted-model-and-fake-tools)
@@ -131,6 +135,7 @@ These run under `cargo test` with an in-process ACP client and the scripted mode
 - Send two prompts without waiting. Check that both are answered, in order, each with its own reply.
 - Send `session/cancel` during a scripted tool call. Check that all updates arrive before the response and that the response is `cancelled`.
 - Send `/compact` during a turn. Check that it returns the busy message and does not enter history.
+- In group mode, check that the channel line names a trusted group chat and that the session has the normal tools and `available_commands_update`.
 - In guest mode, check that the tool list holds only `user_memory` and the `[guest]` servers' tools, that the system instruction holds no memory index, that a prompt without a sender is refused, and that `/job ls` is sent to the model as text.
 - Script a model failure. Check that the prompt gets a JSON-RPC error and the next prompt still runs.
 - Send `session/new` while a session is open with a waiting prompt. Check that the waiting prompt ends `cancelled` and the old session's MCP servers exit.

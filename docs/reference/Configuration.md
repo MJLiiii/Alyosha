@@ -88,6 +88,7 @@ Needed only by `alyosha-telegram`. Its presence also lets scheduled tasks use th
 | `owner_id` | integer | required | Your numeric Telegram user ID. |
 | `workspace` | absolute path | required | The bridge session's workspace. |
 | `token` | string | required | The bot token from @BotFather. |
+| `trusted_groups` | array of integers | `[]` | Group chat IDs whose members get your full powers through a session of their own. The bridge logs the chat ID of every mention. [Trusted groups](../design/Channels.md#trusted-groups) |
 
 ### `[qq]`
 
@@ -100,10 +101,11 @@ Needed only by `alyosha-qq`. Its presence also lets scheduled tasks use the `qq`
 | `owner_openid` | string | `""` | Your `user_openid` for this bot. While empty, the bridge answers nobody and logs senders' IDs. |
 | `workspace` | absolute path | required | The bridge session's workspace. Use a different folder from Telegram's. |
 | `reply_chunk` | integer, 200 to 4000 | `1500` | Characters per QQ message. |
+| `trusted_groups` | array of strings | `[]` | `group_openid`s whose members get your full powers through a session of their own. The bridge logs the `group_openid` of every mention. [Trusted groups](../design/Channels.md#trusted-groups) |
 
 ### `[guest]`
 
-Guest sessions answer anyone who mentions Alyosha in a group chat. They never get your built-in tools. [Group chats](../design/Channels.md#group-chats)
+Guest sessions answer anyone who mentions Alyosha in a group chat that is not in the bridge's `trusted_groups`. They never get your built-in tools. [Group chats](../design/Channels.md#group-chats)
 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |

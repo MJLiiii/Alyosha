@@ -2,7 +2,7 @@
 
 use std::process::ExitCode;
 
-use alyosha_bridge::Bridge;
+use alyosha_bridge::{Bridge, guests::GroupSpawners};
 use alyosha_config::Paths;
 use alyosha_schedule::Schedule;
 use alyosha_telegram::{Api, Settings, run};
@@ -46,9 +46,15 @@ fn main() -> ExitCode {
             workspace: telegram.workspace,
             schedule: Schedule::new(&paths.data_dir),
             timezone: config.timezone,
-            guests: Some(std::sync::Arc::new(|| {
-                Bridge::spawn_with(std::path::Path::new("alyosha"), &["acp", "--guest"])
-            })),
+            groups: GroupSpawners {
+                guest: Some(std::sync::Arc::new(|| {
+                    Bridge::spawn_with(std::path::Path::new("alyosha"), &["acp", "--guest"])
+                })),
+                trusted: Some(std::sync::Arc::new(|| {
+                    Bridge::spawn_with(std::path::Path::new("alyosha"), &["acp", "--group"])
+                })),
+                trusted_groups: telegram.trusted_groups.iter().map(i64::to_string).collect(),
+            },
         };
         run(
             Api::new(&base, telegram.token.expose()),

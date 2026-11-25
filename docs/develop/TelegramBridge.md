@@ -24,6 +24,7 @@ No bridge depends on Alyosha's library. `alyosha-bridge` depends on the same pin
 owner_id = 123456789                            # your numeric Telegram user ID
 workspace = "/home/mjli/work/alyosha-home"      # absolute
 token = "..."                                   # from @BotFather
+trusted_groups = [-1001234567890]              # optional: groups with your powers
 ```
 
 Load it with `alyosha-config`, which refuses a file that others can read and checks every value. Refuse to start, with a clear error, if the `[telegram]` section is missing. Never log the token. [Configuration](../reference/Configuration.md#telegram)
@@ -96,14 +97,24 @@ Keep the bot's privacy mode on, as @BotFather sets it, so Telegram passes the bo
 
 A group message is a **mention** when its `entities` hold a `mention` whose text is `@` and the bot's username, ignoring case, or a `text_mention` of the bot's user ID, or when it replies to a message from the bot. Drop every other group message without a log line, including commands, which privacy mode also passes. Remove the mention text and trim. If the message replies to someone else's message that has text, put `(Replying to <name>: "<first 500 characters>")` and a line break in front.
 
-For a mention:
+For a mention in a group whose chat ID is in `trusted_groups`, see [Trusted groups](#trusted-groups). For any other mention:
 
 1. Take the group's guest session from the pool, starting `alyosha acp --guest` for it if none runs: `initialize` with `alyosha-telegram`, then `session/new` with the configured workspace, which guest mode ignores.
 2. Send the text as a prompt with the sender `telegram-<from.id>` and the display name, the first and last name, or the username if there is none. A mention with no text and a photo, file, or voice message gets **Only text messages work for now.** and no prompt.
 3. While the group's prompt is open, send `typing` to the group every 5 seconds.
 4. When the response arrives, send the reply to the group as plain text, split like a private reply, with `reply_parameters` naming the mention and `allow_sending_without_reply`. A failed send is logged and dropped. Guest sessions send no tool calls worth showing, so there is no **Working…** message.
 
-The pool keeps one guest child per group ID. Stop a child, closing its input as at shutdown, when its group has had no open prompt for 60 minutes. If a child exits, log it and remove it from the pool; the next mention starts a new one. A guest child never stops the bridge.
+The pool keeps one guest child per group ID. Stop a child, closing its input as at shutdown, when its group has had no open prompt for 60 minutes. If a child exits, log it and remove it from the pool; the next mention starts a new one. A guest child never stops the bridge. Log the chat ID of every mention at info level, so the owner can copy it into `trusted_groups`.
+
+### Trusted groups
+
+For a mention in a trusted group: [Trusted groups design](../design/Channels.md#trusted-groups)
+
+1. Take the group's session from the pool, starting `alyosha acp --group` for it if none runs: create `<workspace>/groups/<chat ID>` if missing, `initialize` with `alyosha-telegram`, then `session/new` with that folder.
+2. Send `<display name>: <text>` as a plain prompt, without `_meta`. Typing and the reply work as for a guest group.
+3. **Approvals.** Send the request to the owner's private chat as usual, with **In group <chat ID>:** and a blank line in front of the title. Give it a request number of its own, so a button press answers the right child. `/cancel` in the private chat cancels only the private session and its requests; a group's requests stay open until answered or expired.
+4. **Jobs.** On a finished job, send **⚙ Job finished:** to the group, prompt the group's session with the result, and send its reply to the group without `reply_parameters`.
+5. The pool never stops a trusted group's child for being idle. If it exits, log it and remove it; the next mention starts a new one.
 
 ## Failures and shutdown
 
@@ -143,6 +154,8 @@ These run under `cargo test` with a fake Bot API server, set through `teloxide`'
 - Send a private message from another user. Check that the agent receives nothing, nothing is sent back, and the sender ID is logged.
 - In a group, send a message without a mention, then one from a stranger that mentions the bot, then one that replies to the bot's message. Check that the first is dropped, that a second, guest agent receives the other two as prompts with the mention removed and `telegram-<id>` senders, that the owner's agent receives nothing, and that each reply goes to the group with `reply_parameters`.
 - Mention the bot in two groups. Check that each group gets its own guest agent.
+- List one group in `trusted_groups` and mention the bot there. Check that a group-mode agent starts in `<workspace>/groups/<chat ID>`, receives `<name>: <text>` without `_meta`, and that its reply goes to the group. Script an approval from it. Check that the question reaches the owner's private chat marked with the group, that the owner's button press answers the group's agent, and that the owner's agent receives nothing.
+- Let the trusted group's agent sit idle past the guest limit. Check that it keeps running.
 - Send an owner message. Check that the agent receives one `session/prompt` with the text and that the reply arrives as plain text.
 - Script two tool calls, the second failing, then a reply. Check that one **Working…** message is created and edited, shows **(failed)** on the second line, and is edited no more than once every 3 seconds.
 - Script a 9,000-character reply. Check that three messages arrive in order and each is under 4,000 characters.
@@ -157,6 +170,7 @@ With a real bot, which needs a token and network access:
 - Run the bridge in the container with the real `alyosha acp`. Ask it to read a file in the workspace. Check that the tool call and the reply appear in Telegram.
 - Message the bot from a second account. Check that nothing comes back.
 - Add the bot to a group. From the second account, mention it, tell it your favorite color, and later ask for it. Check the answer and the file in `memory/users/`.
+- Add the group's chat ID from the log to `trusted_groups` and restart. From the second account, ask it to run `ls` in its workspace. Check that it answers from `groups/<chat ID>` and that a command in `ask` asks you in your private chat.
 - Restart the container. Check that the service comes back on its own.
 
 [Architecture overview](../README.md)

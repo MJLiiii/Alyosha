@@ -16,7 +16,7 @@ updated: 2026-11-24
 The thesis lives in ~/thesis. Build it with `latexmk -pdf main.tex`.
 ```
 
-The store is global. Every workspace sees the same memories. You can read, edit, delete, or back up the files with ordinary tools while Alyosha is stopped. The `owner` directory holds what Alyosha knows about you. Your sessions, in the TUI and your private chats, see only it. Guest sessions in group chats never see it; they use the notes kept for each person in the sibling `users` directory. [People in group chats](#people-in-group-chats)
+The store is global. Every workspace sees the same memories. You can read, edit, delete, or back up the files with ordinary tools while Alyosha is stopped. The `owner` directory holds what Alyosha knows about you. Your sessions, in the TUI and your private chats, see only it. So do the sessions of group chats you list as trusted. Guest sessions in other group chats never see it; they use the notes kept for each person in the sibling `users` directory. [People in group chats](#people-in-group-chats)
 
 ## What the model sees
 

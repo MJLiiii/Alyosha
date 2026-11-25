@@ -3,7 +3,8 @@
 //!
 //! It long-polls the Bot API, so it opens no ports. In private chats it
 //! answers only the owner. In groups it answers anyone who mentions the bot,
-//! through that group's guest session. See `docs/develop/TelegramBridge.md`.
+//! through that group's session: a full one in a trusted group, a guest one
+//! elsewhere. See `docs/develop/TelegramBridge.md`.
 
 use std::{
     collections::HashMap,
@@ -14,7 +15,7 @@ use std::{
 
 use alyosha_bridge::{
     Bridge, Event, Permission,
-    guests::{GuestEvent, GuestPool, IDLE_LIMIT, SpawnGuest},
+    guests::{GroupSpawners, GuestEvent, GuestPool, IDLE_LIMIT},
     split, working_text,
 };
 use alyosha_schedule::Schedule;
@@ -163,8 +164,8 @@ pub struct Settings {
     pub workspace: PathBuf,
     pub schedule: Schedule,
     pub timezone: Tz,
-    /// Starts a group's guest session; `None` turns group chats off.
-    pub guests: Option<SpawnGuest>,
+    /// Starts groups' sessions, and names the trusted groups.
+    pub groups: GroupSpawners,
 }
 
 /// The bot's own account, from `getMe`.
@@ -183,7 +184,8 @@ struct Working {
 
 /// An approval or question waiting for a button.
 struct OpenRequest {
-    number: u32,
+    /// The trusted group whose session asked, or `None` for the owner's.
+    group: Option<String>,
     permission: Permission,
     message: Option<i64>,
     text: String,
@@ -360,12 +362,12 @@ pub async fn run(
         }
     };
     let (mut pool, mut guest_events) = GuestPool::new(
-        settings.guests.clone(),
+        settings.groups.clone(),
         "alyosha-telegram",
         settings.workspace.clone(),
     );
-    // Each open group prompt's chat and the message it answers.
-    let mut group_replies: HashMap<String, (i64, i64)> = HashMap::new();
+    // Each open group prompt's chat and the message it answers, if any.
+    let mut group_replies: HashMap<String, (i64, Option<i64>)> = HashMap::new();
     let commands = json!({"commands": [
         {"command": "new", "description": "Start a fresh session"},
         {"command": "cancel", "description": "Stop the current turn"},
@@ -416,7 +418,8 @@ pub async fn run(
     });
 
     let mut working: HashMap<String, Working> = HashMap::new();
-    let mut requests: HashMap<u64, OpenRequest> = HashMap::new();
+    // Open requests by their button number, from every session.
+    let mut requests: HashMap<u32, OpenRequest> = HashMap::new();
     let mut next_request = 1u32;
     let mut next_job = 1u64;
     let mut typing = tokio::time::interval(Duration::from_secs(5));
@@ -436,11 +439,13 @@ pub async fn run(
                             api.send_reply(group, TEXT_ONLY, message_id).await;
                             continue;
                         };
+                        let group_id = group.to_string();
+                        tracing::info!(group, trusted = pool.is_trusted(&group_id), "a group mention");
                         let key = format!("g{group}:{message_id}");
-                        group_replies.insert(key.clone(), (group, message_id));
+                        group_replies.insert(key.clone(), (group, Some(message_id)));
                         let user = format!("telegram-{sender}");
-                        if let Err(error) = pool.prompt(&group.to_string(), &key, &text, &user, &name).await {
-                            tracing::warn!(group, error = %error, "the guest session did not start");
+                        if let Err(error) = pool.prompt(&group_id, &key, &text, &user, &name).await {
+                            tracing::warn!(group, error = %error, "the group session did not start");
                             group_replies.remove(&key);
                         }
                     }
@@ -451,13 +456,19 @@ pub async fn run(
                     Incoming::Button { query_id, data } => {
                         let _ = api.call("answerCallbackQuery", json!({"callback_query_id": query_id})).await;
                         let Some((number, option)) = data.strip_prefix('r').and_then(|rest| rest.split_once(':')) else { continue };
-                        let found = requests.iter().find(|(_, open)| open.number.to_string() == number).map(|(id, _)| *id);
-                        let Some(id) = found else { continue };
-                        let open = requests.remove(&id).expect("found above");
+                        let Some(number) = number.parse::<u32>().ok() else { continue };
+                        let Some(open) = requests.get(&number) else { continue };
                         let name = open.permission.options.iter().find(|(option_id, _)| option_id == option).map(|(_, name)| name.clone());
                         let Some(name) = name else { continue };
-                        bridge.forget_permission(&open.permission.tool_call_id);
-                        bridge.answer(id, Some(option));
+                        let open = requests.remove(&number).expect("found above");
+                        let asker = match &open.group {
+                            None => Some(&bridge),
+                            Some(group) => pool.bridge(group),
+                        };
+                        if let Some(asker) = asker {
+                            asker.forget_permission(&open.permission.tool_call_id);
+                            asker.answer(open.permission.request, Some(option));
+                        }
                         if let Some(message) = open.message {
                             api.edit(chat, message, &format!("{}\n\nAnswered: {name}", open.text)).await;
                         }
@@ -473,9 +484,12 @@ pub async fn run(
                                 }
                             }
                             "/cancel" => {
-                                let open: Vec<u64> = requests.keys().copied().collect();
-                                bridge.cancel_with_requests(&open);
-                                for (_, open) in requests.drain() {
+                                // Only the private session's; groups' requests stay open.
+                                let numbers: Vec<u32> = requests.iter().filter(|(_, open)| open.group.is_none()).map(|(number, _)| *number).collect();
+                                let ours: Vec<OpenRequest> = numbers.iter().filter_map(|number| requests.remove(number)).collect();
+                                let ids: Vec<u64> = ours.iter().map(|open| open.permission.request).collect();
+                                bridge.cancel_with_requests(&ids);
+                                for open in ours {
                                     if let Some(message) = open.message {
                                         api.edit(chat, message, &format!("{}\n\nCancelled.", open.text)).await;
                                     }
@@ -517,25 +531,15 @@ pub async fn run(
                     Event::Permission(permission) => {
                         let number = next_request;
                         next_request += 1;
-                        let text = if permission.body.is_empty() { permission.title.clone() } else { format!("{}\n\n{}", permission.title, permission.body) };
-                        let rows: Vec<Value> = permission.options.iter().map(|(id, name)| json!([{"text": name, "callback_data": format!("r{number}:{id}")}])).collect();
-                        let ids = api.send_long(chat, &text, Some(json!({"inline_keyboard": rows}))).await;
                         let request = permission.request;
-                        if ids.is_empty() {
+                        match ask_owner(&api, chat, number, None, permission).await {
+                            Some(open) => { requests.insert(number, open); }
                             // Undeliverable: Alyosha treats a cancelled answer as such.
-                            bridge.answer(request, None);
-                            continue;
+                            None => bridge.answer(request, None),
                         }
-                        let last_part = split(&text, PART_LIMIT).pop().unwrap_or_default();
-                        requests.insert(request, OpenRequest { number, permission, message: ids.last().copied(), text: last_part });
                     }
                     Event::PermissionExpired { tool_call_id } => {
-                        let found = requests.iter().find(|(_, open)| open.permission.tool_call_id == tool_call_id).map(|(id, _)| *id);
-                        if let Some(open) = found.and_then(|id| requests.remove(&id))
-                            && let Some(message) = open.message
-                        {
-                            api.edit(chat, message, &format!("{}\n\nExpired — not approved.", open.text)).await;
-                        }
+                        expire(&api, chat, &mut requests, None, &tool_call_id).await;
                     }
                     Event::JobFinished { text, .. } => {
                         let _ = api.send(chat, "⚙ Job finished:", None).await;
@@ -554,11 +558,38 @@ pub async fn run(
                     Event::Finished(finished) => {
                         pool.touch(&group);
                         if let Some((group_chat, message_id)) = group_replies.remove(&finished.key) {
-                            api.send_reply(group_chat, &finished.reply(), message_id).await;
+                            match message_id {
+                                Some(message_id) => api.send_reply(group_chat, &finished.reply(), message_id).await,
+                                None => { api.send_long(group_chat, &finished.reply(), None).await; }
+                            }
                         }
                     }
                     Event::Exited => pool.exited(&group, guest),
-                    // Guest sessions have no approver, jobs, or tool calls to show.
+                    // Only a trusted group's session asks the owner.
+                    Event::Permission(permission) if pool.is_trusted(&group) => {
+                        let number = next_request;
+                        next_request += 1;
+                        let request = permission.request;
+                        match ask_owner(&api, chat, number, Some(&group), permission).await {
+                            Some(open) => { requests.insert(number, open); }
+                            None => if let Some(asker) = pool.bridge(&group) { asker.answer(request, None); },
+                        }
+                    }
+                    Event::PermissionExpired { tool_call_id } => {
+                        expire(&api, chat, &mut requests, Some(&group), &tool_call_id).await;
+                    }
+                    Event::JobFinished { text, .. } if pool.is_trusted(&group) => {
+                        let Ok(group_chat) = group.parse::<i64>() else { continue };
+                        let _ = api.send(group_chat, "⚙ Job finished:", None).await;
+                        let key = format!("gjob{next_job}");
+                        next_job += 1;
+                        group_replies.insert(key.clone(), (group_chat, None));
+                        if !pool.prompt_job(&group, &key, &text) {
+                            group_replies.remove(&key);
+                        }
+                    }
+                    // Guest sessions have no approver or jobs, and no group
+                    // gets tool calls shown.
                     _ => {}
                 }
             }
@@ -587,6 +618,70 @@ pub async fn run(
                 return 0;
             }
         }
+    }
+}
+
+/// Sends an approval or question to the owner's private chat, with a
+/// keyboard numbered `number`, marked with the group that asked. Returns
+/// `None` if it cannot be sent; the caller then answers it `cancelled`.
+async fn ask_owner(
+    api: &Api,
+    chat: i64,
+    number: u32,
+    group: Option<&str>,
+    permission: Permission,
+) -> Option<OpenRequest> {
+    let mut text = if permission.body.is_empty() {
+        permission.title.clone()
+    } else {
+        format!("{}\n\n{}", permission.title, permission.body)
+    };
+    if let Some(group) = group {
+        text = format!("In group {group}:\n\n{text}");
+    }
+    let rows: Vec<Value> = permission
+        .options
+        .iter()
+        .map(|(id, name)| json!([{"text": name, "callback_data": format!("r{number}:{id}")}]))
+        .collect();
+    let ids = api
+        .send_long(chat, &text, Some(json!({"inline_keyboard": rows})))
+        .await;
+    if ids.is_empty() {
+        return None;
+    }
+    let last_part = split(&text, PART_LIMIT).pop().unwrap_or_default();
+    Some(OpenRequest {
+        group: group.map(str::to_owned),
+        permission,
+        message: ids.last().copied(),
+        text: last_part,
+    })
+}
+
+/// Marks the open request of `group`'s session for `tool_call_id` expired.
+async fn expire(
+    api: &Api,
+    chat: i64,
+    requests: &mut HashMap<u32, OpenRequest>,
+    group: Option<&str>,
+    tool_call_id: &str,
+) {
+    let found = requests
+        .iter()
+        .find(|(_, open)| {
+            open.group.as_deref() == group && open.permission.tool_call_id == tool_call_id
+        })
+        .map(|(number, _)| *number);
+    if let Some(open) = found.and_then(|number| requests.remove(&number))
+        && let Some(message) = open.message
+    {
+        api.edit(
+            chat,
+            message,
+            &format!("{}\n\nExpired — not approved.", open.text),
+        )
+        .await;
     }
 }
 

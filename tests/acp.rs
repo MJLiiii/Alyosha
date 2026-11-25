@@ -10,7 +10,7 @@ use std::{
 };
 
 use alyosha::{
-    acp::{FRESH_SESSION_LINE, ServeOptions, serve},
+    acp::{FRESH_SESSION_LINE, Mode, ServeOptions, serve},
     clock::Clock,
     llm_client::ModelError,
 };
@@ -45,10 +45,10 @@ struct Client {
 
 impl Client {
     async fn start(model: Arc<ScriptedModel>) -> Self {
-        Self::start_as(model, false).await
+        Self::start_as(model, Mode::Owner).await
     }
 
-    async fn start_as(model: Arc<ScriptedModel>, guest: bool) -> Self {
+    async fn start_as(model: Arc<ScriptedModel>, mode: Mode) -> Self {
         let root = tempfile::tempdir().unwrap();
         let base = root.path().canonicalize().unwrap();
         let paths = Paths::new(
@@ -73,7 +73,7 @@ impl Client {
             clock: clock.clone(),
             log_file: None,
             renewal_check: Duration::from_millis(50),
-            guest,
+            mode,
         };
         let server = tokio::spawn(serve(their_read, their_write, options));
         let (read, writer) = tokio::io::split(ours);
@@ -250,7 +250,7 @@ async fn guest_sessions_keep_notes_for_each_sender_only() {
     model.reply(vec![text("Noted.")]);
     model.reply(vec![text("Hello Anna.")]);
     model.reply(vec![text("You like tea.")]);
-    let mut client = Client::start_as(model.clone(), true).await;
+    let mut client = Client::start_as(model.clone(), Mode::Guest).await;
     client.initialize(Some("alyosha-telegram")).await;
     let session = client.new_session().await;
     let commands = client.next().await;
@@ -556,4 +556,42 @@ async fn closing_input_ends_the_process_and_every_line_is_json_rpc() {
                 || message.get("error").is_some()
         );
     }
+}
+
+#[tokio::test]
+async fn trusted_group_sessions_are_full_sessions_with_their_own_channel_line() {
+    let model = ScriptedModel::new();
+    model.reply(vec![call("call_r", "read_file", json!({"path": "a.txt"}))]);
+    model.reply(vec![text("It says alpha.")]);
+    let mut client = Client::start_as(model.clone(), Mode::Group).await;
+    client.initialize(Some("alyosha-qq")).await;
+    let session = client.new_session().await;
+    let commands = client.next().await;
+    let names: Vec<&str> = commands["params"]["update"]["availableCommands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|command| command["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["compact", "job"]);
+    // No sender in `_meta` is needed: the bridge names the sender in the text.
+    let id = client.prompt(&session, "Bob: what is in a.txt?").await;
+    let messages = client.until_response(id).await;
+    assert_eq!(messages.last().unwrap()["result"]["stopReason"], "end_turn");
+    let requests = model.requests();
+    assert!(
+        requests[0]
+            .tools
+            .iter()
+            .any(|tool| tool.name == "read_file"),
+        "a trusted group has the owner's tools"
+    );
+    assert!(last_user_text(&requests[0]).ends_with("Bob: what is in a.txt?"));
+    let instruction = &requests[0].system_instruction;
+    assert!(
+        instruction.trim_end().ends_with(
+            "People in a group chat your owner trusts write to you through alyosha-qq. Each message starts with the sender's display name."
+        ),
+        "{instruction}"
+    );
 }
