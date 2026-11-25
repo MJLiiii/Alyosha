@@ -47,6 +47,11 @@ MCP_TOOL_FETCH_CSDN_NAME = "<disabled>"
 MCP_TOOL_FETCH_JUEJIN_NAME = "<disabled>"
 MCP_TOOL_FETCH_LINUXDO_NAME = "<disabled>"
 
+# What guest sessions in group chats may use (docs/design/Channels.md#group-chats).
+# Only servers that reach no account of yours.
+[guest]
+mcp_servers = ["search"]
+
 # The browser (docs/develop/Browser.md). Public pages work with a temporary profile.
 [mcp.servers.chromium]
 command = "playwright-mcp"

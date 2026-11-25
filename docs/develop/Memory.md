@@ -79,6 +79,36 @@ The patterns are a guard against accidents, not a guarantee.
 
 **Scope.** The session `ToolContext` carries the store handle. The tool is available to direct model calls only. The Code Mode host never exposes it, and the shell sandbox does not mount the memory root. [Tool permissions](../reference/ToolPermissions.md#memory-store)
 
+## People's notes
+
+Guest sessions use a second store for the notes Alyosha keeps on each person in group chats. Your sessions never open it, and guest sessions never open the `owner` scope. [People in group chats](../design/Memory.md#people-in-group-chats) · [Guest mode](Channels.md#guest-mode)
+
+```text
+UserNotes
+    open(root: &Path, today) -> UserNotes        # <root>/users
+    read(&self, user: &str) -> Result<Option<Notes>, ToolError>
+    write(&self, user: &str, name: &str, notes: &str) -> Result<WriteKind, ToolError>
+
+Notes { name: String, updated: Date, text: String }
+Sender { id: String, name: String }
+```
+
+- **IDs.** A user ID is the bridge's platform, a hyphen, and the platform's ID: `[a-z]+-[A-Za-z0-9_-]{1,64}`, such as `telegram-123456789`. It maps to `<id>.md`. Reject every other ID. The ACP mode checks it when the prompt arrives, before it reaches the store.
+- **Format.** Front matter with `name`, the sender's display name, and `updated`, then the notes. Names are cut to 64 characters with line breaks and control characters replaced by spaces, so a display name cannot add header lines.
+- **Limits and writes.** Notes hold at most 2 KiB. Check them against the credential patterns of the `memory` tool. Create the directory and files with the same modes, stage and rename as the owner store does, and never follow a symlink.
+
+The guest session's driver keeps the sender of each queued message. When a message's turn starts, the session records that sender as the **speaker**, then builds the opening user entry:
+
+```text
+<clock line>
+Notes on this person (<id>, updated <date>):
+<notes, or "No notes yet.">
+
+<name>: <text>
+```
+
+The `user_memory` tool takes one input, `notes`, the person's complete new notes, and writes the speaker's file with the speaker's current name. It returns `saved` and the notice **Remembered: <name>**. It returns a tool error when there is no speaker, for notes over 2 KiB, and for text that matches a credential pattern. It cannot name a file, so the model can only change the notes of the person it is answering. It is registered only in guest sessions.
+
 ## Verification
 
 Run these against a temporary memory root with a fixed clock.
@@ -87,6 +117,8 @@ Run these against a temporary memory root with a fixed clock.
 - Write `thesis-repo`, read it back, update it, and list. Check `created` then `updated`, the new date, one entry, and the two notices.
 - Try the names `../x`, `A`, and a 65-character name, and a symlink `x.md` pointing outside the root. Each returns a tool error and leaves the filesystem unchanged.
 - Write oversized descriptions and bodies, and a body containing an `sk-` key. Each is rejected and the file is unchanged.
+- In a guest session, queue messages from `telegram-1` and `telegram-2`. Script a `user_memory` call in the second turn. Check that only `telegram-2.md` is written, with the second sender's name, and that the second turn's opening entry carried the first person's notes only in the first turn.
+- Send a sender ID of `../x` and a name containing a line break. Check that the prompt is refused and that a name with a line break is written on one line.
 - Fill the index to its budget. A new write is rejected and an update that keeps the index size succeeds. Exceed the budget by hand-editing files. Check the newest entries appear, followed by the omitted count.
 - Add a file without a header. Check it is skipped in the index, counted in the startup status, and still readable with `read`.
 - Write a memory during a session. Check the system instruction stays byte-identical for the rest of the session and that a new session shows the entry.

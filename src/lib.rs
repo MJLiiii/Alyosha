@@ -22,6 +22,7 @@ pub mod session;
 pub mod skills;
 pub mod tools;
 pub mod tui;
+pub mod user_notes;
 
 use std::{future::Future, pin::Pin};
 

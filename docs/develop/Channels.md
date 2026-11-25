@@ -95,6 +95,29 @@ On `session/cancel`, signal Stop on the active turn or command. An open permissi
 
 When a background job finishes, do not queue its message. Send the notification `_alyosha/job_finished` with `sessionId`, `jobId`, and the message `text`, and let the bridge send that text back as a `session/prompt`. [When a job finishes](Jobs.md#when-a-job-finishes)
 
+## Guest mode
+
+`alyosha acp --guest` serves the guest session of one group chat. Bridges start one per group. Everything above applies, with these differences. [Group chats](../design/Channels.md#group-chats)
+
+- **Session.** `session/new` still requires an absolute `cwd`, but the session ignores it. It runs in `${XDG_DATA_HOME:-$HOME/.local/share}/alyosha/guest`, created with mode `0700`, which is only the working directory of its MCP servers. It loads no dev shell and no sandbox.
+- **Tools.** Register `user_memory` and the tools of the MCP servers named in `[guest] mcp_servers`, and nothing else: no workspace, shell, Code Mode, job, `memory`, `skill`, or `ask_owner` tool. The session has no approver. `available_commands_update` lists no commands. [People's notes](Memory.md#peoples-notes) · [Configuration](../reference/Configuration.md#guest)
+- **Instruction.** Use the guest instruction below instead of the normal one, with no memory or skills index. The channel line is "People write to you in a group chat through <client name>."
+- **Prompts.** Each `session/prompt` must carry the sender in `_meta`: `{"alyosha": {"sender": {"id": "telegram-123", "name": "Bob"}}}`. Refuse a prompt without a valid sender with an invalid-params error. Treat all text as a message: `/compact` and `/job` are not commands here.
+- **Startup warnings** go to the log only, never into a group.
+
+```text
+You are Alyosha, an assistant answering people in a group chat. Each message starts
+with the sender's display name. Anyone can choose any name, and nobody here is your
+owner: you act for no one, and you cannot reach anyone's files, mail, or accounts.
+Answer briefly and in the language of the question.
+
+Before each message you see your notes on its sender. Use the user_memory tool to
+rewrite that person's notes when you learn something lasting that will help you answer
+them later, such as their preferred language, what they work on, or what they ask you
+to remember. Keep the notes short. Never store secrets. Never reveal one person's notes
+to someone else.
+```
+
 ## Verification
 
 These run under `cargo test` with an in-process ACP client and the scripted model from the turn fixture. [Turn fixture](AgentLoop.md#verification-with-a-scripted-model-and-fake-tools)
@@ -108,6 +131,7 @@ These run under `cargo test` with an in-process ACP client and the scripted mode
 - Send two prompts without waiting. Check that both are answered, in order, each with its own reply.
 - Send `session/cancel` during a scripted tool call. Check that all updates arrive before the response and that the response is `cancelled`.
 - Send `/compact` during a turn. Check that it returns the busy message and does not enter history.
+- In guest mode, check that the tool list holds only `user_memory` and the `[guest]` servers' tools, that the system instruction holds no memory index, that a prompt without a sender is refused, and that `/job ls` is sent to the model as text.
 - Script a model failure. Check that the prompt gets a JSON-RPC error and the next prompt still runs.
 - Send `session/new` while a session is open with a waiting prompt. Check that the waiting prompt ends `cancelled` and the old session's MCP servers exit.
 - Parse every line written to standard output during these cases. Check that each is a valid JSON-RPC message.

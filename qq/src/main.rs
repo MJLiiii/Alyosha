@@ -65,6 +65,9 @@ fn main() -> ExitCode {
             reply_chunk: qq.reply_chunk as usize,
             schedule: Schedule::new(&paths.data_dir),
             timezone: config.timezone,
+            guests: Some(Arc::new(|| {
+                Bridge::spawn_with(std::path::Path::new("alyosha"), &["acp", "--guest"])
+            })),
         };
         tokio::select! {
             code = run(api, bridge, events, messages, settings) => code,

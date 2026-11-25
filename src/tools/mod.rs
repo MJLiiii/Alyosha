@@ -109,6 +109,20 @@ pub struct SessionServices {
     pub approval_timeout: Option<std::time::Duration>,
     pub mcp: Option<crate::mcp::McpManager>,
     pub notify: Option<Notify>,
+    /// In a guest session, the notes kept on each person.
+    pub users: Option<crate::user_notes::UserNotes>,
+    /// In a guest session, the sender of the message the active turn answers.
+    pub speaker: std::sync::Mutex<Option<crate::agent_state::Sender>>,
+}
+
+impl SessionServices {
+    /// The sender of the message the active turn answers.
+    pub fn speaker(&self) -> Option<crate::agent_state::Sender> {
+        self.speaker
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
 }
 
 /// A handler's successful result.

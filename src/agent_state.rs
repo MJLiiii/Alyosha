@@ -38,11 +38,21 @@ pub enum MessageOrigin {
     Job,
 }
 
+/// Who wrote a message in a group chat: a platform user ID, such as
+/// `telegram-123`, and their display name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Sender {
+    pub id: String,
+    pub name: String,
+}
+
 /// A message waiting in the queue for its turn.
 #[derive(Debug, Clone, PartialEq)]
 pub struct UserMessage {
     pub id: MessageId,
     pub origin: MessageOrigin,
+    /// In a guest session, the person who wrote it.
+    pub sender: Option<Sender>,
     /// The text as submitted, without the clock line.
     pub text: String,
     /// When it was submitted. Its clock line shows this time, not the time

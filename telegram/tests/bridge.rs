@@ -131,6 +131,12 @@ impl BotApi {
             }
         }
         self.calls.lock().unwrap().push((method.to_owned(), body));
+        if method == "getMe" {
+            return (
+                200,
+                json!({"ok": true, "result": {"id": 999, "is_bot": true, "username": "AlyoshaBot"}}),
+            );
+        }
         let mut next = self.next_message.lock().unwrap();
         *next += 1;
         (200, json!({"ok": true, "result": {"message_id": *next}}))
@@ -244,9 +250,13 @@ async fn agent(
     }
 }
 
+/// The log of each guest agent the bridge started, in order.
+type GuestLogs = Arc<Mutex<Vec<Arc<Mutex<Vec<Value>>>>>>;
+
 struct Harness {
     api: Arc<BotApi>,
     log: Arc<Mutex<Vec<Value>>>,
+    guests: GuestLogs,
     task: tokio::task::JoinHandle<u8>,
     _root: tempfile::TempDir,
 }
@@ -261,16 +271,28 @@ async fn start() -> Harness {
     tokio::spawn(agent(agent_read, agent_write, log.clone()));
     let (bridge, events) = Bridge::connect(bridge_read, bridge_write);
     let root = tempfile::tempdir().unwrap();
+    let guests: GuestLogs = Arc::default();
+    let spawned = guests.clone();
     let settings = Settings {
         owner_id: OWNER,
         workspace: root.path().to_owned(),
         schedule: Schedule::new(root.path()),
         timezone: chrono_tz::Europe::Amsterdam,
+        guests: Some(Arc::new(move || {
+            let (ours, theirs) = tokio::io::duplex(1 << 20);
+            let (agent_read, agent_write) = tokio::io::split(ours);
+            let (bridge_read, bridge_write) = tokio::io::split(theirs);
+            let log = Arc::new(Mutex::new(Vec::new()));
+            spawned.lock().unwrap().push(log.clone());
+            tokio::spawn(agent(agent_read, agent_write, log));
+            Ok(Bridge::connect(bridge_read, bridge_write))
+        })),
     };
     let task = tokio::spawn(run(Api::new(&url, "TOKEN"), bridge, events, settings));
     Harness {
         api,
         log,
+        guests,
         task,
         _root: root,
     }
@@ -446,4 +468,82 @@ async fn an_exited_agent_is_reported_and_the_bridge_fails() {
             .texts()
             .contains(&"Alyosha stopped unexpectedly. Restarting with a new session.".to_owned())
     );
+}
+
+fn group_message(id: i64, chat: i64, from: i64, text: &str, mention: bool) -> Value {
+    let entities = if mention {
+        json!([{"type": "mention", "offset": 0, "length": 11}])
+    } else {
+        json!([])
+    };
+    json!({"update_id": id, "message": {"message_id": id, "from": {"id": from, "first_name": "Bob"}, "chat": {"id": chat, "type": "supergroup"}, "text": text, "entities": entities}})
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn group_mentions_go_to_each_group_guest_session() {
+    let harness = start().await;
+    harness
+        .api
+        .push(group_message(1, -100, 7, "nobody asked you", false));
+    harness
+        .api
+        .push(group_message(2, -100, 7, "@AlyoshaBot hello", true));
+    harness
+        .api
+        .push(group_message(3, -200, OWNER, "@AlyoshaBot hello", true));
+    let api = harness.api.clone();
+    wait_for(|| {
+        api.calls("sendMessage")
+            .iter()
+            .filter(|body| body["text"] == "Hi there." && body.get("reply_parameters").is_some())
+            .count()
+            == 2
+    })
+    .await;
+    assert!(
+        prompts(&harness.log).is_empty(),
+        "the owner's session hears nothing"
+    );
+    let guests: Vec<Arc<Mutex<Vec<Value>>>> = harness.guests.lock().unwrap().clone();
+    assert_eq!(guests.len(), 2, "one guest per group");
+    let first = guests[0].lock().unwrap().clone();
+    let prompt = first
+        .iter()
+        .find(|message| message["method"] == "session/prompt")
+        .unwrap();
+    assert_eq!(prompt["params"]["prompt"][0]["text"], "hello");
+    assert_eq!(
+        prompt["params"]["_meta"]["alyosha"]["sender"],
+        json!({"id": "telegram-7", "name": "Bob"})
+    );
+    assert_eq!(
+        first
+            .iter()
+            .filter(|message| message["method"] == "session/prompt")
+            .count(),
+        1,
+        "the unaddressed message was dropped"
+    );
+    let second = guests[1].lock().unwrap().clone();
+    assert!(second.iter().any(
+        |message| message["params"]["_meta"]["alyosha"]["sender"]["id"]
+            == format!("telegram-{OWNER}")
+    ));
+    let replies: Vec<Value> = harness
+        .api
+        .calls("sendMessage")
+        .into_iter()
+        .filter(|body| body["text"] == "Hi there.")
+        .collect();
+    let mut answered: Vec<(i64, i64)> = replies
+        .iter()
+        .map(|body| {
+            (
+                body["chat_id"].as_i64().unwrap(),
+                body["reply_parameters"]["message_id"].as_i64().unwrap(),
+            )
+        })
+        .collect();
+    answered.sort();
+    assert_eq!(answered, [(-200, 3), (-100, 2)]);
 }

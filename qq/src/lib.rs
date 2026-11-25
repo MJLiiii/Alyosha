@@ -3,8 +3,8 @@
 //!
 //! QQ allows four replies per message within 60 minutes and no editing, so
 //! the bridge sends no progress messages, keeps replies it cannot deliver,
-//! and sends them first when the owner next writes. See
-//! `docs/develop/QQBridge.md`.
+//! and sends them first when the owner next writes. Group @-mentions from
+//! anyone go to the group's guest session. See `docs/develop/QQBridge.md`.
 
 pub mod gateway;
 
@@ -22,6 +22,7 @@ use crate::gateway::GatewayError;
 pub const REPLY_LIMIT: usize = 4;
 pub const CUT_OFF_NOTE: &str = "(cut off — ask me to continue)";
 pub const MORE_LATER_NOTE: &str = "(more when you next write)";
+pub const TEXT_ONLY: &str = "Only text messages work for now.";
 
 /// Codes that mean the passive window for a message is closed.
 const PASSIVE_CLOSED: [i64; 3] = [40034128, 40034005, 304103];

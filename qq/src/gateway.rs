@@ -7,7 +7,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use alyosha_bridge::{Bridge, Event, Permission};
+use alyosha_bridge::{
+    Bridge, Event, Permission,
+    guests::{GuestEvent, GuestPool, IDLE_LIMIT, SpawnGuest},
+};
 use alyosha_schedule::Schedule;
 use chrono::Utc;
 use chrono_tz::Tz;
@@ -17,8 +20,8 @@ use tokio::sync::{Mutex, mpsc};
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::{
-    ReplyTo, Seen, SendError, Sender, deliver, parse_answer, parse_token, permission_text,
-    reply_parts,
+    ReplyTo, Seen, SendError, Sender, TEXT_ONLY, deliver, parse_answer, parse_token,
+    permission_text, reply_parts,
 };
 
 /// `GROUP_AND_C2C_EVENT`.
@@ -106,13 +109,24 @@ impl QqApi {
 
     /// Sends one message to a user.
     pub async fn send_to(&self, openid: &str, body: Value) -> Result<(), SendError> {
+        self.send_message(&format!("/v2/users/{openid}/messages"), body)
+            .await
+    }
+
+    /// Sends one message to a group.
+    pub async fn send_group(&self, group_openid: &str, body: Value) -> Result<(), SendError> {
+        self.send_message(&format!("/v2/groups/{group_openid}/messages"), body)
+            .await
+    }
+
+    async fn send_message(&self, path: &str, body: Value) -> Result<(), SendError> {
         let token = self.token().await.map_err(|error| SendError {
             code: -1,
             message: error.to_string(),
         })?;
         let response = self
             .http
-            .post(format!("{}/v2/users/{openid}/messages", self.api))
+            .post(format!("{}{path}", self.api))
             .header("Authorization", format!("QQBot {token}"))
             .json(&body)
             .send()
@@ -154,6 +168,37 @@ impl Sender for ToOwner {
     }
 }
 
+/// Sends to a group.
+pub struct ToGroup {
+    pub api: Arc<QqApi>,
+    pub group_openid: String,
+}
+
+impl Sender for ToGroup {
+    fn send(&self, body: Value) -> BoxFuture<'_, Result<(), SendError>> {
+        Box::pin(self.api.send_group(&self.group_openid, body))
+    }
+}
+
+/// A message from the gateway.
+#[derive(Debug, Clone)]
+pub enum QqMessage {
+    C2c(C2cMessage),
+    Group(GroupMessage),
+}
+
+/// A group message that @-mentions the bot; QQ has removed the @.
+#[derive(Debug, Clone)]
+pub struct GroupMessage {
+    pub id: String,
+    pub group_openid: String,
+    pub member_openid: String,
+    /// The member's nickname, or `QQ user` when QQ sends none.
+    pub name: String,
+    pub content: String,
+    pub has_attachments: bool,
+}
+
 /// A private message from the gateway.
 #[derive(Debug, Clone)]
 pub struct C2cMessage {
@@ -165,7 +210,7 @@ pub struct C2cMessage {
 
 /// Keeps a WebSocket connection to the gateway and forwards private
 /// messages. Returns only on a fatal error.
-pub async fn listen(api: Arc<QqApi>, messages: mpsc::UnboundedSender<C2cMessage>) -> GatewayError {
+pub async fn listen(api: Arc<QqApi>, messages: mpsc::UnboundedSender<QqMessage>) -> GatewayError {
     let mut session: Option<(String, Option<u64>)> = None;
     let mut backoff = Duration::from_secs(1);
     loop {
@@ -192,7 +237,7 @@ enum Stop {
 
 async fn connect_once(
     api: &QqApi,
-    messages: &mpsc::UnboundedSender<C2cMessage>,
+    messages: &mpsc::UnboundedSender<QqMessage>,
     session: &mut Option<(String, Option<u64>)>,
 ) -> Result<(), Stop> {
     let url = api.get("/gateway").await.map_err(Stop::Retry)?["url"]
@@ -253,12 +298,15 @@ async fn connect_once(
                         }
                         Some("C2C_MESSAGE_CREATE") => {
                             let d = &payload["d"];
-                            let _ = messages.send(C2cMessage {
+                            let _ = messages.send(QqMessage::C2c(C2cMessage {
                                 id: d["id"].as_str().unwrap_or_default().to_owned(),
                                 openid: d["author"]["user_openid"].as_str().unwrap_or_default().to_owned(),
                                 content: d["content"].as_str().unwrap_or_default().trim().to_owned(),
                                 has_attachments: d["attachments"].as_array().is_some_and(|items| !items.is_empty()),
-                            });
+                            }));
+                        }
+                        Some("GROUP_AT_MESSAGE_CREATE") => {
+                            let _ = messages.send(QqMessage::Group(group_message(&payload["d"])));
                         }
                         _ => {}
                     },
@@ -275,6 +323,28 @@ async fn connect_once(
     }
 }
 
+/// Reads a `GROUP_AT_MESSAGE_CREATE` dispatch's `d`.
+pub fn group_message(d: &Value) -> GroupMessage {
+    let name = d["author"]["member_nickname"]
+        .as_str()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .unwrap_or("QQ user");
+    GroupMessage {
+        id: d["id"].as_str().unwrap_or_default().to_owned(),
+        group_openid: d["group_openid"].as_str().unwrap_or_default().to_owned(),
+        member_openid: d["author"]["member_openid"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned(),
+        name: name.to_owned(),
+        content: d["content"].as_str().unwrap_or_default().trim().to_owned(),
+        has_attachments: d["attachments"]
+            .as_array()
+            .is_some_and(|items| !items.is_empty()),
+    }
+}
+
 /// The bridge's settings, from `[qq]`.
 pub struct Settings {
     pub owner_openid: String,
@@ -282,6 +352,8 @@ pub struct Settings {
     pub reply_chunk: usize,
     pub schedule: Schedule,
     pub timezone: Tz,
+    /// Starts a group's guest session; `None` turns group chats off.
+    pub guests: Option<SpawnGuest>,
 }
 
 struct OpenRequest {
@@ -295,7 +367,7 @@ pub async fn run(
     api: Arc<QqApi>,
     bridge: Bridge,
     mut events: mpsc::UnboundedReceiver<Event>,
-    mut messages: mpsc::UnboundedReceiver<C2cMessage>,
+    mut messages: mpsc::UnboundedReceiver<QqMessage>,
     settings: Settings,
 ) -> u8 {
     if let Err(error) = bridge.initialize("alyosha-qq").await {
@@ -345,6 +417,14 @@ pub async fn run(
         ));
     }
     let seen = Seen::default();
+    let (mut pool, mut guest_events) = GuestPool::new(
+        settings.guests.clone(),
+        "alyosha-qq",
+        settings.workspace.clone(),
+    );
+    // Each open group prompt's group and the reply context of its mention.
+    let mut group_replies: HashMap<String, (String, ReplyTo)> = HashMap::new();
+    let mut idle_check = tokio::time::interval(Duration::from_secs(60));
     let mut requests: HashMap<u64, OpenRequest> = HashMap::new();
     let mut expired_notice = false;
     let mut next_job = 1u64;
@@ -355,7 +435,31 @@ pub async fn run(
     loop {
         tokio::select! {
             message = messages.recv() => {
-                let Some(message) = message else { return 1 };
+                let message = match message {
+                    None => return 1,
+                    Some(QqMessage::C2c(message)) => message,
+                    Some(QqMessage::Group(message)) => {
+                        if !seen.first(&message.id, Instant::now()) {
+                            continue;
+                        }
+                        let to = ToGroup { api: api.clone(), group_openid: message.group_openid.clone() };
+                        let mut reply = ReplyTo::message(&message.id);
+                        if message.content.is_empty() && message.has_attachments {
+                            if deliver(&to, &[TEXT_ONLY.to_owned()], &mut reply).await.is_some() {
+                                tracing::warn!(group = %message.group_openid, "a group reply failed; dropped");
+                            }
+                            continue;
+                        }
+                        let key = format!("g{}:{}", message.group_openid, message.id);
+                        group_replies.insert(key.clone(), (message.group_openid.clone(), reply));
+                        let user = format!("qq-{}", message.member_openid);
+                        if let Err(error) = pool.prompt(&message.group_openid, &key, &message.content, &user, &message.name).await {
+                            tracing::warn!(group = %message.group_openid, error = %error, "the guest session did not start");
+                            group_replies.remove(&key);
+                        }
+                        continue;
+                    }
+                };
                 if !seen.first(&message.id, Instant::now()) {
                     continue;
                 }
@@ -376,7 +480,7 @@ pub async fn run(
                     let _ = deliver(&owner, &["Expired — not approved.".to_owned()], &mut reply).await;
                 }
                 if message.content.is_empty() && message.has_attachments {
-                    let _ = deliver(&owner, &["Only text messages work for now.".to_owned()], &mut reply).await;
+                    let _ = deliver(&owner, &[TEXT_ONLY.to_owned()], &mut reply).await;
                     continue;
                 }
                 // An answer to an open request.
@@ -470,6 +574,25 @@ pub async fn run(
                     }
                 }
             }
+            guest = guest_events.recv() => {
+                let Some(GuestEvent { group, guest, event }) = guest else { continue };
+                match event {
+                    Event::Finished(finished) => {
+                        pool.touch(&group);
+                        if let Some((group_openid, mut reply)) = group_replies.remove(&finished.key) {
+                            let to = ToGroup { api: api.clone(), group_openid };
+                            let parts = reply_parts(&finished.reply(), chunk);
+                            if deliver(&to, &parts, &mut reply).await.is_some() {
+                                tracing::warn!(group = %group, "a group reply failed; dropped");
+                            }
+                        }
+                    }
+                    Event::Exited => pool.exited(&group, guest),
+                    // Guest sessions have no approver, jobs, or tool calls to show.
+                    _ => {}
+                }
+            }
+            _ = idle_check.tick() => pool.stop_idle(IDLE_LIMIT).await,
             _ = typing.tick() => {
                 let open = bridge.open_keys();
                 let map = replies.lock().await;
@@ -482,9 +605,43 @@ pub async fn run(
                 }
             }
             _ = terminate.recv() => {
+                pool.shutdown().await;
                 bridge.shutdown().await;
                 return 0;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn group_mentions_carry_the_group_member_and_name() {
+        let d = json!({
+            "id": "m1",
+            "group_openid": "G1",
+            "content": " what is 2+2? ",
+            "author": {"member_openid": "M7", "member_nickname": "Bob"},
+            "attachments": [],
+        });
+        let message = group_message(&d);
+        assert_eq!(
+            (
+                message.id.as_str(),
+                message.group_openid.as_str(),
+                message.member_openid.as_str(),
+                message.name.as_str(),
+                message.content.as_str(),
+            ),
+            ("m1", "G1", "M7", "Bob", "what is 2+2?")
+        );
+        assert!(!message.has_attachments);
+        let unnamed = group_message(
+            &json!({"id": "m2", "group_openid": "G1", "author": {"member_openid": "M8"}, "content": "", "attachments": [{"url": "x"}]}),
+        );
+        assert_eq!(unnamed.name, "QQ user");
+        assert!(unnamed.content.is_empty() && unnamed.has_attachments);
     }
 }

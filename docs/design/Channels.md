@@ -40,7 +40,7 @@ A protocol of Alyosha's own, like the JSON-lines RPC mode of the pi agent, would
 
 ## Trust
 
-The bridge is a program you install and configure, so it is trusted like Alyosha's configuration. Whoever the bridge lets through can make Alyosha run shell commands, write files, and use websites with your saved sign-ins. A bridge must answer only your own account on the messaging app and ignore everyone else without replying. The bridge holds the bot token. Like every other secret, it stays out of the Nix store. [Saved sign-ins](Browser.md#signing-in-to-your-accounts)
+The bridge is a program you install and configure, so it is trusted like Alyosha's configuration. Whoever the bridge lets into your session can make Alyosha run shell commands, write files, and use websites with your saved sign-ins. A bridge lets only your own account into your session, in a private chat, and ignores everyone else's private messages without replying. Other people reach Alyosha only by mentioning it in a group, where a separate guest session without your tools answers them. [Group chats](#group-chats) The bridge holds the bot token. Like every other secret, it stays out of the Nix store. [Saved sign-ins](Browser.md#signing-in-to-your-accounts)
 
 Alyosha does not authenticate the bridge, because only programs that can already start `alyosha acp` as your user can talk to it.
 
@@ -66,7 +66,7 @@ containers.alyosha
      └─ alyosha acp (child process) ── same agent core
 ```
 
-- **Only you.** It answers only your Telegram user ID, and only in a private chat with the bot. Messages from anyone else, and from any group, are dropped without a reply.
+- **Only you in private.** In a private chat it answers only your Telegram user ID. Private messages from anyone else are dropped without a reply. In groups it answers anyone who mentions it, through a guest session. [Group chats](#group-chats)
 - **One long-lived session**, started fresh each night at 04:00 when idle. `/new` starts a fresh one at any time. `/cancel` stops the current turn. `/compact` and `/job` pass through to Alyosha. `/tasks` lists scheduled tasks. Telegram shows the five in its command menu.
 - **Runs scheduled tasks.** Tasks for Telegram run as prompts in this session, marked **⏰ Scheduled**. [Scheduled tasks](Schedule.md#running-tasks) Finished background jobs come in the same way, marked **⚙ Job finished**. [Background jobs](Jobs.md)
 - **You see it working.** While a turn runs, the chat shows Telegram's typing indicator and one **Working…** message listing tool calls as they happen, such as `MCP: chromium.browser_click`.
@@ -92,7 +92,7 @@ The official API limits replies, and that shapes the bridge:
 
 Approvals and questions arrive as text, and you answer with `/yes`, `/no`, or the number of a choice, because buttons need extra permission from QQ. The request uses one of the four replies, and your answer gives the turn a fresh set of four. [Approvals](Approvals.md)
 
-Otherwise it behaves like the Telegram bridge. It answers only your account, identified by the `openid` QQ assigns you for this bot, and drops everything else without replying. It runs one long-lived session with `/new`, `/cancel`, `/compact`, `/job`, and `/tasks`, runs QQ's scheduled tasks, accepts text only, and starts fresh after a crash. Its settings go in a `[qq]` section of `config.toml`, together with the bot's secret.
+Otherwise it behaves like the Telegram bridge. In private chats it answers only your account, identified by the `openid` QQ assigns you for this bot, and drops other private messages without replying. In groups it answers anyone who @-mentions it, through a guest session. [Group chats](#group-chats) It runs one long-lived session with `/new`, `/cancel`, `/compact`, `/job`, and `/tasks`, runs QQ's scheduled tasks, accepts text only, and starts fresh after a crash. Its settings go in a `[qq]` section of `config.toml`, together with the bot's secret.
 
 A bot registered by an individual can be used privately by its creator and by test users added in the bot's settings, without Tencent's review. That covers personal use.
 
@@ -102,13 +102,39 @@ Each bridge runs its own `alyosha acp` session. The two share GPROXY and the mem
 
 The two bridges share their ACP side in a small library crate that only bridges use: starting `alyosha acp`, opening sessions, sending prompts, and collecting each prompt's updates and reply. Each bridge adds only its messaging app's side. [Package layout](../develop/TelegramBridge.md#package-layout)
 
+## Group chats
+
+Anyone can add the bot to a group and @-mention it there. Alyosha replies to that message in the group. The bridges hear nothing else in a group: Telegram's privacy mode and QQ's group API pass a bot only the messages addressed to it.
+
+```text
+group A ── @Alyosha ──► bridge ──► alyosha acp --guest (group A's session) ─┐
+group B ── @Alyosha ──► bridge ──► alyosha acp --guest (group B's session) ─┼─► memory/users/<platform>-<user id>.md
+your private chat ────► bridge ──► alyosha acp (your session, your tools) ──┘   (not shared with your own memory)
+```
+
+- **What counts as a mention.** In Telegram, `@` followed by the bot's username, or a reply to one of Alyosha's messages. In QQ, an @ of the bot. A Telegram mention that replies to someone else's message brings the start of that message along, so "@Alyosha is this true?" works.
+- **A guest session per group.** Each group gets its own `alyosha acp --guest` child, started at the first mention. It keeps the group's conversation, so follow-up questions work, and starts fresh at 04:00 like your session. A group that has been quiet for an hour has its session stopped, so a bot added to many groups does not keep a process for each. Groups never see each other's conversations.
+- **Guests get no tools of yours.** A guest session has no shell, no files, no background jobs, no skills, no `ask_owner`, and not your memory. Its only MCP servers are the ones `[guest]` in the configuration lists, normally just web search. Search is read-only and needs no account, so a guest cannot reach your mail, your sign-ins, or the machine. [Web search](WebSearch.md) · [Configuration](../reference/Configuration.md#guest)
+- **Everyone is a guest in a group, you included.** Your powers stay in your private chat. When you mention Alyosha in a group, you are one more member.
+- **A memory for each person.** Alyosha keeps one notes file per person, named by their platform and user ID, and shows it to the model with each of their messages. The model updates it with the `user_memory` tool, which writes only the file of the person whose message it is answering. [People in group chats](Memory.md#people-in-group-chats)
+- **Names are not proof.** Each message reaches the model as `<display name>: <text>`. Anyone can pick any display name, so the instruction tells the model that nobody in a group is its owner and that it acts for no one there.
+- **Replies are plain text.** The reply is split like a private reply. QQ allows five replies per group message within 60 minutes, and the bridge uses at most four, as for private messages. A group reply that fails is logged and dropped, never kept for later.
+- **Nothing else in groups.** Commands, approvals, scheduled tasks, background jobs, and the **Working…** message are for your private chat only. A mention with a photo or file and no text gets **Only text messages work for now.**
+- **Cost.** Every group mention is a model request on your account. There is no allowlist and no rate limit in v1. If strangers' use becomes a problem, add a limit per group or per person.
+
+A QQ user's ID is the `member_openid` QQ gives them, which may differ from group to group. If it does, a QQ user has a separate notes file in each group. The first check with a real QQ bot settles this. Telegram user IDs are the same everywhere.
+
 ## Deferred
 
 - Photos, files, and voice messages.
 - Resuming a session after a restart with `session/load`, which needs saved history.
 - Carrying the previous session's summary into the nightly fresh session.
 - Choosing the time of the nightly fresh session.
-- Several sessions at once, such as one per chat thread.
+- Several sessions at once for you, such as one per chat thread.
+- More tools for guests, such as the browser with a profile that holds no sign-ins.
+- Rate limits for group mentions, and an allowlist of groups.
+- Answering group messages that do not mention Alyosha.
+- Typing indicators in QQ groups.
 - Turning the TUI into an ACP client, so that it is a bridge too.
 
 [Chat channels implementation guide](../develop/Channels.md)

@@ -1,8 +1,9 @@
 //! `alyosha-telegram`: relays private messages between the owner's Telegram
 //! account and one `alyosha acp` child.
 //!
-//! It long-polls the Bot API, so it opens no ports, and answers only the
-//! owner in a private chat. See `docs/develop/TelegramBridge.md`.
+//! It long-polls the Bot API, so it opens no ports. In private chats it
+//! answers only the owner. In groups it answers anyone who mentions the bot,
+//! through that group's guest session. See `docs/develop/TelegramBridge.md`.
 
 use std::{
     collections::HashMap,
@@ -11,7 +12,11 @@ use std::{
     time::{Duration, Instant},
 };
 
-use alyosha_bridge::{Bridge, Event, Permission, split, working_text};
+use alyosha_bridge::{
+    Bridge, Event, Permission,
+    guests::{GuestEvent, GuestPool, IDLE_LIMIT, SpawnGuest},
+    split, working_text,
+};
 use alyosha_schedule::Schedule;
 use chrono::Utc;
 use chrono_tz::Tz;
@@ -21,6 +26,9 @@ use tokio::sync::mpsc;
 pub const HELP: &str = "Write to Alyosha here. Commands:\n/new start a fresh session\n/cancel stop the current turn\n/compact summarize older conversation\n/job <command> start a background job\n/tasks list scheduled tasks";
 const PART_LIMIT: usize = 4000;
 const EDIT_EVERY: Duration = Duration::from_secs(3);
+/// How much of a replied-to message a group prompt carries.
+const QUOTE_LIMIT: usize = 500;
+pub const TEXT_ONLY: &str = "Only text messages work for now.";
 
 /// The Bot API, with retries: it waits out a `429` and backs off on network
 /// errors up to a minute, so no reply is dropped by a temporary error.
@@ -123,6 +131,22 @@ impl Api {
         ids
     }
 
+    /// Sends a reply in a group, split like any reply, each part answering
+    /// `reply_to`. Failures are logged by `call` and dropped.
+    pub async fn send_reply(&self, chat: i64, text: &str, reply_to: i64) {
+        for part in split(text, PART_LIMIT) {
+            let body = json!({
+                "chat_id": chat,
+                "text": part,
+                "reply_parameters": {"message_id": reply_to, "allow_sending_without_reply": true},
+            });
+            if self.call("sendMessage", body).await.is_err() {
+                tracing::warn!(chat, "a group reply failed; dropped");
+                return;
+            }
+        }
+    }
+
     pub async fn edit(&self, chat: i64, message: i64, text: &str) {
         let _ = self
             .call(
@@ -139,6 +163,15 @@ pub struct Settings {
     pub workspace: PathBuf,
     pub schedule: Schedule,
     pub timezone: Tz,
+    /// Starts a group's guest session; `None` turns group chats off.
+    pub guests: Option<SpawnGuest>,
+}
+
+/// The bot's own account, from `getMe`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Bot {
+    pub id: i64,
+    pub username: String,
 }
 
 /// A **Working…** message and its throttled edits.
@@ -172,9 +205,96 @@ pub enum Incoming {
         sender: Option<i64>,
         chat_type: String,
     },
+    /// A group message that mentions the bot or replies to it. `text` is
+    /// `None` for a photo, file, or other message without text.
+    Group {
+        chat: i64,
+        message_id: i64,
+        sender: i64,
+        name: String,
+        text: Option<String>,
+    },
+    /// A group message not addressed to the bot.
+    Unaddressed,
 }
 
-pub fn classify(update: &Value, owner: i64) -> Incoming {
+/// The sender's display name: first and last name, or the username.
+fn display_name(user: &Value) -> String {
+    let full = [user["first_name"].as_str(), user["last_name"].as_str()]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if !full.trim().is_empty() {
+        return full.trim().to_owned();
+    }
+    user["username"].as_str().unwrap_or("someone").to_owned()
+}
+
+/// A group message for the bot: mentioned by username or `text_mention`, or
+/// a reply to the bot. The mentions are removed. A reply to someone else
+/// brings the start of their message along.
+fn group_message(message: &Value, bot: &Bot) -> Incoming {
+    let (text, entities, has_text) = match message["text"].as_str() {
+        Some(text) => (text, &message["entities"], true),
+        None => (
+            message["caption"].as_str().unwrap_or_default(),
+            &message["caption_entities"],
+            false,
+        ),
+    };
+    // Entity offsets count UTF-16 code units.
+    let units: Vec<u16> = text.encode_utf16().collect();
+    let handle = format!("@{}", bot.username);
+    let mut mentions: Vec<(usize, usize)> = entities
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|entity| {
+            let start = usize::try_from(entity["offset"].as_u64()?).ok()?;
+            let end = start + usize::try_from(entity["length"].as_u64()?).ok()?;
+            let slice = units.get(start..end)?;
+            let mentioned = match entity["type"].as_str() {
+                Some("mention") => String::from_utf16_lossy(slice).eq_ignore_ascii_case(&handle),
+                Some("text_mention") => entity["user"]["id"].as_i64() == Some(bot.id),
+                _ => false,
+            };
+            mentioned.then_some((start, end))
+        })
+        .collect();
+    let replied = &message["reply_to_message"];
+    let to_bot = replied["from"]["id"].as_i64() == Some(bot.id);
+    if mentions.is_empty() && !to_bot {
+        return Incoming::Unaddressed;
+    }
+    mentions.sort_unstable();
+    let mut kept = Vec::with_capacity(units.len());
+    let mut position = 0;
+    for (start, end) in mentions {
+        if start >= position {
+            kept.extend_from_slice(&units[position..start]);
+            position = end;
+        }
+    }
+    kept.extend_from_slice(&units[position.min(units.len())..]);
+    let mut body = String::from_utf16_lossy(&kept).trim().to_owned();
+    if !to_bot && let Some(quoted) = replied["text"].as_str() {
+        let start: String = quoted.chars().take(QUOTE_LIMIT).collect();
+        body = format!(
+            "(Replying to {}: \"{start}\")\n{body}",
+            display_name(&replied["from"])
+        );
+    }
+    Incoming::Group {
+        chat: message["chat"]["id"].as_i64().unwrap_or_default(),
+        message_id: message["message_id"].as_i64().unwrap_or_default(),
+        sender: message["from"]["id"].as_i64().unwrap_or_default(),
+        name: display_name(&message["from"]),
+        text: has_text.then_some(body),
+    }
+}
+
+pub fn classify(update: &Value, owner: i64, bot: &Bot) -> Incoming {
     if let Some(query) = update.get("callback_query") {
         let from = query["from"]["id"].as_i64();
         if from == Some(owner) {
@@ -194,6 +314,9 @@ pub fn classify(update: &Value, owner: i64) -> Incoming {
         .as_str()
         .unwrap_or("unknown")
         .to_owned();
+    if chat_type == "group" || chat_type == "supergroup" {
+        return group_message(message, bot);
+    }
     if chat_type != "private" || sender != Some(owner) {
         return Incoming::Ignored { sender, chat_type };
     }
@@ -226,6 +349,23 @@ pub async fn run(
             .await;
         return 1;
     }
+    let bot = match api.call("getMe", json!({})).await {
+        Ok(me) => Bot {
+            id: me["id"].as_i64().unwrap_or_default(),
+            username: me["username"].as_str().unwrap_or_default().to_owned(),
+        },
+        Err(error) => {
+            tracing::error!(error = %error, "getMe failed");
+            return 1;
+        }
+    };
+    let (mut pool, mut guest_events) = GuestPool::new(
+        settings.guests.clone(),
+        "alyosha-telegram",
+        settings.workspace.clone(),
+    );
+    // Each open group prompt's chat and the message it answers.
+    let mut group_replies: HashMap<String, (i64, i64)> = HashMap::new();
     let commands = json!({"commands": [
         {"command": "new", "description": "Start a fresh session"},
         {"command": "cancel", "description": "Stop the current turn"},
@@ -281,6 +421,7 @@ pub async fn run(
     let mut next_job = 1u64;
     let mut typing = tokio::time::interval(Duration::from_secs(5));
     let mut flush = tokio::time::interval(Duration::from_millis(500));
+    let mut idle_check = tokio::time::interval(Duration::from_secs(60));
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .expect("a SIGTERM handler");
 
@@ -288,11 +429,25 @@ pub async fn run(
         tokio::select! {
             update = updates.recv() => {
                 let Some(update) = update else { continue };
-                match classify(&update, chat) {
+                match classify(&update, chat, &bot) {
+                    Incoming::Unaddressed => {}
+                    Incoming::Group { chat: group, message_id, sender, name, text } => {
+                        let Some(text) = text else {
+                            api.send_reply(group, TEXT_ONLY, message_id).await;
+                            continue;
+                        };
+                        let key = format!("g{group}:{message_id}");
+                        group_replies.insert(key.clone(), (group, message_id));
+                        let user = format!("telegram-{sender}");
+                        if let Err(error) = pool.prompt(&group.to_string(), &key, &text, &user, &name).await {
+                            tracing::warn!(group, error = %error, "the guest session did not start");
+                            group_replies.remove(&key);
+                        }
+                    }
                     Incoming::Ignored { sender, chat_type } => {
                         tracing::info!(sender = sender.unwrap_or_default(), chat_type = %chat_type, "dropped a message from someone else");
                     }
-                    Incoming::NotText => { let _ = api.send(chat, "Only text messages work for now.", None).await; }
+                    Incoming::NotText => { let _ = api.send(chat, TEXT_ONLY, None).await; }
                     Incoming::Button { query_id, data } => {
                         let _ = api.call("answerCallbackQuery", json!({"callback_query_id": query_id})).await;
                         let Some((number, option)) = data.strip_prefix('r').and_then(|rest| rest.split_once(':')) else { continue };
@@ -393,11 +548,29 @@ pub async fn run(
                     }
                 }
             }
+            guest = guest_events.recv() => {
+                let Some(GuestEvent { group, guest, event }) = guest else { continue };
+                match event {
+                    Event::Finished(finished) => {
+                        pool.touch(&group);
+                        if let Some((group_chat, message_id)) = group_replies.remove(&finished.key) {
+                            api.send_reply(group_chat, &finished.reply(), message_id).await;
+                        }
+                    }
+                    Event::Exited => pool.exited(&group, guest),
+                    // Guest sessions have no approver, jobs, or tool calls to show.
+                    _ => {}
+                }
+            }
             _ = typing.tick() => {
                 if !bridge.open_keys().is_empty() {
                     let _ = api.call("sendChatAction", json!({"chat_id": chat, "action": "typing"})).await;
                 }
+                for group in pool.busy_groups() {
+                    let _ = api.call("sendChatAction", json!({"chat_id": group.parse::<i64>().unwrap_or_default(), "action": "typing"})).await;
+                }
             }
+            _ = idle_check.tick() => pool.stop_idle(IDLE_LIMIT).await,
             _ = flush.tick() => {
                 for view in working.values_mut() {
                     if view.last_edit.elapsed() >= EDIT_EVERY
@@ -409,6 +582,7 @@ pub async fn run(
                 }
             }
             _ = terminate.recv() => {
+                pool.shutdown().await;
                 bridge.shutdown().await;
                 return 0;
             }
@@ -420,14 +594,85 @@ pub async fn run(
 mod tests {
     use super::*;
 
+    fn bot() -> Bot {
+        Bot {
+            id: 999,
+            username: "AlyoshaBot".into(),
+        }
+    }
+
+    #[test]
+    fn group_messages_count_only_when_addressed_to_the_bot() {
+        let group = |text: &str, entities: Value, reply: Value| json!({"message": {"message_id": 5, "from": {"id": 7, "first_name": "Bob", "last_name": "B"}, "chat": {"id": -100, "type": "supergroup"}, "text": text, "entities": entities, "reply_to_message": reply}});
+        let plain = group("hello all", json!([]), Value::Null);
+        assert!(matches!(
+            classify(&plain, 42, &bot()),
+            Incoming::Unaddressed
+        ));
+        // "é" is one UTF-16 unit and "😀" two, so offsets count units.
+        let text = "😀é @alyoshabot what is 2+2?";
+        let mention = group(
+            text,
+            json!([{"type": "mention", "offset": 4, "length": 11}]),
+            Value::Null,
+        );
+        match classify(&mention, 42, &bot()) {
+            Incoming::Group {
+                chat,
+                message_id,
+                sender,
+                name,
+                text,
+            } => {
+                assert_eq!((chat, message_id, sender), (-100, 5, 7));
+                assert_eq!(name, "Bob B");
+                assert_eq!(text.as_deref(), Some("😀é  what is 2+2?"));
+            }
+            _ => panic!("a mention is for the bot"),
+        }
+        let other = group(
+            "@someone else",
+            json!([{"type": "mention", "offset": 0, "length": 8}]),
+            Value::Null,
+        );
+        assert!(matches!(
+            classify(&other, 42, &bot()),
+            Incoming::Unaddressed
+        ));
+        let reply = group(
+            "and why?",
+            json!([]),
+            json!({"from": {"id": 999}, "text": "4"}),
+        );
+        assert!(
+            matches!(classify(&reply, 42, &bot()), Incoming::Group { text: Some(text), .. } if text == "and why?")
+        );
+        let quoted = group(
+            "@AlyoshaBot is this true?",
+            json!([{"type": "mention", "offset": 0, "length": 11}]),
+            json!({"from": {"id": 8, "first_name": "Anna"}, "text": "The moon is cheese."}),
+        );
+        assert!(
+            matches!(classify(&quoted, 42, &bot()), Incoming::Group { text: Some(text), .. }
+            if text == "(Replying to Anna: \"The moon is cheese.\")\nis this true?")
+        );
+        let photo = json!({"message": {"message_id": 6, "from": {"id": 7}, "chat": {"id": -100, "type": "group"}, "photo": [], "caption": "@AlyoshaBot look", "caption_entities": [{"type": "mention", "offset": 0, "length": 11}]}});
+        assert!(matches!(
+            classify(&photo, 42, &bot()),
+            Incoming::Group { text: None, .. }
+        ));
+    }
+
     #[test]
     fn only_the_owner_in_a_private_chat_gets_through() {
         let owner = 42;
         let private = json!({"message": {"message_id": 1, "from": {"id": 42}, "chat": {"type": "private"}, "text": "hi"}});
-        assert!(matches!(classify(&private, owner), Incoming::Text { text, .. } if text == "hi"));
+        assert!(
+            matches!(classify(&private, owner, &bot()), Incoming::Text { text, .. } if text == "hi")
+        );
         let stranger = json!({"message": {"message_id": 2, "from": {"id": 7}, "chat": {"type": "private"}, "text": "hi"}});
         assert!(matches!(
-            classify(&stranger, owner),
+            classify(&stranger, owner, &bot()),
             Incoming::Ignored {
                 sender: Some(7),
                 ..
@@ -435,15 +680,23 @@ mod tests {
         ));
         let group = json!({"message": {"message_id": 3, "from": {"id": 42}, "chat": {"type": "group"}, "text": "hi"}});
         assert!(
-            matches!(classify(&group, owner), Incoming::Ignored { chat_type, .. } if chat_type == "group")
+            matches!(classify(&group, owner, &bot()), Incoming::Unaddressed),
+            "the owner is a guest in groups too"
         );
+        let channel = json!({"message": {"message_id": 3, "from": {"id": 42}, "chat": {"type": "channel"}, "text": "hi"}});
+        assert!(matches!(
+            classify(&channel, owner, &bot()),
+            Incoming::Ignored { .. }
+        ));
         let photo = json!({"message": {"message_id": 4, "from": {"id": 42}, "chat": {"type": "private"}, "photo": []}});
-        assert!(matches!(classify(&photo, owner), Incoming::NotText));
+        assert!(matches!(classify(&photo, owner, &bot()), Incoming::NotText));
         let press = json!({"callback_query": {"id": "q", "from": {"id": 42}, "data": "r1:0"}});
-        assert!(matches!(classify(&press, owner), Incoming::Button { data, .. } if data == "r1:0"));
+        assert!(
+            matches!(classify(&press, owner, &bot()), Incoming::Button { data, .. } if data == "r1:0")
+        );
         let other_press = json!({"callback_query": {"id": "q", "from": {"id": 9}, "data": "r1:0"}});
         assert!(matches!(
-            classify(&other_press, owner),
+            classify(&other_press, owner, &bot()),
             Incoming::Ignored { .. }
         ));
     }

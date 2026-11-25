@@ -54,6 +54,10 @@ The `code` string contains an async JavaScript function that takes `tools` and r
 
 `command` is `list`, `read`, `write`, or `delete`. `write` creates or replaces a whole memory from `name`, `description`, and `content`, and Alyosha sets its date. Successful writes and deletes return a notice that the TUI shows in the status area. The handler uses the session's memory store, not the Environment Interface. [Memory tool contract](../develop/Memory.md#memory-tool)
 
+### `user_memory`
+
+Only in guest sessions, which answer group chats. `notes` replaces the complete notes of the person whose message the turn answers, at most 2 KiB. The tool has no input naming the person: Alyosha takes it from the message's sender. Successful writes return a notice. [People's notes](../develop/Memory.md#peoples-notes)
+
 ### `skill`
 
 With no `name`, list every valid skill with its description. With a `name`, return a header with the path of its `SKILL.md` and its other files under `/skills/<name>/`, followed by the instructions without the front matter. An invalid or missing skill returns a tool error. The handler uses the session's skill store, not the Environment Interface. [Skill tool contract](../develop/Skills.md#skill-tool)

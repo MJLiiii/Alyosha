@@ -45,6 +45,10 @@ struct Client {
 
 impl Client {
     async fn start(model: Arc<ScriptedModel>) -> Self {
+        Self::start_as(model, false).await
+    }
+
+    async fn start_as(model: Arc<ScriptedModel>, guest: bool) -> Self {
         let root = tempfile::tempdir().unwrap();
         let base = root.path().canonicalize().unwrap();
         let paths = Paths::new(
@@ -69,6 +73,7 @@ impl Client {
             clock: clock.clone(),
             log_file: None,
             renewal_check: Duration::from_millis(50),
+            guest,
         };
         let server = tokio::spawn(serve(their_read, their_write, options));
         let (read, writer) = tokio::io::split(ours);
@@ -219,6 +224,120 @@ async fn new_sessions_need_an_existing_absolute_folder() {
         .collect();
     assert_eq!(names, ["compact", "job"]);
     let _ = &client.projects;
+}
+
+/// The opening user entry of a request's last turn.
+fn last_user_text(request: &alyosha::llm_client::ModelRequest) -> String {
+    request
+        .history
+        .iter()
+        .rev()
+        .find_map(|entry| match entry {
+            alyosha::agent_state::HistoryEntry::User(user) => Some(user.text.clone()),
+            _ => None,
+        })
+        .unwrap()
+}
+
+#[tokio::test]
+async fn guest_sessions_keep_notes_for_each_sender_only() {
+    let model = ScriptedModel::new();
+    model.reply(vec![call(
+        "call_n",
+        "user_memory",
+        json!({"notes": "Likes tea."}),
+    )]);
+    model.reply(vec![text("Noted.")]);
+    model.reply(vec![text("Hello Anna.")]);
+    model.reply(vec![text("You like tea.")]);
+    let mut client = Client::start_as(model.clone(), true).await;
+    client.initialize(Some("alyosha-telegram")).await;
+    let session = client.new_session().await;
+    let commands = client.next().await;
+    assert_eq!(
+        commands["params"]["update"]["availableCommands"],
+        json!([]),
+        "guests get no commands"
+    );
+
+    // A prompt without a sender is refused.
+    let id = client.prompt(&session, "hi").await;
+    let response = client.until_response(id).await.pop().unwrap();
+    assert_eq!(response["error"]["code"], -32602);
+    for bad in ["../x", "telegram"] {
+        let id = client
+            .request("session/prompt", json!({"sessionId": session, "prompt": [{"type": "text", "text": "hi"}], "_meta": {"alyosha": {"sender": {"id": bad, "name": "X"}}}}))
+            .await;
+        let response = client.until_response(id).await.pop().unwrap();
+        assert_eq!(response["error"]["code"], -32602, "{bad}");
+    }
+
+    let from = |id: &str, name: &str, text: &str| json!({"sessionId": session, "prompt": [{"type": "text", "text": text}], "_meta": {"alyosha": {"sender": {"id": id, "name": name}}}});
+    // Commands are plain text here.
+    let id = client
+        .request(
+            "session/prompt",
+            from("telegram-1", "Bob", "/job ls; I like tea"),
+        )
+        .await;
+    let messages = client.until_response(id).await;
+    assert_eq!(messages.last().unwrap()["result"]["stopReason"], "end_turn");
+    let id = client
+        .request("session/prompt", from("telegram-2", "Anna", "hi"))
+        .await;
+    client.until_response(id).await;
+    let id = client
+        .request(
+            "session/prompt",
+            from("telegram-1", "Bob", "what do I like?"),
+        )
+        .await;
+    client.until_response(id).await;
+
+    let requests = model.requests();
+    let tools: Vec<&str> = requests[0]
+        .tools
+        .iter()
+        .map(|tool| tool.name.as_str())
+        .collect();
+    assert_eq!(tools, ["user_memory"]);
+    let instruction = &requests[0].system_instruction;
+    assert!(!instruction.contains("## Memory"), "{instruction}");
+    assert!(
+        instruction
+            .trim_end()
+            .ends_with("People write to you in a group chat through alyosha-telegram."),
+        "{instruction}"
+    );
+    let first = last_user_text(&requests[0]);
+    assert!(
+        first.ends_with(
+            "Notes on this person (telegram-1): No notes yet.\n\nBob: /job ls; I like tea"
+        ),
+        "{first}"
+    );
+    let anna = last_user_text(&requests[2]);
+    assert!(
+        anna.ends_with("Notes on this person (telegram-2): No notes yet.\n\nAnna: hi"),
+        "{anna}"
+    );
+    let again = last_user_text(&requests[3]);
+    assert!(
+        again.contains("Likes tea.\n\nBob: what do I like?"),
+        "{again}"
+    );
+    let users = client
+        ._root
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join("data/alyosha/memory/users");
+    let bob = fs::read_to_string(users.join("telegram-1.md")).unwrap();
+    assert!(
+        bob.starts_with("---\nname: Bob\n") && bob.ends_with("Likes tea."),
+        "{bob}"
+    );
+    assert!(!users.join("telegram-2.md").exists());
 }
 
 #[tokio::test]

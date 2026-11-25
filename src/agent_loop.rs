@@ -21,8 +21,8 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     agent_state::{
         ActiveTurn, ActiveWork, AgentState, CallId, ContextCheckpoint, HistoryEntry, MessageId,
-        MessageOrigin, ToolCall, ToolOutcome, ToolResultEntry, TurnOutcome, TurnPhase, UserEntry,
-        UserMessage,
+        MessageOrigin, Sender, ToolCall, ToolOutcome, ToolResultEntry, TurnOutcome, TurnPhase,
+        UserEntry, UserMessage,
     },
     approvals::{Approver, ObservedApprover, OwnerRequest},
     clock::{Clock, clock_line},
@@ -251,7 +251,7 @@ impl SessionDriver {
                 };
                 match delivery {
                     JobDelivery::Queue => {
-                        session.enqueue(finished.text, MessageOrigin::Job, Some(finished.id));
+                        session.enqueue(finished.text, MessageOrigin::Job, Some(finished.id), None);
                     }
                     JobDelivery::Report => session.emit(SessionEvent::JobFinished {
                         job_id: finished.id,
@@ -267,7 +267,15 @@ impl SessionDriver {
     /// its ID.
     pub fn submit(&self, text: impl Into<String>) -> MessageId {
         self.session
-            .enqueue(text.into(), MessageOrigin::Owner, None)
+            .enqueue(text.into(), MessageOrigin::Owner, None, None)
+    }
+
+    /// Queues a group member's message in a guest session. When its turn
+    /// starts, the sender becomes the speaker whose notes `user_memory`
+    /// writes, and the opening entry carries their notes.
+    pub fn submit_from(&self, text: impl Into<String>, sender: Sender) -> MessageId {
+        self.session
+            .enqueue(text.into(), MessageOrigin::Owner, None, Some(sender))
     }
 
     /// Signals Stop to the active turn or command. Queued messages stay
@@ -467,13 +475,20 @@ async fn consume(session: Arc<Session>) {
 }
 
 impl Session {
-    fn enqueue(&self, text: String, origin: MessageOrigin, job_id: Option<String>) -> MessageId {
+    fn enqueue(
+        &self,
+        text: String,
+        origin: MessageOrigin,
+        job_id: Option<String>,
+        sender: Option<Sender>,
+    ) -> MessageId {
         let id = {
             let mut state = self.lock_state();
             let id = MessageId(self.last_message_id.fetch_add(1, Ordering::Relaxed) + 1);
             state.pending_messages.push_back(UserMessage {
                 id,
                 origin,
+                sender,
                 text,
                 submitted_at: self.clock.now(),
             });
@@ -573,13 +588,24 @@ impl Session {
         model: &str,
         cancel: &CancellationToken,
     ) -> TurnEnd {
+        // In a guest session the sender becomes the speaker for this turn,
+        // and their notes go in front of their message.
+        *self
+            .services
+            .speaker
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = message.sender.clone();
+        let body = match (&message.sender, &self.services.users) {
+            (Some(sender), Some(users)) => users.opening(sender, &message.text),
+            _ => message.text.clone(),
+        };
         let opening = UserEntry {
             message_id: message.id,
             origin: message.origin,
             text: format!(
                 "{}\n{}",
                 clock_line(message.submitted_at, self.timezone),
-                message.text
+                body
             ),
         };
         let opening_index = {

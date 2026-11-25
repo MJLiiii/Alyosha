@@ -7,6 +7,7 @@
 //! newline-delimited JSON-RPC to the child directly. See
 //! `docs/develop/TelegramBridge.md` and `docs/develop/Schedule.md#the-runner`.
 
+pub mod guests;
 pub mod runner;
 
 use std::{
@@ -148,8 +149,16 @@ impl Bridge {
     /// Starts `program acp` with piped standard input and output. Its
     /// standard error goes to the bridge's own.
     pub fn spawn(program: &Path) -> std::io::Result<(Self, mpsc::UnboundedReceiver<Event>)> {
+        Self::spawn_with(program, &["acp"])
+    }
+
+    /// Starts `program` with `args`, such as `acp --guest`, like `spawn`.
+    pub fn spawn_with(
+        program: &Path,
+        args: &[&str],
+    ) -> std::io::Result<(Self, mpsc::UnboundedReceiver<Event>)> {
         let mut child = Command::new(program)
-            .arg("acp")
+            .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -264,6 +273,17 @@ impl Bridge {
     /// Sends a prompt at once. Its updates and response arrive as events
     /// tagged with `key`.
     pub fn prompt(&self, key: &str, text: &str) {
+        self.send_prompt(key, text, None);
+    }
+
+    /// Sends a group member's prompt to a guest session, with its sender in
+    /// `_meta`. See `docs/develop/Channels.md#guest-mode`.
+    pub fn prompt_from(&self, key: &str, text: &str, sender_id: &str, sender_name: &str) {
+        let meta = json!({"alyosha": {"sender": {"id": sender_id, "name": sender_name}}});
+        self.send_prompt(key, text, Some(meta));
+    }
+
+    fn send_prompt(&self, key: &str, text: &str, meta: Option<Value>) {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let session = {
             let mut shared = self.lock();
@@ -274,12 +294,16 @@ impl Bridge {
             shared.prompt_requests.insert(id, key.to_owned());
             shared.session.clone().unwrap_or_default()
         };
+        let mut params = json!({
+            "sessionId": session,
+            "prompt": [{"type": "text", "text": text}],
+        });
+        if let Some(meta) = meta {
+            params["_meta"] = meta;
+        }
         let _ = self.out.send(
-            json!({"jsonrpc": "2.0", "id": id, "method": "session/prompt", "params": {
-                "sessionId": session,
-                "prompt": [{"type": "text", "text": text}],
-            }})
-            .to_string(),
+            json!({"jsonrpc": "2.0", "id": id, "method": "session/prompt", "params": params})
+                .to_string(),
         );
     }
 

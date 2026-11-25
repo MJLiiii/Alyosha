@@ -46,6 +46,9 @@ fn main() -> ExitCode {
             workspace: telegram.workspace,
             schedule: Schedule::new(&paths.data_dir),
             timezone: config.timezone,
+            guests: Some(std::sync::Arc::new(|| {
+                Bridge::spawn_with(std::path::Path::new("alyosha"), &["acp", "--guest"])
+            })),
         };
         run(
             Api::new(&base, telegram.token.expose()),

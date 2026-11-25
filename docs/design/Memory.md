@@ -16,7 +16,7 @@ updated: 2026-11-24
 The thesis lives in ~/thesis. Build it with `latexmk -pdf main.tex`.
 ```
 
-The store is global. Every workspace sees the same memories. You can read, edit, delete, or back up the files with ordinary tools while Alyosha is stopped. The `owner` directory is the only scope in v1. Group chats can later add sibling scopes, and a session sees only its own scope.
+The store is global. Every workspace sees the same memories. You can read, edit, delete, or back up the files with ordinary tools while Alyosha is stopped. The `owner` directory holds what Alyosha knows about you. Your sessions, in the TUI and your private chats, see only it. Guest sessions in group chats never see it; they use the notes kept for each person in the sibling `users` directory. [People in group chats](#people-in-group-chats)
 
 ## What the model sees
 
@@ -38,6 +38,25 @@ The tool rejects text that looks like a credential, such as a private key or an 
 
 Only direct model calls can use `memory`. Code Mode scripts and shell commands cannot reach the store. [Tool permissions](../reference/ToolPermissions.md#memory-store)
 
+## People in group chats
+
+In group chats anyone can talk to Alyosha, and it keeps one Markdown file of notes for each person, in `${XDG_DATA_HOME:-$HOME/.local/share}/alyosha/memory/users/`. The file is named by the platform and the person's user ID, such as `telegram-123456789.md` or `qq-<member_openid>.md`, because display names change and can be copied. [Group chats](Channels.md#group-chats)
+
+```markdown
+---
+name: Bob
+updated: 2026-11-25
+---
+Prefers answers in Chinese. Studies physics in Delft.
+```
+
+- **One file, not an index.** A person's notes are short, at most 2 KiB, so there is no index. Each message from that person reaches the model with their whole notes file in front of it. A message from someone without notes says so.
+- **Written only for the speaker.** The model rewrites the notes with the `user_memory` tool. Alyosha decides whose file it writes, from the sender the bridge reports for the message being answered, so nobody can make Alyosha change another person's notes. The header's name is the person's display name at the time of the last write. [Built-in tool contracts](../reference/BuiltInTools.md#user_memory)
+- **What goes in.** The guest instruction tells the model to note what helps it answer that person later: the language they prefer, what they work on, what they asked it to remember. It never stores secrets, and the tool rejects text that looks like a credential, as the `memory` tool does.
+- **Not private from the group.** Notes come from what a person said in a group, and they enter that group's conversation when the person writes. Tell people not to ask Alyosha to remember anything they would not say in the group.
+
+The notes are not mixed with your own memory in either direction. You can read, edit, or delete the files with ordinary tools.
+
 ## Deferred
 
 - Recall of past sessions, which requires persistent history.
@@ -45,5 +64,7 @@ Only direct model calls can use `memory`. Code Mode scripts and shell commands c
 - Per-workspace memory.
 - Approval for writes after the turn has read untrusted content.
 - A `/memory` command for listing and pruning.
+- A way for a person to see or clear their own notes from the chat.
+- Linking one person's IDs across platforms or QQ groups.
 
 [Memory implementation guide](../develop/Memory.md)

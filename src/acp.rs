@@ -26,11 +26,12 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     BoxFuture,
     agent_loop::{JobDelivery, SessionDriver, SessionEvent, Status},
-    agent_state::{MessageId, TurnOutcome},
+    agent_state::{MessageId, Sender, TurnOutcome},
     approvals::{Approver, OwnerAnswer, OwnerRequest},
     clock::Clock,
     llm_client::ModelClient,
     session::{self, FrontEnd},
+    user_notes::valid_user_id,
 };
 
 pub const PROTOCOL_VERSION: u64 = 1;
@@ -53,6 +54,9 @@ pub struct ServeOptions {
     pub log_file: Option<PathBuf>,
     /// How often to check for the nightly fresh session.
     pub renewal_check: Duration,
+    /// `alyosha acp --guest`: a group chat's guest session.
+    /// See `docs/develop/Channels.md#guest-mode`.
+    pub guest: bool,
 }
 
 /// The connection's writer: one line per message, in order.
@@ -327,7 +331,13 @@ impl Agent {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .as_ref()
-            .map(|name| format!("The owner is talking to you through {name}."))
+            .map(|name| {
+                if self.options.guest {
+                    format!("People write to you in a group chat through {name}.")
+                } else {
+                    format!("The owner is talking to you through {name}.")
+                }
+            })
     }
 
     async fn new_session(self: &Arc<Self>, id: Value, params: &Value) {
@@ -358,6 +368,13 @@ impl Agent {
     }
 
     fn available_commands(&self, session_id: &str) {
+        if self.options.guest {
+            self.out.update(
+                session_id,
+                json!({"sessionUpdate": "available_commands_update", "availableCommands": []}),
+            );
+            return;
+        }
         self.out.update(
             session_id,
             json!({"sessionUpdate": "available_commands_update", "availableCommands": [
@@ -388,26 +405,23 @@ impl Agent {
             .session_id
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = session_id.to_owned();
-        let started = session::start_with_clock(
-            &config,
-            &self.options.paths,
-            workspace,
-            (self.options.model)(&config),
-            FrontEnd {
-                approver: Some(Arc::new(AcpApprover {
-                    out: self.out.clone(),
-                    session_id: self.session_id.clone(),
-                    open_requests: self.open_requests.clone(),
-                })),
-                job_delivery: JobDelivery::Report,
-                channel_line: self.channel_line(),
-                log_file: self.options.log_file.clone(),
-                on_loading_dev_shell: None,
-            },
-            self.options.clock.clone(),
-        )
-        .await
-        .map_err(|error| error.to_string())?;
+        let started = if self.options.guest {
+            // Startup warnings stay in the log, never in a group.
+            warnings.clear();
+            let mut started = session::start_guest(
+                &config,
+                &self.options.paths,
+                (self.options.model)(&config),
+                self.channel_line(),
+                self.options.clock.clone(),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+            started.warnings.clear();
+            started
+        } else {
+            self.open_owner(&config, workspace).await?
+        };
         warnings.extend(started.warnings);
         let renewal = CancellationToken::new();
         *self.session.lock().await = Some(Open {
@@ -431,6 +445,33 @@ impl Agent {
         let workspace = workspace.to_owned();
         tokio::spawn(async move { agent.watch_renewal(workspace, renewal).await });
         Ok(())
+    }
+
+    async fn open_owner(
+        self: &Arc<Self>,
+        config: &Config,
+        workspace: &std::path::Path,
+    ) -> Result<session::Started, String> {
+        session::start_with_clock(
+            config,
+            &self.options.paths,
+            workspace,
+            (self.options.model)(config),
+            FrontEnd {
+                approver: Some(Arc::new(AcpApprover {
+                    out: self.out.clone(),
+                    session_id: self.session_id.clone(),
+                    open_requests: self.open_requests.clone(),
+                })),
+                job_delivery: JobDelivery::Report,
+                channel_line: self.channel_line(),
+                log_file: self.options.log_file.clone(),
+                on_loading_dev_shell: None,
+            },
+            self.options.clock.clone(),
+        )
+        .await
+        .map_err(|error| error.to_string())
     }
 
     /// Ends the open session: queued prompts end cancelled, MCP servers
@@ -468,6 +509,26 @@ impl Agent {
             }
         }
         let text = parts.join("\n\n");
+        if self.options.guest {
+            // A group member's message: never a command, always with its sender.
+            let sender = &params["_meta"]["alyosha"]["sender"];
+            let id_text = sender["id"].as_str().unwrap_or_default();
+            if !valid_user_id(id_text) {
+                self.out.error(
+                    &id,
+                    -32602,
+                    "a guest prompt needs _meta.alyosha.sender with a valid id",
+                );
+                return;
+            }
+            let sender = Sender {
+                id: id_text.to_owned(),
+                name: sender["name"].as_str().unwrap_or_default().to_owned(),
+            };
+            let message_id = open.driver.submit_from(text, sender);
+            open.prompts.push_back((id, Waiting::Turn(message_id)));
+            return;
+        }
         let trimmed = text.trim();
         if trimmed == "/compact" {
             open.prompts.push_back((id, Waiting::Compact));
@@ -622,7 +683,11 @@ impl Agent {
             }
             self.renewing.store(true, Ordering::SeqCst);
             self.end_session().await;
-            let warnings = vec![FRESH_SESSION_LINE.to_owned()];
+            let warnings = if self.options.guest {
+                Vec::new()
+            } else {
+                vec![FRESH_SESSION_LINE.to_owned()]
+            };
             match self.open(&workspace, &session_id, warnings).await {
                 Ok(()) => {
                     tracing::info!("started the nightly fresh session");
@@ -642,8 +707,9 @@ fn chunk(text: &str) -> Value {
     json!({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": text}})
 }
 
-/// Runs `alyosha acp` on standard input and output. Returns the exit status.
-pub fn run() -> u8 {
+/// Runs `alyosha acp`, or `alyosha acp --guest` for a group chat, on
+/// standard input and output. Returns the exit status.
+pub fn run(guest: bool) -> u8 {
     let paths = match Paths::from_env() {
         Ok(paths) => paths,
         Err(error) => {
@@ -658,7 +724,12 @@ pub fn run() -> u8 {
             return 2;
         }
     };
-    let log_file = alyosha_config::logging::init("alyosha-acp", config.timezone, &paths).ok();
+    let program = if guest {
+        "alyosha-acp-guest"
+    } else {
+        "alyosha-acp"
+    };
+    let log_file = alyosha_config::logging::init(program, config.timezone, &paths).ok();
     let config_paths = paths.clone();
     let options = ServeOptions {
         paths: paths.clone(),
@@ -673,6 +744,7 @@ pub fn run() -> u8 {
         clock: Arc::new(crate::clock::SystemClock),
         log_file,
         renewal_check: Duration::from_secs(60),
+        guest,
     };
     let runtime = tokio::runtime::Runtime::new().expect("a Tokio runtime starts");
     runtime.block_on(serve(tokio::io::stdin(), tokio::io::stdout(), options));

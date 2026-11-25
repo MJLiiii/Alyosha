@@ -7,6 +7,7 @@
 //! `docs/develop/AgentLoop.md#session-driver`.
 
 use std::{
+    os::unix::fs::DirBuilderExt,
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -35,6 +36,7 @@ use crate::{
         builtin::{edit_file_tool, read_file_tool, run_command_tool, write_file_tool},
         code_mode::execute_code_tool,
     },
+    user_notes::{GUEST_INSTRUCTION, UserNotes, user_memory_tool},
 };
 
 /// How long the dev shell may take to load.
@@ -269,7 +271,7 @@ pub async fn start_with_clock(
         approver: front_end.approver,
         approval_timeout: Some(Duration::from_secs(config.approvals.timeout_minutes * 60)),
         mcp: Some(mcp),
-        notify: None,
+        ..SessionServices::default()
     };
     let (driver, events) = SessionDriver::start(SessionSetup {
         provider: config.model.provider.clone(),
@@ -296,6 +298,83 @@ pub async fn start_with_clock(
         driver,
         events,
         workspace,
+        model: config.model.name.clone(),
+        warnings,
+    })
+}
+
+/// Opens a guest session for a group chat: only `user_memory` and the MCP
+/// servers `[guest]` lists, no workspace, sandbox, memory index, skills,
+/// jobs, or approver. Its MCP servers run in `<data>/guest`.
+/// See `docs/develop/Channels.md#guest-mode`.
+pub async fn start_guest(
+    config: &Config,
+    paths: &Paths,
+    client: Arc<dyn ModelClient>,
+    channel_line: Option<String>,
+    clock: Arc<dyn Clock>,
+) -> Result<Started, StartupError> {
+    let folder = paths.data_dir.join("guest");
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&folder)?;
+    let mut warnings = Vec::new();
+    let servers = config.mcp.only(&config.guest.mcp_servers);
+    let (mcp, mcp_warnings) = McpManager::start(&servers, &folder).await;
+    let mut registry = ToolRegistry::new();
+    registry.register(user_memory_tool())?;
+    let mut problems = mcp_warnings;
+    for tool in mcp.tools() {
+        let name = tool.definition.name.clone();
+        // `[guest]` refuses servers with tools in `ask`; check again here.
+        if tool.definition.requires_approval {
+            problems.push(format!("{name}: needs approval, which guests cannot give"));
+            continue;
+        }
+        if let Err(error) = registry.register(tool) {
+            problems.push(format!("{name}: {error}"));
+        }
+    }
+    if !problems.is_empty() {
+        warnings.push(format!("MCP: {}", problems.join("; ")));
+    }
+    let mut system_instruction = GUEST_INSTRUCTION.to_owned();
+    if let Some(line) = &channel_line {
+        system_instruction.push('\n');
+        system_instruction.push_str(line);
+        system_instruction.push('\n');
+    }
+    let timezone = config.timezone;
+    let services = SessionServices {
+        mcp: Some(mcp),
+        users: Some(UserNotes::open(
+            &paths.data_dir.join("memory"),
+            Arc::new(move || Utc::now().with_timezone(&timezone).date_naive()),
+        )),
+        ..SessionServices::default()
+    };
+    let (driver, events) = SessionDriver::start(SessionSetup {
+        provider: config.model.provider.clone(),
+        model: config.model.name.clone(),
+        timezone: config.timezone,
+        client,
+        registry,
+        clock,
+        system_instruction,
+        limits: RouteLimits::for_model(&config.model.name),
+        services,
+        jobs: None,
+        job_delivery: JobDelivery::Report,
+    });
+    for warning in &warnings {
+        tracing::warn!(warning = %warning, "guest startup warning");
+    }
+    tracing::info!(model = %config.model.name, "guest session started");
+    Ok(Started {
+        driver,
+        events,
+        workspace: folder,
         model: config.model.name.clone(),
         warnings,
     })

@@ -54,6 +54,14 @@ Drop a message, logging the sender's `user_openid`, unless it equals `owner_open
 
 For a message from the owner, trim the text, then act as the Telegram bridge does: `/new`, `/cancel`, `/compact`, `/job`, and `/tasks` behave the same, and other text becomes a `session/prompt`. Send `initialize` with `clientInfo.name` set to `alyosha-qq`, and start the task runner for the `qq` channel. Handle `_alyosha/job_finished` as the Telegram bridge does. Scheduled and job replies have no message to answer and follow their own delivery rules. [Delivering on QQ](Schedule.md#delivering-on-qq) A message with attachments and no text gets the reply **Only text messages work for now.** [Incoming messages](TelegramBridge.md#incoming-messages)
 
+## Group chats
+
+Handle `GROUP_AT_MESSAGE_CREATE` dispatches too, which use the intent the bridge already asks for. QQ sends them only for messages that @ the bot and removes the @ from `content`. In each, `d.id` is the message ID, `d.group_openid` the group, `d.author.member_openid` the sender, `d.author.member_nickname` the display name when present, and `d.content` the text. Skip duplicate message IDs as for private messages. [Group @ message event](https://bot.q.qq.com/wiki/develop/api-v2/autogen/event/group_at_message_create.html) · [Group chats design](../design/Channels.md#group-chats)
+
+Every group message goes to the group's guest session from the shared pool, the owner's included, as the Telegram bridge does: `initialize` with `alyosha-qq`, the sender `qq-<member_openid>`, and the nickname, or `QQ user` without one. A message with attachments and no text gets **Only text messages work for now.** [Telegram group chats](TelegramBridge.md#group-chats)
+
+Send the reply with `POST /v2/groups/{group_openid}/messages`, as passive replies to the mention's `msg_id` with `msg_seq` counting from 1, split into at most four parts as for private replies. QQ allows five replies within 60 minutes. If the window has closed, try the same request without `msg_id`. Log a reply that still fails, and drop it. Nothing is kept for later in a group, and there is no typing indicator. [Send a group message](https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_groups_group_openid_messages.post.html)
+
 ## Sending replies
 
 Each prompt remembers the message ID it came from and a reply counter starting at 1. Send replies with `POST /v2/users/{owner_openid}/messages`, body `msg_type: 0`, `content`, `msg_id` set to the prompt's message ID, and `msg_seq` set to the counter, which increases with every send. The same `msg_id` and `msg_seq` twice fails. [Send a C2C message](https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_users_user_openid_messages.post.html)
@@ -102,10 +110,12 @@ These run under `cargo test` with a fake QQ API, serving both HTTP and the WebSo
 - Script a 5,000-character reply with `reply_chunk = 1500`. Check for four sends with `msg_seq` 1 to 4, the last ending with the cut-off note.
 - Make the third passive send fail with `40034128`. Check that the rest go as active messages. Make those fail with `40034105`. Check that the text is sent first after the owner's next message.
 - Send two messages without waiting. Check that each reply uses its own message's `msg_id`.
+- Deliver a `GROUP_AT_MESSAGE_CREATE`. Check that the group's guest agent gets a prompt with a `qq-<member_openid>` sender and that the reply goes to the group endpoint with the mention's `msg_id`.
 
 With a real bot, which needs a registered bot, real-name QQ account, and network access, check what the documentation leaves unclear:
 
-- Whether the `GROUP_AND_C2C_EVENT` intent works for an unpublished individual bot.
+- Whether the `GROUP_AND_C2C_EVENT` intent works for an unpublished individual bot, and whether such a bot can join groups.
+- Whether a person's `member_openid` is the same in every group. If not, they have one notes file per group.
 - Whether the typing indicator counts as one of the four replies.
 - The longest text QQ accepts in one message. Set `reply_chunk` below it.
 - Whether active messages work for this bot, and their limits.

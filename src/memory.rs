@@ -93,7 +93,7 @@ impl MemoryStore {
         .ok()
     }
 
-    fn read_raw(&self, name: &str) -> Result<Option<String>, ToolError> {
+    pub(crate) fn read_raw(&self, name: &str) -> Result<Option<String>, ToolError> {
         let Some(dir) = self.dir_fd() else {
             return Ok(None);
         };
@@ -255,7 +255,7 @@ impl MemoryStore {
     }
 
     /// Stages the file in the scope directory and renames it into place.
-    fn store(&self, name: &str, bytes: &[u8]) -> Result<(), ToolError> {
+    pub(crate) fn store(&self, name: &str, bytes: &[u8]) -> Result<(), ToolError> {
         let failed =
             |error: String| ToolError::failed(format!("Could not save memory {name}: {error}"));
         DirBuilder::new()
@@ -356,7 +356,7 @@ fn index_text(entries: &[MemoryEntry]) -> (String, usize) {
 }
 
 /// The first credential pattern found in `text`, by its kind.
-fn credential_pattern(text: &str) -> Option<&'static str> {
+pub(crate) fn credential_pattern(text: &str) -> Option<&'static str> {
     if text.contains("-----BEGIN ") && text.contains("PRIVATE KEY-----") {
         return Some("a private key");
     }

@@ -40,6 +40,9 @@ owner_openid = "..."
 workspace = "/home/mjli/work/alyosha-qq"
 secret = "..."
 
+[guest]
+mcp_servers = ["search"]
+
 [mcp.servers.search]
 command = "open-websearch"
 tools = ["search"]
@@ -98,6 +101,14 @@ Needed only by `alyosha-qq`. Its presence also lets scheduled tasks use the `qq`
 | `workspace` | absolute path | required | The bridge session's workspace. Use a different folder from Telegram's. |
 | `reply_chunk` | integer, 200 to 4000 | `1500` | Characters per QQ message. |
 
+### `[guest]`
+
+Guest sessions answer anyone who mentions Alyosha in a group chat. They never get your built-in tools. [Group chats](../design/Channels.md#group-chats)
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `mcp_servers` | array of strings | `[]` | The MCP servers a guest session starts, by name. Each must be a configured `[mcp.servers.<name>]` with no tool in `ask`, because nobody in a group can approve. List only servers that reach no account of yours, such as web search. |
+
 ### `[mcp.servers.<name>]`
 
 One section per MCP server. `<name>` matches `[a-z0-9][a-z0-9-]{0,31}` and becomes part of its tool names, such as `mcp__search__search`. [MCP configuration](../develop/MCP.md#v1-configuration)
@@ -114,7 +125,7 @@ One section per MCP server. `<name>` matches `[a-z0-9][a-z0-9-]{0,31}` and becom
 
 | Program | Sections it uses |
 | --- | --- |
-| `alyosha` (TUI and `acp`) | Top level, `[model]`, `[gateway]`, `[approvals]`, `[mcp.servers.*]` |
+| `alyosha` (TUI and `acp`) | Top level, `[model]`, `[gateway]`, `[approvals]`, `[mcp.servers.*]`, and in guest mode `[guest]` |
 | `alyosha-telegram` | Top level, for its task runner, and `[telegram]` |
 | `alyosha-qq` | Top level, for its task runner, and `[qq]` |
 | `alyosha-schedule` | Top level, and whether `[telegram]` and `[qq]` exist |

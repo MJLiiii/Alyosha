@@ -311,8 +311,16 @@ async fn memory_writes_show_a_notice_and_reach_the_next_session() {
         json!({"command": "write", "name": "editor", "description": "The owner uses Helix", "content": "Helix, not Vim."}),
     )]);
     model.reply(vec![text("Noted.")]);
+    // The store dates a write with today in the configured timezone.
+    let today = || {
+        Utc::now()
+            .with_timezone(&Config::default().timezone)
+            .date_naive()
+    };
+    let before = today();
     let mut started = open(&home, model.clone(), &Config::default(), None).await;
     let (events, results, _) = turn(&mut started, "I use Helix.").await;
+    let after = today();
     assert_eq!(success(&results[0].1), "created");
     assert!(events.contains(&SessionEvent::Notice("Remembered: editor".into())));
     let requests = model.requests();
@@ -326,10 +334,12 @@ async fn memory_writes_show_a_notice_and_reach_the_next_session() {
     next.reply(vec![text("Hi.")]);
     let mut second = open(&home, next.clone(), &Config::default(), None).await;
     turn(&mut second, "Hello.").await;
+    let instruction = &next.requests()[0].system_instruction;
     assert!(
-        next.requests()[0]
-            .system_instruction
-            .contains("- editor (2026-11-25): The owner uses Helix")
+        [before, after]
+            .iter()
+            .any(|date| instruction.contains(&format!("- editor ({date}): The owner uses Helix"))),
+        "{instruction}"
     );
 }
 

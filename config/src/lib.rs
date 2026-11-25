@@ -33,6 +33,7 @@ pub struct Config {
     pub telegram: Option<TelegramConfig>,
     /// Present only when the file has a `[qq]` section.
     pub qq: Option<QqConfig>,
+    pub guest: GuestConfig,
     pub mcp: McpConfig,
 }
 
@@ -45,6 +46,7 @@ impl Default for Config {
             approvals: ApprovalsConfig::default(),
             telegram: None,
             qq: None,
+            guest: GuestConfig::default(),
             mcp: McpConfig::default(),
         }
     }
@@ -143,6 +145,28 @@ pub struct QqConfig {
 
 fn default_reply_chunk() -> u32 {
     1500
+}
+
+/// `[guest]`: what guest sessions in group chats may use.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GuestConfig {
+    /// The MCP servers a guest session starts, by name.
+    pub mcp_servers: Vec<String>,
+}
+
+impl McpConfig {
+    /// Only the named servers.
+    pub fn only(&self, names: &[String]) -> McpConfig {
+        McpConfig {
+            servers: self
+                .servers
+                .iter()
+                .filter(|(name, _)| names.contains(name))
+                .map(|(name, server)| (name.clone(), server.clone()))
+                .collect(),
+        }
+    }
 }
 
 /// `[mcp]`: the configured MCP servers.
@@ -341,6 +365,8 @@ struct ConfigFile {
     telegram: Option<TelegramConfig>,
     qq: Option<QqConfig>,
     #[serde(default)]
+    guest: GuestConfig,
+    #[serde(default)]
     mcp: McpConfig,
 }
 
@@ -396,6 +422,18 @@ fn parse(text: &str) -> Result<Config, Problem> {
         }
     }
 
+    for name in &file.guest.mcp_servers {
+        match file.mcp.servers.get(name) {
+            None => problems.push(format!(
+                "guest.mcp_servers: {name:?} is not a configured [mcp.servers.{name}]"
+            )),
+            Some(server) if !server.ask.is_empty() => problems.push(format!(
+                "guest.mcp_servers: {name:?} has tools in ask, and nobody in a group can approve them"
+            )),
+            Some(_) => {}
+        }
+    }
+
     if !problems.is_empty() {
         return Err(Problem::Invalid(problems));
     }
@@ -406,6 +444,7 @@ fn parse(text: &str) -> Result<Config, Problem> {
         approvals: file.approvals,
         telegram: file.telegram,
         qq: file.qq,
+        guest: file.guest,
         mcp: file.mcp,
     })
 }
@@ -465,6 +504,9 @@ app_id = "102000000"
 owner_openid = "openid-5678"
 workspace = "/home/mjli/Projects/alyosha-qq"
 secret = "qq-secret-9012"
+
+[guest]
+mcp_servers = ["search"]
 
 [mcp.servers.search]
 command = "open-websearch"
@@ -626,6 +668,28 @@ token = "t"
         assert!(message.contains("\"send\""), "{message}");
         // Without `tools`, every tool is registered, so any `ask` entry is allowed.
         load_text("[mcp.servers.google]\ncommand = \"gog\"\nask = [\"send\"]\n").unwrap();
+    }
+
+    #[test]
+    fn guest_servers_must_exist_and_need_no_approval() {
+        let message = load_text("[guest]\nmcp_servers = [\"search\"]\n")
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains("guest.mcp_servers"), "{message}");
+        let message = load_text(
+            "[guest]\nmcp_servers = [\"google\"]\n[mcp.servers.google]\ncommand = \"gog\"\nask = [\"send\"]\n",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            message.contains("nobody in a group can approve"),
+            "{message}"
+        );
+        let config = load_text(EXAMPLE).unwrap();
+        assert_eq!(config.guest.mcp_servers, ["search"]);
+        let only = config.mcp.only(&config.guest.mcp_servers);
+        assert_eq!(only.servers.keys().collect::<Vec<_>>(), ["search"]);
+        assert!(config.mcp.only(&[]).servers.is_empty());
     }
 
     #[test]
