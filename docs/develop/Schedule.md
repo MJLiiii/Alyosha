@@ -4,7 +4,7 @@ Build two pieces: the `alyosha-schedule` MCP server, and the task runner that bo
 
 ## Package layout
 
-Add a `schedule/` package, `alyosha-schedule`, to the Cargo workspace. It holds a library for the task file and due times, and the MCP server binary. `alyosha-bridge` depends on the library for the runner. Alyosha's core depends on neither. Use [`rmcp`](https://github.com/modelcontextprotocol/rust-sdk) in its server role, [`croner`](https://docs.rs/croner) for cron expressions, and [`chrono-tz`](https://docs.rs/chrono-tz) for the timezone. Pin all three. [Package layout](TelegramBridge.md#package-layout)
+Add a `schedule/` package, `alyosha-schedule`, to the Cargo workspace. It holds a library for the task file and due times, and the MCP server binary. `alyosha-bridge` depends on the library for the runner. Alyosha's core depends on neither. The MCP server answers JSON-RPC over stdio directly, like Alyosha's MCP client. Use [`croner`](https://docs.rs/croner) for cron expressions and [`chrono-tz`](https://docs.rs/chrono-tz) for the timezone. [Package layout](TelegramBridge.md#package-layout)
 
 ## Configuration
 

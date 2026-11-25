@@ -20,6 +20,8 @@ Use one text estimator across native routes. Round up model-visible UTF-8 bytes 
 | Recent-history target | One quarter of usable input, up to 20,000 tokens. Keep fewer entries when the rest of the request needs space. |
 | Summary reply | Up to 4,096 tokens within the model's limits. Estimate the summary request against its own usable input budget. |
 
+Route limits come from the model ID's family until GPROXY or the configuration supplies them: `gpt-` 400,000 tokens with a 128,000 reply reservation, `claude-` 200,000 with 32,000, `gemini-` 1,048,576 with 65,536, `deepseek-` 128,000 with 8,192, and anything else 128,000 with 16,000. They live in `RouteLimits::for_model`.
+
 ## V1 tool result limits
 
 Apply these limits as the Agent Loop records each top-level `ToolResult`. The text allowance is at most 8 KiB per result and 16 KiB across the batch. Reduce the allowance if less room remains after accounting for the active user message, request overhead, and the batch's required call and result metadata. Count UTF-8 bytes and cut on character boundaries. Keep the call ID, outcome, and any continuation reference even when the text allowance is zero. A retained recent batch uses these recorded results verbatim. [Agent Loop tool contract](AgentLoop.md#v1-tool-contract)

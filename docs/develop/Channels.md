@@ -4,7 +4,7 @@
 
 ## Library and process
 
-Use the official Rust crate, [`agent-client-protocol`](https://docs.rs/agent-client-protocol), in its agent role. Its API has changed incompatibly between releases, so pin one version in `Cargo.toml` and check this guide's method names against it. The protocol is JSON-RPC 2.0 and its version is the integer `1`. [ACP overview](https://agentclientprotocol.com/protocol/overview)
+Alyosha speaks ACP's newline-delimited JSON-RPC directly, in `src/acp.rs`, and the bridges do the same in `bridge/`. It needs only the messages this guide lists. The official [`agent-client-protocol`](https://docs.rs/agent-client-protocol) crate was the first choice; its API changes incompatibly between releases, and writing the few messages by hand removed that churn. The protocol is JSON-RPC 2.0 and its version is the integer `1`. [ACP overview](https://agentclientprotocol.com/protocol/overview)
 
 Standard output carries only protocol messages. Send logs, warnings meant for a developer, and MCP servers' standard error to the `alyosha-acp` log file, never to standard output. [Logging](../reference/Logging.md) Exit when standard input closes, after ending the open session.
 
@@ -35,7 +35,7 @@ AcpSession {
 
 On `session/new`:
 
-1. Check that `cwd` is an absolute path to an existing directory under `~/Projects`. Otherwise return a JSON-RPC invalid-params error and keep any open session.
+1. Check that `cwd` is an absolute path to an existing directory. Otherwise return a JSON-RPC invalid-params error and keep any open session.
 2. If a session is open, cancel its active work, wait for the turn to close, and end it, shutting down its MCP servers. Any prompts still waiting in its queue end with `stopReason: "cancelled"`.
 3. Start a new session with `cwd` as its workspace, using the normal startup: configured MCP servers, memory index, skills index, and the dev shell. Answer only once startup has finished, which can take up to the dev shell's 10-minute limit. Ignore the request's `mcpServers` list. [Project dev shell](EnvironmentInterface.md#project-dev-shell) [Session startup](AgentLoop.md#session-driver)
 4. Return the new `sessionId`, then send `available_commands_update` with two commands: `compact`, described as "Summarize older conversation to free context.", and `job`, as the jobs guide describes. [`/job` command](Jobs.md#job-command)
@@ -100,7 +100,7 @@ When a background job finishes, do not queue its message. Send the notification 
 These run under `cargo test` with an in-process ACP client and the scripted model from the turn fixture. [Turn fixture](AgentLoop.md#verification-with-a-scripted-model-and-fake-tools)
 
 - Send `initialize`. Check protocol version `1`, `loadSession: false`, and no image, audio, or embedded-context support.
-- Send `session/new` with a relative `cwd`, then one outside `~/Projects`. Check that both fail and no session starts.
+- Send `session/new` with a relative `cwd`, then one that does not exist. Check that both fail and no session starts.
 - Send `session/new` with a valid `cwd` and an `mcpServers` entry. Check that only configured servers start and that `available_commands_update` lists `compact` and `job`.
 - Script a turn that crosses the compaction threshold. Check for a `tool_call` titled **Compacting context…** with kind `think` and an `alyosha-status-` ID, then its `completed` update, before the next tool call or the reply.
 - Configure a workspace whose dev shell takes several seconds to load. Check that `session/new` answers only after it has loaded.

@@ -1,0 +1,220 @@
+# The NixOS container that runs Alyosha, GPROXY, the MCP servers, and the
+# chat bridges as the owner. It sees only the workspace folders (~/work by
+# default) and Alyosha's own folders, and the host's localhost services are
+# unreachable. On the host, `alyosha` runs the container's alyosha in the
+# current folder, so it starts from any terminal like Codex or Claude Code.
+# See docs/design/Deployment.md and docs/develop/Deployment.md.
+#
+# In the host configuration:
+#
+#   imports = [ inputs.alyosha.nixosModules.container ];
+#   services.alyosha = {
+#     enable = true;
+#     user = "mjli";
+#     workspaces = [ "/home/mjli/work" ];
+#     externalInterface = "wlan0";
+#     memoryMax = "12G";
+#     telegram.enable = true;
+#   };
+self:
+{
+  config,
+  lib,
+  pkgs,
+  ...
+}:
+let
+  cfg = config.services.alyosha;
+  packages = self.packages.${pkgs.stdenv.hostPlatform.system};
+  home = "/home/${cfg.user}";
+  shared = path: {
+    hostPath = path;
+    isReadOnly = false;
+  };
+  # The host's `alyosha`: checks that the folder is shared with the
+  # container, then runs alyosha there in the same folder.
+  hostCommand = pkgs.writeShellApplication {
+    name = "alyosha";
+    runtimeInputs = [ pkgs.systemd ];
+    text = ''
+      here=$(pwd -P)
+      shared=0
+      roots=(${lib.escapeShellArgs cfg.workspaces})
+      for root in "''${roots[@]}"; do
+        case "$here/" in "$root"/*) shared=1 ;; esac
+      done
+      if [ "$shared" = 0 ]; then
+        echo "alyosha: $here is not shared with the Alyosha container. Work in a folder under: ${lib.concatStringsSep " " cfg.workspaces}" >&2
+        exit 2
+      fi
+      exec machinectl shell -q --uid=${cfg.user} \
+        --setenv=TERM="''${TERM:-xterm-256color}" --setenv=COLORTERM="''${COLORTERM:-}" \
+        alyosha /run/current-system/sw/bin/env -C "$here" /run/current-system/sw/bin/alyosha "$@"
+    '';
+  };
+  bridge = name: {
+    wantedBy = [ "multi-user.target" ];
+    wants = [
+      "network-online.target"
+      "gproxy.service"
+    ];
+    after = [
+      "network-online.target"
+      "gproxy.service"
+    ];
+    # Reach the commands in environment.systemPackages, such as MCP servers.
+    path = [ "/run/current-system/sw" ];
+    serviceConfig = {
+      User = cfg.user;
+      ExecStart = "${packages.alyosha}/bin/${name}";
+      Restart = "on-failure";
+      RestartSec = 5;
+    };
+  };
+in
+{
+  options.services.alyosha = {
+    enable = lib.mkEnableOption "the Alyosha container";
+    user = lib.mkOption {
+      type = lib.types.str;
+      description = "The owner, who runs everything in the container.";
+    };
+    uid = lib.mkOption {
+      type = lib.types.int;
+      default = 1000;
+      description = "The owner's user ID on the host (`id -u`), so files written inside belong to them.";
+    };
+    workspaces = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [ "${home}/work" ];
+      defaultText = lib.literalExpression ''[ "/home/<user>/work" ]'';
+      description = "Folders shared with the container at the same path. Alyosha works in any folder inside them.";
+    };
+    hostCommand = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = "Install `alyosha` on the host, which runs the container's alyosha in the current folder, and let the owner open shells in the container without a password.";
+    };
+    externalInterface = lib.mkOption {
+      type = lib.types.str;
+      description = "The host's uplink, for NAT.";
+    };
+    hostAddress = lib.mkOption {
+      type = lib.types.str;
+      default = "10.233.1.1";
+    };
+    localAddress = lib.mkOption {
+      type = lib.types.str;
+      default = "10.233.1.2";
+    };
+    memoryMax = lib.mkOption {
+      type = lib.types.str;
+      default = "12G";
+      description = "The memory cap for everything in the container, such as 75% of the machine's RAM.";
+    };
+    gproxyPort = lib.mkOption {
+      type = lib.types.port;
+      default = 18787;
+      description = "GPROXY's loopback port inside the container; match [gateway] url in config.toml.";
+    };
+    extraPackages = lib.mkOption {
+      type = lib.types.listOf lib.types.package;
+      default = [ ];
+      description = "More commands for MCP servers.";
+    };
+    telegram.enable = lib.mkEnableOption "the Telegram bridge";
+    qq.enable = lib.mkEnableOption "the QQ bridge";
+    stateVersion = lib.mkOption {
+      type = lib.types.str;
+      default = config.system.stateVersion;
+    };
+  };
+
+  config = lib.mkIf cfg.enable {
+    containers.alyosha = {
+      autoStart = true;
+      privateNetwork = true;
+      inherit (cfg) hostAddress localAddress;
+
+      # Each mount keeps its host path.
+      bindMounts = lib.genAttrs cfg.workspaces shared // {
+        "${home}/.config/alyosha" = shared "${home}/.config/alyosha";
+        "${home}/.local/share/alyosha" = shared "${home}/.local/share/alyosha";
+      };
+
+      config =
+        { ... }:
+        {
+          system.stateVersion = cfg.stateVersion;
+          users.users.${cfg.user} = {
+            isNormalUser = true;
+            inherit (cfg) uid;
+          };
+          # Dev shells load through the host's Nix daemon.
+          nix.settings.experimental-features = [
+            "nix-command"
+            "flakes"
+          ];
+          environment.systemPackages = [
+            packages.alyosha
+            packages.gproxy
+            packages.gogcli
+            packages.open-websearch
+            packages.playwright-mcp
+          ]
+          ++ cfg.extraPackages;
+
+          # GPROXY, always on; skipped until `alyosha gateway init` wrote its
+          # secrets (docs/develop/LLMClientGateway.md).
+          systemd.services.gproxy =
+            let
+              data = "${home}/.local/share/alyosha/gproxy";
+              envFile = "${home}/.config/alyosha/gproxy.env";
+            in
+            {
+              wantedBy = [ "multi-user.target" ];
+              wants = [ "network-online.target" ];
+              after = [ "network-online.target" ];
+              unitConfig.ConditionPathExists = envFile;
+              serviceConfig = {
+                User = cfg.user;
+                EnvironmentFile = envFile;
+                WorkingDirectory = data;
+                ExecStart =
+                  "${packages.gproxy}/bin/gproxy serve --host 127.0.0.1 --port ${toString cfg.gproxyPort} --data-dir ${data}"
+                  + " --log-format json --log-filter info --update-automatic=false";
+                Restart = "on-failure";
+                RestartSec = 5;
+              };
+            };
+
+          systemd.services.alyosha-telegram = lib.mkIf cfg.telegram.enable (bridge "alyosha-telegram");
+          systemd.services.alyosha-qq = lib.mkIf cfg.qq.enable (bridge "alyosha-qq");
+        };
+    };
+
+    # Kill processes inside the container instead of freezing the host when
+    # memory runs out.
+    systemd.services."container@alyosha".serviceConfig.MemoryMax = cfg.memoryMax;
+
+    environment.systemPackages = lib.mkIf cfg.hostCommand [ hostCommand ];
+    # machinectl shell asks polkit; allow the owner into this one container
+    # as themselves.
+    security.polkit.extraConfig = lib.mkIf cfg.hostCommand ''
+      polkit.addRule(function(action, subject) {
+        if (action.id == "org.freedesktop.machine1.shell" &&
+            subject.user == "${cfg.user}" &&
+            action.lookup("machine") == "alyosha" &&
+            action.lookup("user") == "${cfg.user}") {
+          return polkit.Result.YES;
+        }
+      });
+    '';
+
+    networking.nat = {
+      enable = true;
+      internalInterfaces = [ "ve-+" ];
+      inherit (cfg) externalInterface;
+    };
+  };
+}

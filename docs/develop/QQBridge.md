@@ -21,7 +21,7 @@ Facts below come from the [QQ bot documentation](https://bot.q.qq.com/wiki) as r
 [qq]
 app_id = "102000000"
 owner_openid = ""                             # fill in from the log, see below
-workspace = "/home/mjli/Projects/alyosha-qq"  # absolute, under ~/Projects, not the Telegram bridge's
+workspace = "/home/mjli/work/alyosha-qq"      # absolute, not the Telegram bridge's
 reply_chunk = 1500                            # characters per message
 secret = "..."                                # the AppSecret
 ```

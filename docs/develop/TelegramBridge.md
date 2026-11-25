@@ -15,14 +15,14 @@ Turn the repository root into a Cargo workspace with these packages:
 | `config/` | `alyosha-config` | The configuration schema and loader, used by every program. [Configuration](Configuration.md) |
 | `schedule/` | `alyosha-schedule` | The scheduled-task file, used by the bridges' task runner, and the schedule MCP server. [Scheduled tasks](Schedule.md) |
 
-No bridge depends on Alyosha's library. `alyosha-bridge` depends on the same pinned `agent-client-protocol` version as Alyosha, in its client role. `alyosha-telegram` adds [`teloxide`](https://docs.rs/teloxide) for the Bot API. Pin both. The flake builds every binary into the `alyosha` package. Build the Telegram bridge first and move its ACP side into `alyosha-bridge` when starting the QQ bridge.
+No bridge depends on Alyosha's library. `alyosha-bridge` depends on the same pinned `agent-client-protocol` version as Alyosha, in its client role. `alyosha-telegram` calls the Bot API directly with `reqwest`: it needs only `getUpdates`, `sendMessage`, `editMessageText`, `answerCallbackQuery`, `sendChatAction`, and `setMyCommands`, and handles `429` and network retries itself. `ALYOSHA_TELEGRAM_API` points it at a fake server in tests. [`teloxide`](https://docs.rs/teloxide) was the first choice and adds nothing these calls need. The flake builds every binary into the `alyosha` package. Build the Telegram bridge first and move its ACP side into `alyosha-bridge` when starting the QQ bridge.
 
 ## Configuration
 
 ```toml
 [telegram]
 owner_id = 123456789                            # your numeric Telegram user ID
-workspace = "/home/mjli/Projects/alyosha-home"  # absolute, under ~/Projects
+workspace = "/home/mjli/work/alyosha-home"      # absolute
 token = "..."                                   # from @BotFather
 ```
 

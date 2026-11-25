@@ -5,7 +5,7 @@ Alyosha runs inside a NixOS container on your machine. The container holds the w
 ```text
 host (NixOS)
 └─ containers.alyosha               declared in your host configuration
-   │  sees: ~/Projects, ~/.config/alyosha, ~/.local/share/alyosha
+   │  sees: ~/work, ~/.config/alyosha, ~/.local/share/alyosha
    │  network: private, internet through the host
    │
    └─ your user (not root)
@@ -46,7 +46,7 @@ host /nix/store                  every package the host has built or downloaded
 
 The container mounts three host folders writable, each at the same path it has on the host:
 
-- `~/Projects`, which holds every workspace. Alyosha can only work in folders under it.
+- The workspace folders, `~/work` by default, which hold every project. Alyosha accepts any folder as a workspace, so this mount is the real limit: nothing else of your home exists in the container.
 - `~/.config/alyosha`, with the configuration file, skills, and GPROXY's secrets.
 - `~/.local/share/alyosha`, with memory, GPROXY's database, the shell's download cache, and Alyosha's log files. [Logging](../reference/Logging.md)
 
@@ -60,7 +60,7 @@ The container has a memory cap, set in the host configuration. When everything i
 
 ## Using it
 
-The host starts the container at boot. To use Alyosha, open a shell in the container as your user, change to a workspace under `~/Projects`, and start `alyosha` as you would on the host. The Telegram and QQ bridges run in the container as always-on services, so you can also message Alyosha from your phone. [Chat channels](Channels.md#the-telegram-bridge) Alyosha runs as your user, never as root, because root inside a NixOS container is close to root on the host. Your user has the same user ID inside, so files Alyosha writes are owned by you on the host.
+The host starts the container at boot. To use Alyosha, run `alyosha` in any terminal on the host, in a folder under `~/work`: the host's `alyosha` is a small launcher that runs the container's `alyosha` in the same folder through `machinectl shell`, so it feels like Codex or Claude Code. A polkit rule lets you, and only you, open that shell without a password. The Telegram and QQ bridges run in the container as always-on services, so you can also message Alyosha from your phone. [Chat channels](Channels.md#the-telegram-bridge) Alyosha runs as your user, never as root, because root inside a NixOS container is close to root on the host. Your user has the same user ID inside, so files Alyosha writes are owned by you on the host.
 
 ## How we get there
 
@@ -69,7 +69,7 @@ The component code does not depend on the container. The same build runs on the 
 ## Deferred
 
 - Running the TUI as a client of a shared service. The TUI starts from a shell, and only the bridges run as services.
-- Mounting individual projects instead of all of `~/Projects`.
+- Mounting individual projects instead of all of `~/work`.
 - Removing the container's access to the host's Nix daemon, which lets programs in the container build or download packages into the shared store.
 - An ephemeral container that resets its own files on restart. Everything worth keeping already lives in the mounted folders.
 - Running each MCP server in its own sandbox.

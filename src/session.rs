@@ -1,0 +1,302 @@
+//! Session startup: everything the TUI and `alyosha acp` do to open a
+//! session in a workspace.
+//!
+//! It checks the workspace, starts the configured MCP servers, opens the
+//! memory and skills stores, loads the dev shell, registers every tool, and
+//! builds the normal system instruction once. See
+//! `docs/develop/AgentLoop.md#session-driver`.
+
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
+
+use alyosha_config::{Config, Paths};
+use chrono::Utc;
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
+
+use crate::{
+    BoxFuture,
+    agent_loop::{DEFAULT_INSTRUCTION, JobDelivery, SessionDriver, SessionEvent, SessionSetup},
+    approvals::{self, Approver},
+    clock::{Clock, SystemClock},
+    context_manager::RouteLimits,
+    environment::{Environment, SessionLogs, shell},
+    gateway_admin::GatewayFiles,
+    jobs::{self, JobEnvironment},
+    llm_client::{GatewayClient, ModelClient, ModelError, ModelReply, ModelRequest, Timeouts},
+    mcp::McpManager,
+    memory::{self, MemoryStore},
+    skills::{self, SkillStore},
+    tools::{
+        RegistrationError, SessionServices, ToolRegistry,
+        builtin::{edit_file_tool, read_file_tool, run_command_tool, write_file_tool},
+        code_mode::execute_code_tool,
+    },
+};
+
+/// How long the dev shell may take to load.
+pub const DEV_SHELL_LIMIT: Duration = Duration::from_secs(10 * 60);
+
+/// What differs between front ends.
+pub struct FrontEnd {
+    /// How the owner answers approvals and questions.
+    pub approver: Option<Arc<dyn Approver>>,
+    pub job_delivery: JobDelivery,
+    /// In ACP mode, the line naming the chat bridge.
+    pub channel_line: Option<String>,
+    /// The log file that startup warnings name.
+    pub log_file: Option<PathBuf>,
+    /// Shows **Loading dev shell…** while the dev shell loads.
+    pub on_loading_dev_shell: Option<Box<dyn Fn(bool) + Send + Sync>>,
+}
+
+/// A started session.
+pub struct Started {
+    pub driver: SessionDriver,
+    pub events: mpsc::UnboundedReceiver<SessionEvent>,
+    pub workspace: PathBuf,
+    pub model: String,
+    /// Each in full, for the front end and the log.
+    pub warnings: Vec<String>,
+}
+
+/// Why a session could not start.
+#[derive(Debug, thiserror::Error)]
+pub enum StartupError {
+    #[error("{0}")]
+    Workspace(String),
+    #[error("a built-in tool could not be registered: {0}")]
+    Registry(#[from] RegistrationError),
+    #[error("{0}")]
+    Io(#[from] std::io::Error),
+}
+
+/// Resolves a workspace: any existing folder, without symlinks.
+pub fn resolve_workspace(path: &Path) -> Result<PathBuf, StartupError> {
+    let resolved = path
+        .canonicalize()
+        .map_err(|error| StartupError::Workspace(format!("{}: {error}", path.display())))?;
+    if !resolved.is_dir() {
+        return Err(StartupError::Workspace(format!(
+            "{} is not a folder",
+            resolved.display()
+        )));
+    }
+    Ok(resolved)
+}
+
+/// A client for a session whose provider is not signed in: every request
+/// fails with the `gateway login` hint.
+struct NotSignedIn;
+
+impl ModelClient for NotSignedIn {
+    fn generate(
+        &self,
+        _request: ModelRequest,
+        _cancel: CancellationToken,
+    ) -> BoxFuture<'_, Result<ModelReply, ModelError>> {
+        Box::pin(async { Err(ModelError::NotSignedIn) })
+    }
+}
+
+/// The client every session uses: GPROXY with the gateway key from
+/// `gproxy.env`. Sessions never sign in.
+pub fn model_client(config: &Config, paths: &Paths) -> Arc<dyn ModelClient> {
+    match GatewayFiles::new(paths).gateway_key() {
+        Ok(Some(key)) => Arc::new(GatewayClient::new(
+            &config.gateway.url,
+            &key,
+            config.model.api,
+            Timeouts::default(),
+        )),
+        _ => Arc::new(NotSignedIn),
+    }
+}
+
+/// Opens a session in `workspace`.
+pub async fn start(
+    config: &Config,
+    paths: &Paths,
+    workspace: &Path,
+    client: Arc<dyn ModelClient>,
+    front_end: FrontEnd,
+) -> Result<Started, StartupError> {
+    start_with_clock(
+        config,
+        paths,
+        workspace,
+        client,
+        front_end,
+        Arc::new(SystemClock),
+    )
+    .await
+}
+
+pub async fn start_with_clock(
+    config: &Config,
+    paths: &Paths,
+    workspace: &Path,
+    client: Arc<dyn ModelClient>,
+    front_end: FrontEnd,
+    clock: Arc<dyn Clock>,
+) -> Result<Started, StartupError> {
+    let workspace = resolve_workspace(workspace)?;
+    let mut warnings = Vec::new();
+    let details = front_end
+        .log_file
+        .as_ref()
+        .map(|path| format!(", details in {}", path.display()))
+        .unwrap_or_default();
+
+    // Private per-session folders: logs, status files, the generated resolv.conf.
+    let session_dir = paths.data_dir.join("sessions").join(format!(
+        "{}-{}",
+        std::process::id(),
+        crate::environment::random_suffix()
+    ));
+    let logs = Arc::new(SessionLogs::new(session_dir.join("logs")));
+    let mut sandbox = shell::SandboxConfig::discover(
+        paths.data_dir.join("shell-cache"),
+        session_dir.join("private"),
+    );
+    if sandbox.programs.is_none() {
+        warnings.push(format!(
+            "The shell sandbox is unavailable: bwrap, pasta, or bash was not found{details}"
+        ));
+    }
+    if workspace.join("flake.nix").is_file() {
+        if let Some(loading) = &front_end.on_loading_dev_shell {
+            loading(true);
+        }
+        match shell::load_dev_shell(&workspace, DEV_SHELL_LIMIT).await {
+            Ok(variables) => sandbox.dev_shell = variables,
+            Err(error) => warnings.push(format!(
+                "The dev shell did not load, so commands use the default tools: {error}{details}"
+            )),
+        }
+        if let Some(loading) = &front_end.on_loading_dev_shell {
+            loading(false);
+        }
+    }
+
+    let skills_root = paths.config_dir.join("skills");
+    let environment = Environment::new(
+        &workspace,
+        Some(skills_root.clone()),
+        logs.clone(),
+        sandbox.clone(),
+    )?;
+    let timezone = config.timezone;
+    let memory = MemoryStore::open(
+        &paths.data_dir.join("memory"),
+        "owner",
+        Arc::new(move || Utc::now().with_timezone(&timezone).date_naive()),
+    );
+    let skills = SkillStore::open(&skills_root);
+    let memory_index = memory.index();
+    if !memory_index.unreadable.is_empty() {
+        warnings.push(format!(
+            "{} memory files could not be read: {}",
+            memory_index.unreadable.len(),
+            memory_index.unreadable.join(", ")
+        ));
+    }
+    let skill_index = skills.index();
+    if !skill_index.invalid.is_empty() {
+        warnings.push(format!(
+            "{} skills could not be loaded: {}",
+            skill_index.invalid.len(),
+            skill_index.invalid.join(", ")
+        ));
+    }
+
+    let (mcp, mcp_warnings) = McpManager::start(&config.mcp, &workspace).await;
+    let mut registry = ToolRegistry::new();
+    registry.register(read_file_tool())?;
+    registry.register(write_file_tool())?;
+    registry.register(edit_file_tool())?;
+    registry.register(run_command_tool())?;
+    registry.register(jobs::job_tool())?;
+    registry.register(execute_code_tool())?;
+    registry.register(memory::memory_tool())?;
+    registry.register(skills::skill_tool())?;
+    registry.register(approvals::ask_owner_tool())?;
+    let mut mcp_problems = mcp_warnings;
+    for tool in mcp.tools() {
+        let name = tool.definition.name.clone();
+        if let Err(error) = registry.register(tool) {
+            mcp_problems.push(format!("{name}: {error}"));
+        }
+    }
+    for problem in &mcp_problems {
+        tracing::warn!(problem = %problem, "MCP startup problem");
+    }
+    if !mcp_problems.is_empty() {
+        warnings.push(format!(
+            "MCP: {} problem{} at startup ({}){details}",
+            mcp_problems.len(),
+            if mcp_problems.len() == 1 { "" } else { "s" },
+            mcp_problems.join("; ")
+        ));
+    }
+
+    let mut system_instruction = format!(
+        "{DEFAULT_INSTRUCTION}\n\n{}\n{}",
+        memory::instruction_section(&memory_index),
+        skills::instruction_section(&skill_index)
+    );
+    if let Some(line) = &front_end.channel_line {
+        system_instruction.push('\n');
+        system_instruction.push_str(line);
+        system_instruction.push('\n');
+    }
+
+    let job_environment = JobEnvironment {
+        sandbox,
+        workspace: workspace.clone(),
+        cwd: PathBuf::new(),
+        skills_root: environment.skills_root.clone(),
+        logs,
+    };
+    let services = SessionServices {
+        environment: Some(environment),
+        memory: Some(memory),
+        skills: Some(skills),
+        jobs: None,
+        approver: front_end.approver,
+        approval_timeout: Some(Duration::from_secs(config.approvals.timeout_minutes * 60)),
+        mcp: Some(mcp),
+        notify: None,
+    };
+    let (driver, events) = SessionDriver::start(SessionSetup {
+        provider: config.model.provider.clone(),
+        model: config.model.name.clone(),
+        timezone: config.timezone,
+        client,
+        registry,
+        clock,
+        system_instruction,
+        limits: RouteLimits::for_model(&config.model.name),
+        services,
+        jobs: Some(job_environment),
+        job_delivery: front_end.job_delivery,
+    });
+    for warning in &warnings {
+        tracing::warn!(warning = %warning, "startup warning");
+    }
+    tracing::info!(
+        workspace = %workspace.display(),
+        model = %config.model.name,
+        "session started"
+    );
+    Ok(Started {
+        driver,
+        events,
+        workspace,
+        model: config.model.name.clone(),
+        warnings,
+    })
+}

@@ -1,0 +1,86 @@
+# ~/.config/alyosha/config.toml — copy, fill in, and `chmod 600` it.
+# Every setting: docs/reference/Configuration.md. Alyosha never writes this file.
+
+timezone = "Europe/Amsterdam"
+
+[model]
+provider = "chatgpt"   # the GPROXY provider `alyosha gateway login` creates
+api = "codex"          # codex, openai, claudeapi, aistudio, or deepseek
+name = "gpt-6.2-sol"
+
+[gateway]
+url = "http://127.0.0.1:18787"
+
+[approvals]
+timeout_minutes = 60
+
+# The Telegram bridge (docs/develop/TelegramBridge.md).
+# [telegram]
+# owner_id = 123456789
+# workspace = "/home/you/work/alyosha-home"
+# token = "..."
+
+# The QQ bridge (docs/develop/QQBridge.md).
+# [qq]
+# app_id = "102000000"
+# owner_openid = ""
+# workspace = "/home/you/work/alyosha-qq"
+# secret = "..."
+
+# Scheduled tasks (docs/develop/Schedule.md).
+[mcp.servers.schedule]
+command = "alyosha-schedule"
+
+# Web search (docs/develop/WebSearch.md).
+[mcp.servers.search]
+command = "open-websearch"
+tools = ["search"]
+
+[mcp.servers.search.env]
+MODE = "stdio"
+SEARCH_MODE = "request"
+DEFAULT_SEARCH_ENGINE = "bing"
+ALLOWED_SEARCH_ENGINES = "bing,duckduckgo,brave,startpage,baidu"
+MCP_TOOL_FETCH_WEB_NAME = "<disabled>"
+MCP_TOOL_FETCH_GITHUB_NAME = "<disabled>"
+MCP_TOOL_FETCH_CSDN_NAME = "<disabled>"
+MCP_TOOL_FETCH_JUEJIN_NAME = "<disabled>"
+MCP_TOOL_FETCH_LINUXDO_NAME = "<disabled>"
+
+# The browser (docs/develop/Browser.md). Use absolute paths.
+[mcp.servers.chromium]
+command = "playwright-mcp"
+args = [
+  "--headless", "--isolated", "--no-webmcp",
+  "--storage-state", "/home/you/.local/share/alyosha/browser/chromium-state.json",
+  "--output-dir", "/tmp/alyosha-playwright",
+]
+tools = [
+  "browser_navigate", "browser_navigate_back", "browser_snapshot",
+  "browser_click", "browser_type", "browser_fill_form", "browser_press_key",
+  "browser_select_option", "browser_wait_for",
+]
+
+# Email and calendar (docs/develop/EmailCalendar.md). Sign in on the host first.
+# [mcp.servers.google]
+# command = "gog"
+# args = [
+#   "--account", "you@gmail.com",
+#   "mcp", "--allow-write", "--allow-gmail-send", "--allow-tool",
+#   "gmail_search,gmail_get_message,gmail_get_thread,gmail_list_labels,gmail_list_drafts,gmail_get_draft,gmail_create_draft,gmail_update_draft,gmail_archive_messages,gmail_modify_messages,gmail_modify_thread,gmail_create_label,gmail_mark_read,gmail_mark_unread,gmail_trash_messages,gmail_restore_messages,gmail_send_message,calendar_events",
+# ]
+# tools = [
+#   "gmail_search", "gmail_get_message", "gmail_get_thread", "gmail_list_labels",
+#   "gmail_list_drafts", "gmail_get_draft", "gmail_create_draft", "gmail_update_draft",
+#   "gmail_archive_messages", "gmail_modify_messages", "gmail_modify_thread",
+#   "gmail_create_label", "gmail_mark_read", "gmail_mark_unread",
+#   "gmail_trash_messages", "gmail_restore_messages",
+#   "gmail_send_message", "calendar_events",
+# ]
+# ask = ["gmail_send_message"]
+#
+# [mcp.servers.google.env]
+# GOG_HOME = "/home/you/.config/alyosha/gog"
+# GOG_KEYRING_BACKEND = "file"
+# GOG_KEYRING_PASSWORD = "..."
+# DBUS_SESSION_BUS_ADDRESS = "disabled:"

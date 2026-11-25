@@ -28,7 +28,7 @@ For example, the text `café!` occupies six UTF-8 bytes. A read at offset 0 with
 
 ### `write_file`
 
-Use `replace_file` with `CreateOrReplace` to atomically create a workspace file or replace its entire contents with `content`. Return the number of UTF-8 bytes written after commit. A staging or commit failure returns a tool error. [Atomic file replacement](../develop/EnvironmentInterface.md#atomic-file-replacement)
+Use `replace_file` with `CreateOrReplace` to atomically create a workspace file or replace its entire contents with `content`. The folder must already exist; the error says to create it with `mkdir -p`. Return the number of UTF-8 bytes written after commit. A staging or commit failure returns a tool error. [Atomic file replacement](../develop/EnvironmentInterface.md#atomic-file-replacement)
 
 ### `edit_file`
 

@@ -1,6 +1,6 @@
 # Implement the MCP Client
 
-Start the configured servers at session startup, register their tools, and forward calls. Use the official Rust SDK, `rmcp`, with its client role and child-process transport. [MCP design](../design/MCP.md) · [rmcp](https://github.com/modelcontextprotocol/rust-sdk) · [Architecture overview](../README.md)
+Start the configured servers at session startup, register their tools, and forward calls. The client is a small JSON-RPC 2.0 client of Alyosha's own over the servers' newline-delimited stdio, in `src/mcp.rs`. It needs only the handshake, paginated `tools/list`, `tools/call`, `notifications/cancelled`, and answering `ping`. `rmcp` was the first choice; its typed API follows a newer protocol revision and made exact cancellation and the documented shutdown order harder to control. [MCP design](../design/MCP.md) · [rmcp](https://github.com/modelcontextprotocol/rust-sdk) · [Architecture overview](../README.md)
 
 ## V1 configuration
 

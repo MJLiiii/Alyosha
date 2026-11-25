@@ -17,7 +17,7 @@ RegisteredTool {
     handler: ToolHandler
 }
 
-ToolHandler: async (args: JsonValue, context: &ToolContext)
+ToolHandler: async (args: JsonValue, context: ToolContext)   # owned; the context is cheap to clone
     -> Result<ToolOutput, ToolError>
 
 ToolRegistry

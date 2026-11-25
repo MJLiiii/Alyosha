@@ -1,0 +1,440 @@
+//! `alyosha acp` with an in-process ACP client and the scripted model. See
+//! `docs/develop/Channels.md#verification`.
+
+mod support;
+
+use std::{
+    fs,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
+
+use alyosha::{
+    acp::{FRESH_SESSION_LINE, ServeOptions, serve},
+    clock::Clock,
+    llm_client::ModelError,
+};
+use alyosha_config::{Config, Paths};
+use chrono::{DateTime, TimeZone, Utc};
+use serde_json::{Value, json};
+use support::{ScriptedModel, call, text};
+use tokio::io::{
+    AsyncBufReadExt, AsyncWriteExt, BufReader, DuplexStream, Lines, ReadHalf, WriteHalf,
+};
+
+struct MovableClock(Mutex<DateTime<Utc>>);
+
+impl Clock for MovableClock {
+    fn now(&self) -> DateTime<Utc> {
+        *self.0.lock().unwrap()
+    }
+}
+
+struct Client {
+    _root: tempfile::TempDir,
+    workspace: String,
+    projects: std::path::PathBuf,
+    writer: WriteHalf<DuplexStream>,
+    lines: Lines<BufReader<ReadHalf<DuplexStream>>>,
+    next_id: u64,
+    /// Every message received, for the validity check.
+    seen: Vec<Value>,
+    clock: Arc<MovableClock>,
+    server: tokio::task::JoinHandle<()>,
+}
+
+impl Client {
+    async fn start(model: Arc<ScriptedModel>) -> Self {
+        let root = tempfile::tempdir().unwrap();
+        let base = root.path().canonicalize().unwrap();
+        let paths = Paths::new(
+            &base,
+            Some(base.join("config").as_os_str()),
+            Some(base.join("data").as_os_str()),
+        );
+        let workspace = base.join("Projects/ws");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::write(workspace.join("a.txt"), "alpha").unwrap();
+        let clock = Arc::new(MovableClock(Mutex::new(
+            Utc.with_ymd_and_hms(2026, 11, 25, 9, 2, 0).unwrap(),
+        )));
+        let (ours, theirs) = tokio::io::duplex(1 << 20);
+        let (their_read, their_write) = tokio::io::split(theirs);
+        let options = ServeOptions {
+            paths: paths.clone(),
+            load_config: Arc::new(|| Ok(Config::default())),
+            model: Arc::new(move |_: &Config| {
+                model.clone() as Arc<dyn alyosha::llm_client::ModelClient>
+            }),
+            clock: clock.clone(),
+            log_file: None,
+            renewal_check: Duration::from_millis(50),
+        };
+        let server = tokio::spawn(serve(their_read, their_write, options));
+        let (read, writer) = tokio::io::split(ours);
+        Self {
+            _root: root,
+            workspace: workspace.display().to_string(),
+            projects: base.join("Projects"),
+            writer,
+            lines: BufReader::new(read).lines(),
+            next_id: 1,
+            seen: Vec::new(),
+            clock,
+            server,
+        }
+    }
+
+    async fn send(&mut self, message: Value) {
+        self.writer
+            .write_all(format!("{message}\n").as_bytes())
+            .await
+            .unwrap();
+    }
+
+    async fn request(&mut self, method: &str, params: Value) -> u64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.send(json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}))
+            .await;
+        id
+    }
+
+    async fn next(&mut self) -> Value {
+        let line = tokio::time::timeout(Duration::from_secs(10), self.lines.next_line())
+            .await
+            .expect("a message within 10 seconds")
+            .unwrap()
+            .expect("the connection is open");
+        let message: Value = serde_json::from_str(&line).expect("every line is JSON");
+        assert_eq!(message["jsonrpc"], "2.0", "{line}");
+        self.seen.push(message.clone());
+        message
+    }
+
+    /// Messages up to and including the response to `id`.
+    async fn until_response(&mut self, id: u64) -> Vec<Value> {
+        let mut messages = Vec::new();
+        loop {
+            let message = self.next().await;
+            let done = message["id"] == json!(id) && message.get("method").is_none();
+            messages.push(message);
+            if done {
+                return messages;
+            }
+        }
+    }
+
+    async fn initialize(&mut self, client_name: Option<&str>) -> Value {
+        let mut params = json!({"protocolVersion": 1, "clientCapabilities": {}});
+        if let Some(name) = client_name {
+            params["clientInfo"] = json!({"name": name, "version": "1"});
+        }
+        let id = self.request("initialize", params).await;
+        self.until_response(id).await.pop().unwrap()
+    }
+
+    async fn new_session(&mut self) -> String {
+        let workspace = self.workspace.clone();
+        let id = self
+            .request("session/new", json!({"cwd": workspace, "mcpServers": []}))
+            .await;
+        let response = self.until_response(id).await.pop().unwrap();
+        response["result"]["sessionId"]
+            .as_str()
+            .expect("a session ID")
+            .to_owned()
+    }
+
+    async fn prompt(&mut self, session: &str, text: &str) -> u64 {
+        self.request(
+            "session/prompt",
+            json!({"sessionId": session, "prompt": [{"type": "text", "text": text}]}),
+        )
+        .await
+    }
+}
+
+fn updates(messages: &[Value]) -> Vec<String> {
+    messages
+        .iter()
+        .filter(|message| message["method"] == "session/update")
+        .map(|message| {
+            let update = &message["params"]["update"];
+            match update["sessionUpdate"].as_str().unwrap() {
+                "tool_call" => format!(
+                    "tool_call {} {}",
+                    update["title"].as_str().unwrap(),
+                    update["kind"].as_str().unwrap()
+                ),
+                "tool_call_update" => {
+                    format!("tool_call_update {}", update["status"].as_str().unwrap())
+                }
+                "agent_message_chunk" => {
+                    format!("chunk {}", update["content"]["text"].as_str().unwrap())
+                }
+                other => other.to_owned(),
+            }
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn initialize_reports_the_capabilities() {
+    let mut client = Client::start(ScriptedModel::new()).await;
+    let response = client.initialize(None).await;
+    let result = &response["result"];
+    assert_eq!(result["protocolVersion"], 1);
+    assert_eq!(result["agentCapabilities"]["loadSession"], false);
+    assert_eq!(
+        result["agentCapabilities"]["promptCapabilities"],
+        json!({"image": false, "audio": false, "embeddedContext": false})
+    );
+    assert_eq!(result["authMethods"], json!([]));
+}
+
+#[tokio::test]
+async fn new_sessions_need_an_existing_absolute_folder() {
+    let mut client = Client::start(ScriptedModel::new()).await;
+    client.initialize(None).await;
+    for cwd in ["relative/path", "/nonexistent/folder"] {
+        let id = client
+            .request("session/new", json!({"cwd": cwd, "mcpServers": []}))
+            .await;
+        let response = client.until_response(id).await.pop().unwrap();
+        assert_eq!(response["error"]["code"], -32602, "{cwd}");
+    }
+    let workspace = client.workspace.clone();
+    let id = client
+        .request("session/new", json!({"cwd": workspace, "mcpServers": [{"name": "bridge", "command": "evil", "args": [], "env": []}]}))
+        .await;
+    let messages = client.until_response(id).await;
+    assert!(messages.last().unwrap()["result"]["sessionId"].is_string());
+    let commands = client.next().await;
+    let names: Vec<&str> = commands["params"]["update"]["availableCommands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|command| command["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["compact", "job"]);
+    let _ = &client.projects;
+}
+
+#[tokio::test]
+async fn a_turn_reports_tool_calls_then_the_reply() {
+    let model = ScriptedModel::new();
+    model.reply(vec![
+        call("call_a", "read_file", json!({"path": "a.txt"})),
+        call("call_b", "read_file", json!({"path": "b.txt"})),
+    ]);
+    model.reply(vec![text("a.txt contains alpha. b.txt was missing.")]);
+    let mut client = Client::start(model.clone()).await;
+    client.initialize(Some("alyosha-telegram")).await;
+    let session = client.new_session().await;
+    client.next().await; // available_commands_update
+    let id = client.prompt(&session, "Read a.txt and b.txt.").await;
+    let messages = client.until_response(id).await;
+    // A startup warning, such as a missing sandbox here, comes before the reply.
+    let shown: Vec<String> = updates(&messages)
+        .into_iter()
+        .filter(|update| !update.contains("sandbox is unavailable"))
+        .collect();
+    assert_eq!(
+        shown,
+        [
+            "tool_call read_file a.txt read",
+            "tool_call_update completed",
+            "tool_call read_file b.txt read",
+            "tool_call_update failed",
+            "chunk a.txt contains alpha. b.txt was missing.",
+        ]
+    );
+    assert_eq!(messages.last().unwrap()["result"]["stopReason"], "end_turn");
+    let instruction = &model.requests()[0].system_instruction;
+    assert!(
+        instruction
+            .trim_end()
+            .ends_with("The owner is talking to you through alyosha-telegram."),
+        "{instruction}"
+    );
+}
+
+#[tokio::test]
+async fn prompts_sent_together_are_answered_in_order() {
+    let model = ScriptedModel::new();
+    model.reply(vec![text("first reply")]);
+    model.reply(vec![text("second reply")]);
+    let mut client = Client::start(model.clone()).await;
+    client.initialize(None).await;
+    let session = client.new_session().await;
+    let first = client.prompt(&session, "one").await;
+    let second = client.prompt(&session, "two").await;
+    let messages = client.until_response(second).await;
+    let first_response = messages
+        .iter()
+        .position(|message| message["id"] == json!(first) && message.get("result").is_some())
+        .unwrap();
+    let second_response = messages.len() - 1;
+    assert!(first_response < second_response);
+    assert!(updates(&messages).contains(&"chunk first reply".to_owned()));
+    assert!(updates(&messages).contains(&"chunk second reply".to_owned()));
+    assert!(
+        model.requests()[0]
+            .system_instruction
+            .ends_with("No skills installed.\n"),
+        "no channel line without clientInfo"
+    );
+}
+
+#[tokio::test]
+async fn cancel_ends_the_prompt_after_its_updates() {
+    let model = ScriptedModel::new();
+    let gate = model.reply_gated(vec![call("c", "read_file", json!({"path": "a.txt"}))]);
+    let mut client = Client::start(model).await;
+    client.initialize(None).await;
+    let session = client.new_session().await;
+    let id = client.prompt(&session, "Read it.").await;
+    gate.started().await;
+    client
+        .send(
+            json!({"jsonrpc": "2.0", "method": "session/cancel", "params": {"sessionId": session}}),
+        )
+        .await;
+    let messages = client.until_response(id).await;
+    assert_eq!(
+        messages.last().unwrap()["result"]["stopReason"],
+        "cancelled"
+    );
+}
+
+#[tokio::test]
+async fn compact_during_a_turn_is_busy_and_a_failure_is_an_error() {
+    let model = ScriptedModel::new();
+    let gate = model.reply_gated(vec![text("slow")]);
+    model.fail(ModelError::Timeout("no reply".into()));
+    model.reply(vec![text("fine again")]);
+    let mut client = Client::start(model).await;
+    client.initialize(None).await;
+    let session = client.new_session().await;
+    let slow = client.prompt(&session, "slow one").await;
+    gate.started().await;
+    let compact = client.prompt(&session, "/compact").await;
+    let messages = client.until_response(compact).await;
+    assert!(
+        updates(&messages)
+            .iter()
+            .any(|update| update.contains("try /compact again"))
+    );
+    gate.release();
+    client.until_response(slow).await;
+
+    let failing = client.prompt(&session, "fail").await;
+    let response = client.until_response(failing).await.pop().unwrap();
+    assert!(
+        response["error"]["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("timeout")
+    );
+    let next = client.prompt(&session, "again").await;
+    let messages = client.until_response(next).await;
+    assert_eq!(messages.last().unwrap()["result"]["stopReason"], "end_turn");
+}
+
+#[tokio::test]
+async fn a_new_session_cancels_waiting_prompts() {
+    let model = ScriptedModel::new();
+    let gate = model.reply_gated(vec![text("never sent")]);
+    let mut client = Client::start(model).await;
+    client.initialize(None).await;
+    let session = client.new_session().await;
+    let running = client.prompt(&session, "first").await;
+    let waiting = client.prompt(&session, "second").await;
+    gate.started().await;
+    let workspace = client.workspace.clone();
+    let renewed = client
+        .request("session/new", json!({"cwd": workspace, "mcpServers": []}))
+        .await;
+    let messages = client.until_response(renewed).await;
+    let cancelled = |id: u64| {
+        messages.iter().any(|message| {
+            message["id"] == json!(id) && message["result"]["stopReason"] == "cancelled"
+        })
+    };
+    assert!(cancelled(running) && cancelled(waiting));
+    assert_ne!(
+        messages.last().unwrap()["result"]["sessionId"],
+        json!(session)
+    );
+}
+
+#[tokio::test]
+async fn job_prompts_answer_at_once() {
+    let mut client = Client::start(ScriptedModel::new()).await;
+    client.initialize(None).await;
+    let session = client.new_session().await;
+    let id = client.prompt(&session, "/job").await;
+    let messages = client.until_response(id).await;
+    assert!(
+        updates(&messages)
+            .iter()
+            .any(|update| update.contains("/job <command>"))
+    );
+    assert_eq!(messages.last().unwrap()["result"]["stopReason"], "end_turn");
+}
+
+#[tokio::test]
+async fn the_session_renews_at_four_when_idle() {
+    let model = ScriptedModel::new();
+    model.reply(vec![text("before")]);
+    model.reply(vec![text("after")]);
+    let mut client = Client::start(model.clone()).await;
+    client.initialize(None).await;
+    let session = client.new_session().await;
+    let id = client.prompt(&session, "hello").await;
+    client.until_response(id).await;
+    // 04:00 in Amsterdam the next day.
+    *client.clock.0.lock().unwrap() = Utc.with_ymd_and_hms(2026, 11, 26, 3, 0, 30).unwrap();
+    // Wait for the renewal's available_commands_update.
+    loop {
+        let message = client.next().await;
+        if message["params"]["update"]["sessionUpdate"] == "available_commands_update" {
+            assert_eq!(
+                message["params"]["sessionId"],
+                json!(session),
+                "the same session ID"
+            );
+            break;
+        }
+    }
+    let id = client.prompt(&session, "who am I?").await;
+    let messages = client.until_response(id).await;
+    let chunks = updates(&messages);
+    assert_eq!(chunks[0], format!("chunk {FRESH_SESSION_LINE}"));
+    assert_eq!(
+        model.requests().last().unwrap().history.len(),
+        1,
+        "earlier conversation is gone"
+    );
+}
+
+#[tokio::test]
+async fn closing_input_ends_the_process_and_every_line_is_json_rpc() {
+    let mut client = Client::start(ScriptedModel::new()).await;
+    client.initialize(None).await;
+    client.new_session().await;
+    client.writer.shutdown().await.unwrap();
+    drop(client.writer);
+    tokio::time::timeout(Duration::from_secs(10), client.server)
+        .await
+        .unwrap()
+        .unwrap();
+    for message in &client.seen {
+        assert!(
+            message.get("method").is_some()
+                || message.get("result").is_some()
+                || message.get("error").is_some()
+        );
+    }
+}

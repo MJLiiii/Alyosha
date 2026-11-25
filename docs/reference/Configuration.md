@@ -31,13 +31,13 @@ timeout_minutes = 60
 
 [telegram]
 owner_id = 123456789
-workspace = "/home/mjli/Projects/alyosha-home"
+workspace = "/home/mjli/work/alyosha-home"
 token = "..."
 
 [qq]
 app_id = "102000000"
 owner_openid = "..."
-workspace = "/home/mjli/Projects/alyosha-qq"
+workspace = "/home/mjli/work/alyosha-qq"
 secret = "..."
 
 [mcp.servers.search]
@@ -83,7 +83,7 @@ Needed only by `alyosha-telegram`. Its presence also lets scheduled tasks use th
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `owner_id` | integer | required | Your numeric Telegram user ID. |
-| `workspace` | absolute path under `~/Projects` | required | The bridge session's workspace. |
+| `workspace` | absolute path | required | The bridge session's workspace. |
 | `token` | string | required | The bot token from @BotFather. |
 
 ### `[qq]`
@@ -95,7 +95,7 @@ Needed only by `alyosha-qq`. Its presence also lets scheduled tasks use the `qq`
 | `app_id` | string | required | The bot's AppID. |
 | `secret` | string | required | The bot's AppSecret. |
 | `owner_openid` | string | `""` | Your `user_openid` for this bot. While empty, the bridge answers nobody and logs senders' IDs. |
-| `workspace` | absolute path under `~/Projects` | required | The bridge session's workspace. Use a different folder from Telegram's. |
+| `workspace` | absolute path | required | The bridge session's workspace. Use a different folder from Telegram's. |
 | `reply_chunk` | integer, 200 to 4000 | `1500` | Characters per QQ message. |
 
 ### `[mcp.servers.<name>]`

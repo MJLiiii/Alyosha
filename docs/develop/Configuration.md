@@ -28,7 +28,7 @@ Mark every struct `#[serde(deny_unknown_fields)]` and give each optional key its
 2. If the file does not exist, return the defaults.
 3. Open it and check its mode on the open handle. If the group or others have any permission, fail with an error that gives the path and the command `chmod 600 <path>`.
 4. Parse it. On a syntax error, an unknown key, or a wrong type, fail with the `toml` crate's message, which names the line and key.
-5. Check the values the types cannot: `timezone` is a known IANA name, `gateway.url` is an `http` URL, `timeout_minutes` is at least 1, `reply_chunk` is 200 to 4000, each workspace is an absolute path under `$HOME/Projects`, each MCP server name matches its pattern, and each `ask` entry is also in that server's `tools` when `tools` is set. Report every failed check, not only the first.
+5. Check the values the types cannot: `timezone` is a known IANA name, `gateway.url` is an `http` URL, `timeout_minutes` is at least 1, `reply_chunk` is 200 to 4000, each workspace is an absolute path, each MCP server name matches its pattern, and each `ask` entry is also in that server's `tools` when `tools` is set. Report every failed check, not only the first.
 
 Each program calls `load` once at startup, then opens its log file. [Logging](../reference/Logging.md) The TUI prints the error and exits with status 2 before touching the terminal. `alyosha acp` writes it to standard error and exits with status 2 before answering `initialize`. The bridges and the schedule server log it and exit, which systemd reports as a failed start. [TUI startup](TUI.md#startup)
 
@@ -42,7 +42,7 @@ These run under `cargo test` against temporary configuration folders.
 - Load the reference's example with secrets filled in. Check every value.
 - Make the file readable by the group. Check for the mode error and the `chmod` hint.
 - Add an unknown key, `asks`, to an MCP server. Check that loading fails and the message names the line and key.
-- Set `timezone = "Europe/Amstredam"`, `timeout_minutes = 0`, and a workspace outside `~/Projects` together. Check that all three are reported at once.
+- Set `timezone = "Europe/Amstredam"`, `timeout_minutes = 0`, and a relative workspace together. Check that all three are reported at once.
 - Give an MCP server `tools = ["search"]` and `ask = ["send"]`. Check that loading fails and names the `ask` entry.
 - Format a loaded `Config` with `{:?}`. Check that no token or secret appears.
 - Start `alyosha-telegram` without `[telegram]`. Check that it exits with an error naming the section.

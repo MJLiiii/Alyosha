@@ -56,7 +56,7 @@ In ACP mode both kinds use ACP's `session/request_permission`, so each bridge ha
 
 ## What approvals do not cover
 
-- **Deleting files with the shell.** `run_command` runs every command through the same tool, so Alyosha cannot tell `rm` from `ls`. Workspaces are the real `~/Projects` folders, so git history is the safety net there.
+- **Deleting files with the shell.** `run_command` runs every command through the same tool, so Alyosha cannot tell `rm` from `ls`. Workspaces are real folders, so keep projects in git: its history is the safety net.
 - **Browser actions the model does not ask about.** A purchase is the same `browser_click` as any other click. If the model is misled into not asking, nothing stops it. The status area and Telegram's **Working…** message still name every click.
 
 ## Deferred

@@ -59,7 +59,16 @@ Use `--unshare-user`, `--unshare-pid`, and `--unshare-ipc`. Run Bubblewrap insid
 
 ### Network
 
-Each command gets outgoing internet, so package managers such as cargo, npm, and pip can download dependencies. It never reaches the container's own loopback, where GPROXY listens. Start Bubblewrap under [`pasta`](https://passt.top/passt/about/) from `pkgs.passt`, which gives the command's process tree its own network namespace with a user-mode connection to the outside, as rootless Podman does. Configure it with no inbound port forwarding and without mapping the gateway address to the container's loopback (`--no-map-gw`). Check the exact flags against the packaged `passt` release, and record them here. A failure to start `pasta` is a sandbox setup failure and returns a tool error.
+Each command gets outgoing internet, so package managers such as cargo, npm, and pip can download dependencies. It never reaches the container's own loopback, where GPROXY listens. Start Bubblewrap under [`pasta`](https://passt.top/passt/about/) from `pkgs.passt`, which gives the command's process tree its own network namespace with a user-mode connection to the outside, as rootless Podman does. Configure it with no inbound port forwarding and without mapping the gateway address to the container's loopback (`--no-map-gw`). A failure to start `pasta` is a sandbox setup failure and returns a tool error.
+
+Checked with `passt` 2025_09_19 and Bubblewrap 0.13.1 on 2026-11-25:
+
+- **Flags.** `pasta --config-net --quiet --no-map-gw -t none -u none -T none -U none`. Find `pasta` on `PATH` without resolving its symlink: it is a link to `passt` and picks its mode from the name it runs under.
+- **Status pipe.** `pasta` closes inherited descriptors, so `--json-status-fd` cannot pass through it. A trusted Bash wrapper inside `pasta`'s namespace runs `exec 3>"$0" && exec "$@"` with a private status file as `$0`, then execs `bwrap ... --json-status-fd 3`. The host reads the file after the launcher exits.
+- **DNS.** When the host resolves through a loopback server such as systemd-resolved at `127.0.0.53`, the sandbox cannot reach it. Add `--dns-forward 169.254.0.53 --dns-host 127.0.0.53` and bind a generated `resolv.conf` naming `169.254.0.53`. Only DNS queries to that address are forwarded. With a non-loopback nameserver, bind the host's `/etc/resolv.conf`.
+- **Certificates and user.** Bind the CA bundle's store path at `/etc/ssl/certs/ca-certificates.crt` and set `SSL_CERT_FILE` and `NIX_SSL_CERT_FILE` to it. Pass `--uid` and `--gid` with the owner's IDs.
+
+The integration checks in `tests/shell.rs` and `tests/jobs.rs` start this sandbox when `bwrap`, `pasta`, and `bash` are on `PATH`.
 
 The network adds downloading and running code from the internet, still confined by Bubblewrap and the container. It adds little new risk of information leaving, because the browser already has full internet access. [Browser trust](../design/Browser.md#trust)
 
@@ -89,7 +98,7 @@ Give each session a 64 MiB budget for log content: the full text of shortened co
 
 Publish `log_path` only when the recorded preview omits text and the complete captured output fits in the budget. If the preview includes all the output, discard the temporary capture and release its space. If writing would exceed the budget or saving fails, discard the incomplete log and keep draining command output. Preserve the actual command status and bounded preview. An MCP result follows the same rules, except that its text is complete before the preview is sized, so save it only when the preview omits text. [MCP calls](MCP.md#handle-one-call) When output was omitted, keep the reason the full log was unavailable in the result metadata.
 
-Keep issued `log_path` references readable through direct `read_file` calls until the session ends. Open them through the session's log store for bounded reads. Remove the session's logs at session end. [Tool permissions](../reference/ToolPermissions.md)
+Issue log paths as `/session-logs/<name>`, a prefix no workspace path uses. Keep issued `log_path` references readable through direct `read_file` calls until the session ends. Open them through the session's log store for bounded reads. Remove the session's logs at session end. [Tool permissions](../reference/ToolPermissions.md)
 
 ## Verify on the host
 

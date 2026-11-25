@@ -1,0 +1,25 @@
+[package]
+name = "alyosha-schedule"
+version = "0.1.0"
+edition = "2024"
+description = "Scheduled tasks: the task file, due times, and the schedule MCP server"
+publish = false
+
+[[bin]]
+name = "alyosha-schedule"
+path = "src/bin/alyosha-schedule.rs"
+
+[dependencies]
+alyosha-config = { path = "../config" }
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
+chrono-tz = "0.10.4"
+croner = "5.0.0"
+getrandom = "0.4.3"
+rustix = { version = "1.1.6", features = ["fs"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.154", features = ["preserve_order"] }
+thiserror = "2.0.21"
+toml = "1.2.3"
+
+[dev-dependencies]
+tempfile = "3.27.0"

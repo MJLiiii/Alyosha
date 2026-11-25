@@ -31,7 +31,7 @@ UiEvent       (driver → UI)
 
 Keep the UI's state in one `UiState` value updated by a pure function of the previous state and one event or key, so tests can drive it without a terminal. Render after each update and once a second while a turn runs, for the elapsed time.
 
-The viewport is two lines plus the input's height, which grows with the message up to 8 lines and scrolls inside after that.
+The viewport is two lines plus the input's height, up to 8 lines, scrolling inside after that. ratatui 0.30 cannot resize an inline viewport, so it is created at its largest, 10 lines, and the input draws at its top.
 
 ## Printing
 
@@ -69,7 +69,7 @@ The TUI's `Approver` sends `Request` with a one-shot responder and waits for the
 
 ## Startup
 
-1. Take the workspace from the first argument, or the current directory. Resolve it to an absolute path without symlinks. It must be an existing directory under `$HOME/Projects`. Otherwise print the reason and exit with status 2 before touching the terminal.
+1. Take the workspace from the first argument, or the current directory. Resolve it to an absolute path without symlinks. It must be an existing directory. Otherwise print the reason and exit with status 2 before touching the terminal.
 2. Start the session as the session driver describes, then send `Header` and each startup warning. [Session startup](AgentLoop.md#session-driver)
 
 ## Verification
@@ -84,7 +84,7 @@ These run under `cargo test`. Drive `UiState` with scripted events and keys, and
 - Let a request time out with a 1-minute limit. Check for **Not answered in time** and `NoAnswer`.
 - Paste text containing line breaks. Check that nothing is sent until Enter.
 - Type `/compact` during a turn. Check for the busy status and no message in history. Type `/compacting`. Check that it is sent as a message.
-- Start with a path outside `~/Projects` and with a missing path. Check for exit status 2 and a clear message, with the terminal untouched.
+- Start with a missing path and with a file. Check for exit status 2 and a clear message, with the terminal untouched.
 - Panic inside the UI task. Check that raw mode is restored.
 
 In a real terminal, which `cargo test` cannot cover:

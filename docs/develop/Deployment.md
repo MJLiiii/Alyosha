@@ -21,7 +21,7 @@ in {
 
     # Each mount keeps its host path.
     bindMounts = {
-      "${home}/Projects" = shared "${home}/Projects";
+      "${home}/work" = shared "${home}/work";
       "${home}/.config/alyosha" = shared "${home}/.config/alyosha";
       "${home}/.local/share/alyosha" = shared "${home}/.local/share/alyosha";
     };
@@ -74,7 +74,9 @@ Keep secrets out of Nix expressions, including the container module and MCP `env
 machinectl shell mjli@alyosha
 ```
 
-Then `cd` to a workspace under `~/Projects` and run `alyosha`. Never run it as root inside the container.
+Then `cd` to a workspace and run `alyosha`. Never run it as root inside the container.
+
+The flake's module, `nixosModules.container`, sets `services.alyosha.workspaces` (default `[ "~/work" ]`) as the shared folders and, with `hostCommand` (on by default), installs a host `alyosha`. It checks that the current folder is under a shared folder, then runs `machinectl shell -q --uid=<user> alyosha /run/current-system/sw/bin/env -C <folder> /run/current-system/sw/bin/alyosha <args>`, passing `TERM` on. A polkit rule allows `org.freedesktop.machine1.shell` for the owner into this machine as themselves. Remove a host install of `alyosha` and the host's `gproxy` service when switching to the container.
 
 ## Bubblewrap inside the container
 
@@ -86,7 +88,8 @@ These checks need NixOS with the container built from the module above, and a pr
 
 - Run the shell integration checks from the Environment Interface guide inside the container: a nonzero exit, a sandbox setup error, and a timeout with a subprocess. [Verify on the host](EnvironmentInterface.md#verify-on-the-host)
 - Write a file through `write_file` in a workspace. Check on the host that it belongs to your user.
-- From a shell in the container, check that `~/.ssh` and a folder outside `~/Projects` do not exist.
+- From a shell in the container, check that `~/.ssh` and a folder outside `~/work` do not exist.
+- Run `alyosha` on the host in `~/work/some-project` and in `/tmp`. Check that the first opens the TUI in the container without a password prompt, in that folder, and that the second refuses, naming `~/work`.
 - Check that `systemctl show container@alyosha -p MemoryMax` on the host reports the configured value. In the container, run a job that allocates more than the cap. Check that the host stays responsive and the log of the program that lost a process says so, or the bridge restarts.
 - Start a test service on the host's `127.0.0.1`. Check that the container cannot connect to it, and that HTTPS to the provider works, name resolution included.
 - Run one tool exchange through GPROXY with the configured model from inside the container. [Gateway checks](LLMClientGateway.md#verify-with-the-upstream-binary-and-mock-providers)

@@ -1,6 +1,6 @@
 # Alyosha architecture
 
-Alyosha is designed as a general-purpose Rust agent for NixOS. You give it a task and a workspace. The model can reply directly or ask to use a tool, inspect the result, and continue. This checkout contains documentation only. The contracts below describe the planned v1 behavior.
+Alyosha is designed as a general-purpose Rust agent for NixOS. You give it a task and a workspace. The model can reply directly or ask to use a tool, inspect the result, and continue. The Rust code for every build step below is written and passes its offline checks under `cargo test`. The checks that need GPROXY, a provider account, the NixOS container, or a real Telegram or QQ bot still have to be run; each guide lists them.
 
 ## What v1 must do
 
@@ -43,13 +43,13 @@ The container comes at step 5, not last, because whether Bubblewrap and Chromium
 | Memory | Curated facts in one global store of Markdown files. The model writes them freely and each write shows in the status area. Past-session recall is deferred. [Memory](design/Memory.md) |
 | Skills | Procedures you write, in the Agent Skills layout, in one global directory. The model sees an index and loads a skill with the `skill` tool. Bundled files are read-only at `/skills`. [Skills](design/Skills.md) |
 | MCP | Alyosha connects to the stdio MCP servers you configure and registers their tools at session start. Servers run as trusted child processes, and calls need no approval unless the configuration marks the tool `ask`. HTTP servers and OAuth are deferred. [MCP Client](design/MCP.md) |
-| Where it runs | The whole agent, with GPROXY and MCP servers, runs as your user in a NixOS container that sees only `~/Projects` and Alyosha's own folders. Bubblewrap still wraps each shell command inside it. The container comes at step 5 of the build order. [Deployment](design/Deployment.md) |
+| Where it runs | The whole agent, with GPROXY and MCP servers, runs as your user in a NixOS container that sees only the workspace folders, `~/work` by default, and Alyosha's own folders. Bubblewrap still wraps each shell command inside it. On the host, `alyosha` runs the container's `alyosha` in the current folder, so it starts from any terminal. The container comes at step 5 of the build order. [Deployment](design/Deployment.md) |
 | Scheduled tasks | The model creates timed and repeating tasks through a schedule MCP server. The Telegram and QQ bridges run them in their sessions and deliver the results. [Scheduled tasks](design/Schedule.md) |
 | Web search | open-webSearch's MCP server searches engines such as Bing and DuckDuckGo without an account or key. The model opens results in Chromium. SearXNG is the fallback if searches get blocked. [Web search](design/WebSearch.md) |
 | Email and calendar | gogcli's MCP server reads Gmail and Google Calendar, tidies the mailbox, writes drafts, and sends email only after you approve. Calendar changes are deferred. [Email and calendar](design/EmailCalendar.md) |
 | Approvals | Alyosha acts freely in its own space and asks before reaching the real world. Tools marked `ask` in the configuration, such as sending email, wait for the owner's approval in the TUI or chat. For actions only the model can recognize, such as buying, it calls `ask_owner`. Unanswered requests are declined after 60 minutes. [Approvals](design/Approvals.md) |
 | Browser | One MCP server in the container: headless Chromium through Playwright MCP. A skill gives the model the rules for websites. Alyosha never stores passwords: Chromium loads sign-ins you save yourself on the host. [Browser](design/Browser.md) |
-| Configuration | One strict `~/.config/alyosha/config.toml`, mode 600, holds every setting and your secrets, and is read by every Alyosha program. Alyosha never writes it. Each message carries a clock line in your configured timezone. The TUI uses the current directory or a path argument as the workspace, which must be under `~/Projects`. [Configuration](reference/Configuration.md) |
+| Configuration | One strict `~/.config/alyosha/config.toml`, mode 600, holds every setting and your secrets, and is read by every Alyosha program. Alyosha never writes it. Each message carries a clock line in your configured timezone. The TUI uses the current directory or a path argument as the workspace, in any folder, like Codex or Claude Code. In the container only the shared workspace folders exist. [Configuration](reference/Configuration.md) |
 
 The seven tasks above define v1. The capabilities designed beyond the core are tracked in [What Alyosha still needs](design/todo.md).
 

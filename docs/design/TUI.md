@@ -3,7 +3,7 @@
 The TUI is how you use Alyosha at a terminal. It runs one session in the folder you start it in. The conversation prints into the terminal's normal scrollback, and only a small area at the bottom is live: a status line and the input box. You keep your terminal's own scrolling, search, and copy and paste, and the conversation stays on screen after you quit. [Agent Loop](AgentLoop.md) · [Chat channels](Channels.md) · [Architecture overview](../README.md)
 
 ```text
-alyosha · ~/Projects/thesis · gpt-6.2-sol
+alyosha · ~/work/thesis · gpt-6.2-sol
 ! MCP: 1 problem at startup (search: failed to start), details in ~/.local/share/alyosha/logs/alyosha-tui.2026-11-25.log
 
 › what's on my calendar tomorrow?
@@ -56,7 +56,7 @@ When Alyosha needs your approval or asks you a question, the request prints to t
 
 ## Starting
 
-- **Workspace.** `alyosha` uses the current folder, and `alyosha <path>` uses another. It must be a folder under `~/Projects`, otherwise Alyosha stops with an error saying so. [Container limits](../reference/ToolPermissions.md#container-limits)
+- **Workspace.** `alyosha` uses the current folder, and `alyosha <path>` uses another. Any existing folder works, as with Codex or Claude Code; a missing one stops Alyosha with an error saying so. The workspace is writable by every shell command, so start Alyosha in a project folder, not your home folder. [Container limits](../reference/ToolPermissions.md#container-limits)
 - **Header.** One line names the workspace and the model, followed by any startup warnings.
 - **Signing in.** The TUI never signs in to the model provider. If the provider is not signed in, the first turn fails with a message telling you to run `alyosha gateway login`. [Gateway login](../develop/LLMClientGateway.md#run-gproxy-as-a-service)
 

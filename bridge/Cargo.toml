@@ -1,0 +1,18 @@
+[package]
+name = "alyosha-bridge"
+version = "0.1.0"
+edition = "2024"
+description = "The ACP side shared by Alyosha's chat bridges, and their task runner"
+publish = false
+
+[dependencies]
+alyosha-config = { path = "../config" }
+alyosha-schedule = { path = "../schedule" }
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
+chrono-tz = "0.10.4"
+serde_json = { version = "1.0.154", features = ["preserve_order"] }
+tokio = { version = "1.54.1", features = ["rt", "rt-multi-thread", "macros", "sync", "time", "process", "io-util", "io-std"] }
+tracing = "0.1.44"
+
+[dev-dependencies]
+tempfile = "3.27.0"

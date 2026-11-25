@@ -1,0 +1,22 @@
+[package]
+name = "alyosha-qq"
+version = "0.1.0"
+edition = "2024"
+description = "The QQ bridge for Alyosha"
+publish = false
+
+[dependencies]
+alyosha-bridge = { path = "../bridge" }
+alyosha-config = { path = "../config" }
+alyosha-schedule = { path = "../schedule" }
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
+chrono-tz = "0.10.4"
+futures-util = "0.3.34"
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "json"] }
+serde_json = { version = "1.0.154", features = ["preserve_order"] }
+tokio = { version = "1.54.1", features = ["rt", "rt-multi-thread", "macros", "sync", "time", "signal", "net", "io-util"] }
+tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+tracing = "0.1.44"
+
+[dev-dependencies]
+tempfile = "3.27.0"
