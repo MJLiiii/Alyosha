@@ -150,6 +150,9 @@ in
             isNormalUser = true;
             inherit (cfg) uid;
           };
+          # nspawn creates the parent of the Alyosha config mount as root.
+          # Chromium needs to create its crash database under ~/.config.
+          systemd.tmpfiles.rules = [ "d ${home}/.config 0700 ${cfg.user} - -" ];
           # Dev shells load through the host's Nix daemon.
           nix.settings.experimental-features = [
             "nix-command"

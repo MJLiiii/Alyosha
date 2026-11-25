@@ -39,7 +39,7 @@ tools = ["search"]
 [mcp.servers.search.env]
 MODE = "stdio"
 SEARCH_MODE = "request"
-DEFAULT_SEARCH_ENGINE = "bing"
+DEFAULT_SEARCH_ENGINE = "duckduckgo"
 ALLOWED_SEARCH_ENGINES = "bing,duckduckgo,brave,startpage,baidu"
 MCP_TOOL_FETCH_WEB_NAME = "<disabled>"
 MCP_TOOL_FETCH_GITHUB_NAME = "<disabled>"
@@ -47,12 +47,11 @@ MCP_TOOL_FETCH_CSDN_NAME = "<disabled>"
 MCP_TOOL_FETCH_JUEJIN_NAME = "<disabled>"
 MCP_TOOL_FETCH_LINUXDO_NAME = "<disabled>"
 
-# The browser (docs/develop/Browser.md). Use absolute paths.
+# The browser (docs/develop/Browser.md). Public pages work with a temporary profile.
 [mcp.servers.chromium]
 command = "playwright-mcp"
 args = [
-  "--headless", "--isolated", "--no-webmcp",
-  "--storage-state", "/home/you/.local/share/alyosha/browser/chromium-state.json",
+  "--headless", "--sandbox", "--isolated", "--no-webmcp",
   "--output-dir", "/tmp/alyosha-playwright",
 ]
 tools = [

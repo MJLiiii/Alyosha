@@ -37,7 +37,7 @@ tools = ["search"]
 [mcp.servers.search.env]
 MODE = "stdio"
 SEARCH_MODE = "request"
-DEFAULT_SEARCH_ENGINE = "bing"
+DEFAULT_SEARCH_ENGINE = "duckduckgo"
 ALLOWED_SEARCH_ENGINES = "bing,duckduckgo,brave,startpage,baidu"
 MCP_TOOL_FETCH_WEB_NAME = "<disabled>"
 MCP_TOOL_FETCH_GITHUB_NAME = "<disabled>"
@@ -50,7 +50,8 @@ MCP_TOOL_FETCH_LINUXDO_NAME = "<disabled>"
 | --- | --- |
 | `MODE = "stdio"` | The default, `both`, also starts an HTTP server on port 3000. |
 | `SEARCH_MODE = "request"` | Never try to drive a browser for Bing. Playwright is not installed. |
-| `ALLOWED_SEARCH_ENGINES` | The engines the model may name. Bing is the default. Remove `baidu` if you never search Chinese content. |
+| `DEFAULT_SEARCH_ENGINE` | A search that omits `engines` uses DuckDuckGo. |
+| `ALLOWED_SEARCH_ENGINES` | The engines the model may request explicitly. Remove `baidu` if you never search Chinese content. |
 | `MCP_TOOL_FETCH_*_NAME = "<disabled>"` | Turns off the page readers in the server itself. The `tools` allowlist filters them again in Alyosha. |
 
 Leave `USE_PROXY` unset, because the container reaches the internet directly.
@@ -70,6 +71,6 @@ These need the configured model. Run them on the host at step 4 and again in the
 - Ask "what is the latest NixOS release?" Check that the model searches, opens a result with the chromium tools, and answers from the page.
 - Ask for a search with `engines` set to an engine not in `ALLOWED_SEARCH_ENGINES`. Record whether the server returns an error or falls back to an allowed engine, and check that the model still gets results.
 - Ask a question in Chinese. Check that Baidu results come back.
-- Run ten searches in a row on Bing. Note whether any come back empty or blocked. Repeat after a week of normal use. Repeated failures are the signal to switch to SearXNG. [When to switch](../design/WebSearch.md#when-to-switch-to-searxng)
+- Run ten searches using the default engine. If a search returns no results, retry with another allowed engine. Repeat after a week of normal use. [When to switch to SearXNG](../design/WebSearch.md#when-to-switch-to-searxng)
 
 [Architecture overview](../README.md)

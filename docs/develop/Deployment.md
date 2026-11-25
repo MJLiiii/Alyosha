@@ -80,7 +80,9 @@ The flake's module, `nixosModules.container`, sets `services.alyosha.workspaces`
 
 ## Bubblewrap inside the container
 
-Bubblewrap needs to create unprivileged user namespaces, and `systemd-nspawn` sits between it and the kernel. Check this first, before the other cases below. If the sandbox cannot start, find the container or host setting that allows user namespaces. Keep Bubblewrap; do not fall back to running commands without it. Record the setting here once known. Chromium's sandbox for the browser needs the same setting. [Chromium inside the container](Browser.md#chromium-inside-the-container)
+Bubblewrap needs unprivileged user namespaces, a private procfs for the sandbox, and a TUN device for pasta. On ms02, the container could create user namespaces, but pasta failed to open `/dev/net/tun` and Bubblewrap failed to mount its own `/proc`. The shell integration checks are still blocked in that deployment. The search and Chromium servers run outside Bubblewrap and can be tested independently. [Shell launch contract](EnvironmentInterface.md#bubblewrap-launch-contract)
+
+The container's tmpfiles rule gives the owner write access to `~/.config`. On a fresh container, nspawn creates this directory as root when setting up the nested Alyosha config mount. Without write access Chromium exits on its first navigation with `chrome_crashpad_handler: --database is required`. Check the browser with a real navigation and snapshot as the owner. [Chromium inside the container](Browser.md#chromium-inside-the-container)
 
 ## Verification
 
