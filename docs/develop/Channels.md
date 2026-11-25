@@ -79,6 +79,8 @@ Once a minute, read the time in the configured timezone. On each local date, the
 - **Busy:** active work, a queued message, an open prompt, an open permission request, or a running background job. Skip until the next date.
 - **Idle:** renew the session.
 
+A session opened at or after 04:00 counts as that date's fresh session, so its first renewal is at 04:00 the next date. This includes the session a renewal opens, whose own check must not renew it again. A session opened before 04:00 renews at 04:00 the same date.
+
 To renew, end the session as `session/new` would: shut down its MCP servers and remove its session logs. Read `config.toml` again and start a new session in the same `cwd`, with the same channel line, under the **same `sessionId`**. Send `available_commands_update` again. Set `first_reply_sent` to false and put this line first among the startup warnings: *Started a fresh session at 04:00. Earlier conversation is gone; memory keeps lasting facts.* A prompt that arrives during the renewal waits in the new session's queue. [Sessions](#sessions) · [Session startup](AgentLoop.md#session-driver)
 
 If the configuration fails to load or the workspace is no longer valid, keep the current session, log the error, and try again on the next date. [Logging](../reference/Logging.md)
@@ -141,6 +143,7 @@ These run under `cargo test` with an in-process ACP client and the scripted mode
 - Send `session/new` while a session is open with a waiting prompt. Check that the waiting prompt ends `cancelled` and the old session's MCP servers exit.
 - Parse every line written to standard output during these cases. Check that each is a valid JSON-RPC message.
 - With a fake clock, reach 04:00 while idle. Check that the `sessionId` is unchanged, that history and the checkpoint are empty, that the old MCP server processes exited and new ones started, that the session logs were removed, and that the next prompt's first `agent_message_chunk` is the fresh-session line.
+- Open a session at 10:00 and keep it idle past several checks. Check that it does not renew. After it renews at 04:00 the next date, keep it idle for hours. Check that it does not renew again that date.
 - Reach 04:00 with a background job running. Check that nothing changes at 04:00 or later that date, and that the session renews at 04:00 the next date once idle.
 - Send a prompt during the renewal. Check that it is answered in the new session.
 - Break `config.toml` before 04:00. Check that the old session stays usable and the error is logged.

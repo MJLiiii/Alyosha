@@ -663,7 +663,19 @@ impl Agent {
     /// Once per local date, the first check at or after 04:00 decides: an
     /// idle session is renewed under the same ID; a busy one waits a night.
     async fn watch_renewal(self: Arc<Self>, workspace: PathBuf, stop: CancellationToken) {
-        let mut decided: Option<chrono::NaiveDate> = None;
+        // A session counts as that day's fresh session: one opened at or
+        // after 04:00, including the one a renewal opens, waits for the
+        // next 04:00. Without this, each renewal's new watcher renewed
+        // again a minute later, all day.
+        let mut decided: Option<chrono::NaiveDate> =
+            (self.options.load_config)().ok().map(|config| {
+                let now = self.options.clock.now().with_timezone(&config.timezone);
+                if now.hour() < 4 {
+                    now.date_naive() - chrono::Days::new(1)
+                } else {
+                    now.date_naive()
+                }
+            });
         loop {
             tokio::select! {
                 () = stop.cancelled() => return,

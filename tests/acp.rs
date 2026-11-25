@@ -151,6 +151,13 @@ impl Client {
             .to_owned()
     }
 
+    /// Waits `wait` and checks that nothing arrives, such as a renewal.
+    async fn quiet_for(&mut self, wait: Duration) {
+        if let Ok(line) = tokio::time::timeout(wait, self.lines.next_line()).await {
+            panic!("expected nothing, got {line:?}");
+        }
+    }
+
     async fn prompt(&mut self, session: &str, text: &str) -> u64 {
         self.request(
             "session/prompt",
@@ -513,6 +520,8 @@ async fn the_session_renews_at_four_when_idle() {
     let session = client.new_session().await;
     let id = client.prompt(&session, "hello").await;
     client.until_response(id).await;
+    // Opened at 10:02, the session is that day's: no renewal until 04:00.
+    client.quiet_for(Duration::from_millis(400)).await;
     // 04:00 in Amsterdam the next day.
     *client.clock.0.lock().unwrap() = Utc.with_ymd_and_hms(2026, 11, 26, 3, 0, 30).unwrap();
     // Wait for the renewal's available_commands_update.
@@ -536,6 +545,9 @@ async fn the_session_renews_at_four_when_idle() {
         1,
         "earlier conversation is gone"
     );
+    // The renewed session does not renew again later that day.
+    *client.clock.0.lock().unwrap() = Utc.with_ymd_and_hms(2026, 11, 26, 9, 0, 0).unwrap();
+    client.quiet_for(Duration::from_millis(400)).await;
 }
 
 #[tokio::test]
