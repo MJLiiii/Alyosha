@@ -242,14 +242,14 @@ mod tests {
         let late = Utc.with_ymd_and_hms(2026, 11, 25, 23, 30, 0).unwrap();
         let log = DailyLog::open(
             &dir,
-            "alyosha-tui",
+            "alyosha-acp",
             chrono_tz::Europe::Amsterdam,
             Arc::new(move || late),
         )
         .unwrap();
         log.write_line(b"hello\n").unwrap();
         assert_eq!(fs::metadata(&dir).unwrap().mode() & 0o777, 0o700);
-        let file = dir.join("alyosha-tui.2026-11-26.log");
+        let file = dir.join("alyosha-acp.2026-11-26.log");
         assert_eq!(log.current_path(), file);
         assert_eq!(fs::metadata(&file).unwrap().mode() & 0o777, 0o600);
         assert_eq!(fs::read_to_string(&file).unwrap(), "hello\n");
@@ -323,7 +323,7 @@ mod tests {
             file.set_modified(now - Duration::from_secs(days * 24 * 60 * 60))
                 .unwrap();
         }
-        DailyLog::open(root.path(), "alyosha-tui", chrono_tz::UTC, at(10)).unwrap();
+        DailyLog::open(root.path(), "alyosha-acp", chrono_tz::UTC, at(10)).unwrap();
         assert!(!root.path().join("old.2026-11-10.log").exists());
         assert!(root.path().join("recent.2026-11-12.log").exists());
     }
@@ -333,7 +333,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let log = DailyLog::open(
             root.path(),
-            "alyosha-tui",
+            "alyosha-acp",
             chrono_tz::Europe::Amsterdam,
             at(9),
         )

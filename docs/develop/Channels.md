@@ -1,6 +1,6 @@
 # Implement the ACP mode
 
-`alyosha acp` serves one ACP agent connection over standard input and output and drives the same session driver as the TUI. Implement it at step 7 of the build order, after the TUI path works, because it adds a front end and nothing else. The Telegram bridge drives it. [Telegram bridge](TelegramBridge.md) [Chat channels design](../design/Channels.md) · [Session driver](AgentLoop.md#session-driver) · [Architecture overview](../README.md)
+`alyosha acp` serves one ACP agent connection over standard input and output and drives the session driver. It is Alyosha's only front end. Implement it at step 7 of the build order, because it adds a front end and nothing else. The Telegram bridge drives it. [Telegram bridge](TelegramBridge.md) [Chat channels design](../design/Channels.md) · [Session driver](AgentLoop.md#session-driver) · [Architecture overview](../README.md)
 
 ## Library and process
 
@@ -28,7 +28,7 @@ If the request carries `clientInfo`, keep its `name` for the channel line that e
 ```text
 AcpSession {
     session_id: String        # the session's key, such as owner:telegram
-    driver: SessionDriver     # the same driver the TUI uses
+    driver: SessionDriver
     first_reply_sent: bool    # startup warnings go before the first reply
 }
 ```
@@ -54,13 +54,13 @@ While the turn runs, send `session/update` notifications for that session:
 
 | Event | Update |
 | --- | --- |
-| A tool call starts | `tool_call` with the call ID as `toolCallId`, the TUI status line as `title`, a `kind`, and `status: "in_progress"` |
+| A tool call starts | `tool_call` with the call ID as `toolCallId`, the status title as `title`, a `kind`, and `status: "in_progress"` |
 | A tool call finishes | `tool_call_update` with `status: "completed"`, or `"failed"` for a tool error or cancelled result |
 | Assistant text, alongside tool calls or as the final reply | `agent_message_chunk` with the text, in the order the response gave it |
 
 Map `kind` as follows: `read_file` is `read`, `write_file` and `edit_file` are `edit`, `run_command` is `execute`, and everything else is `other`. Send no tool output in the update, because the bridge forwards updates to a chat app.
 
-Send a status notice during a turn or command, such as **Compacting context…**, as a pseudo tool call: `tool_call` with a `toolCallId` of the form `alyosha-status-<n>`, the TUI's text as `title`, `kind: "think"`, and `status: "in_progress"`. When the work it describes ends, send `tool_call_update` with `status: "completed"`, or `"failed"` if it failed. Bridges show it like any tool call, so they need no code for it. Do not send the TUI's own lines for approvals, **Answered: …** and **Not answered in time**, because the bridges show their own. [The ACP mode](Approvals.md#the-acp-mode)
+Send a status notice during a turn or command, such as **Compacting context…**, as a pseudo tool call: `tool_call` with a `toolCallId` of the form `alyosha-status-<n>`, the notice's text as `title`, `kind: "think"`, and `status: "in_progress"`. When the work it describes ends, send `tool_call_update` with `status: "completed"`, or `"failed"` if it failed. Bridges show it like any tool call, so they need no code for it. Send no status lines for approvals, such as **Answered: …** or **Not answered in time**, because the bridges show their own. [The ACP mode](Approvals.md#the-acp-mode)
 
 Before the first reply in a session, send each startup warning, such as a failed MCP server or a skipped skill, as its own `agent_message_chunk`. [MCP startup warnings](MCP.md#start-servers-and-register-tools)
 

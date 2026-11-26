@@ -1,4 +1,4 @@
-//! Session startup: everything the TUI and `alyosha acp` do to open a
+//! Session startup: everything `alyosha acp` does to open a
 //! session in a workspace.
 //!
 //! It checks the workspace, starts the configured MCP servers, opens the
@@ -23,7 +23,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     BoxFuture,
     agent_loop::{
-        DEFAULT_INSTRUCTION, JobDelivery, Persistence, SessionDriver, SessionEvent, SessionSetup,
+        DEFAULT_INSTRUCTION, Persistence, SessionDriver, SessionEvent, SessionSetup,
     },
     approvals::{self, Approver},
     clock::{Clock, SystemClock},
@@ -51,7 +51,6 @@ pub const DEV_SHELL_LIMIT: Duration = Duration::from_secs(10 * 60);
 pub struct FrontEnd {
     /// How the owner answers approvals and questions.
     pub approver: Option<Arc<dyn Approver>>,
-    pub job_delivery: JobDelivery,
     /// In ACP mode, the line naming the chat bridge.
     pub channel_line: Option<String>,
     /// The log file that startup warnings name.
@@ -358,7 +357,6 @@ pub async fn start_with_clock(
         limits: RouteLimits::for_model(&config.model.name),
         services,
         jobs: Some(job_environment),
-        job_delivery: front_end.job_delivery,
         persistence,
         rebuild_instruction: Some(rebuild_instruction),
     });
@@ -443,7 +441,6 @@ pub async fn start_guest(
         limits: RouteLimits::for_model(&config.model.name),
         services,
         jobs: None,
-        job_delivery: JobDelivery::Report,
         persistence,
         rebuild_instruction: None,
     });

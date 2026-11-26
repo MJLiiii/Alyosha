@@ -146,7 +146,7 @@ systemd.services.alyosha-telegram = {
 
 systemd sets `HOME` for `User=`, so Alyosha finds its folders as in a shell. Follow the bridge's startup and crashes with `journalctl -M alyosha -u alyosha-telegram -f` on the host, and its log files in `~/.local/share/alyosha/logs/`. [Logging](../reference/Logging.md)
 
-The bridge's `alyosha acp` uses the same GPROXY service as the TUI, so both can run at once. [Run GPROXY as a service](LLMClientGateway.md#run-gproxy-as-a-service)
+The bridge's `alyosha acp` uses the same GPROXY service as the QQ bridge's, so both can run at once. [Run GPROXY as a service](LLMClientGateway.md#run-gproxy-as-a-service)
 
 ## Verification
 

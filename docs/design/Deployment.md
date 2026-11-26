@@ -1,6 +1,6 @@
 # Deployment
 
-Alyosha runs inside a NixOS container on your machine. The container holds the whole agent: the TUI, the Agent Loop, GPROXY, and the MCP servers. Inside it, each shell command still gets its own Bubblewrap sandbox. The container limits what the agent as a whole can reach, and Bubblewrap limits what the model's shell can reach. [Architecture overview](../README.md) · [Environment Interface](EnvironmentInterface.md)
+Alyosha runs inside a NixOS container on your machine. The container holds the whole agent: the Agent Loop, GPROXY, and the MCP servers. Inside it, each shell command still gets its own Bubblewrap sandbox. The container limits what the agent as a whole can reach, and Bubblewrap limits what the model's shell can reach. [Architecture overview](../README.md) · [Environment Interface](EnvironmentInterface.md)
 
 ```text
 host (NixOS)
@@ -9,7 +9,6 @@ host (NixOS)
    │  network: private, internet through the host
    │
    └─ your user (not root)
-      ├─ alyosha (TUI + agent)
       ├─ alyosha-telegram service ─► alyosha acp (agent)
       ├─ alyosha-qq service ───────► alyosha acp (agent)
       ├─ gproxy service ◄── every alyosha process
@@ -62,15 +61,14 @@ The container has a memory cap, set in the host configuration. When everything i
 
 ## Using it
 
-The host starts the container at boot. To use Alyosha, run `alyosha` in any terminal on the host, in a folder under `~/work`: the host's `alyosha` is a small launcher that runs the container's `alyosha` in the same folder through `machinectl shell`, so it feels like Codex or Claude Code. A polkit rule lets you, and only you, open that shell without a password. The Telegram and QQ bridges run in the container as always-on services, so you can also message Alyosha from your phone. [Chat channels](Channels.md#the-telegram-bridge) Alyosha runs as your user, never as root, because root inside a NixOS container is close to root on the host. Your user has the same user ID inside, so files Alyosha writes are owned by you on the host.
+The host starts the container at boot. The Telegram and QQ bridges run in the container as always-on services, and you talk to Alyosha by messaging them. [Chat channels](Channels.md#the-telegram-bridge) The host's `alyosha` is a small launcher that runs the container's `alyosha` through `machinectl shell`, for `alyosha gateway init` and `gateway login`. A polkit rule lets you, and only you, open that shell without a password. Alyosha runs as your user, never as root, because root inside a NixOS container is close to root on the host. Your user has the same user ID inside, so files Alyosha writes are owned by you on the host.
 
 ## How we get there
 
-The component code does not depend on the container. The same build runs on the host and inside the container, because paths such as the configuration folder and the workspace come from the environment and are not fixed in code. Build and debug the core, the TUI, and the first plugins on the host, which are steps 1 to 4 of the implementation order. Then add the container as a NixOS module at step 5, before any real sign-ins or tokens are used. The first check in the container is whether Bubblewrap starts inside it. If it does not, adjust the container's settings and keep Bubblewrap. [Implementation order](../README.md#where-to-start-implementing)
+The component code does not depend on the container. The same build runs on the host and inside the container, because paths such as the configuration folder and the workspace come from the environment and are not fixed in code. Build and debug the core and the first plugins on the host, which are steps 1 to 4 of the implementation order. Then add the container as a NixOS module at step 5, before any real sign-ins or tokens are used. The first check in the container is whether Bubblewrap starts inside it. If it does not, adjust the container's settings and keep Bubblewrap. [Implementation order](../README.md#where-to-start-implementing)
 
 ## Deferred
 
-- Running the TUI as a client of a shared service. The TUI starts from a shell, and only the bridges run as services.
 - Mounting individual projects instead of all of `~/work`.
 - Removing the container's access to the host's Nix daemon, which lets programs in the container build or download packages into the shared store.
 - An ephemeral container that resets its own files on restart. Everything worth keeping already lives in the mounted folders.

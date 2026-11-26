@@ -39,7 +39,6 @@ Each session asks through its own front end:
 
 | Session | How you answer |
 | --- | --- |
-| TUI | The request prints in the conversation, and the input box shows the options. [TUI](TUI.md#approvals-and-questions) |
 | Telegram | Buttons under the request |
 | QQ | A reply of `/yes` or `/no`, or the number of a choice, because buttons need extra permission from QQ |
 
@@ -49,7 +48,7 @@ In ACP mode both kinds use ACP's `session/request_permission`, so each bridge ha
 
 - **One call at a time.** An approval covers that call only. There is no "always allow."
 - **Declining is an answer.** The tool does not run, and the model receives a tool error saying you declined. It continues the turn and can explain or try something else.
-- **No answer means no.** After 60 minutes without an answer, the call does not run and the model is told you did not answer. The limit is configurable. Meanwhile the turn waits. In a chat, messages you send while a request is open wait in the queue behind it. In the TUI, the input box waits for your answer first, and messages you queued before stay queued. [TUI](TUI.md#approvals-and-questions)
+- **No answer means no.** After 60 minutes without an answer, the call does not run and the model is told you did not answer. The limit is configurable. Meanwhile the turn waits. Messages you send while a request is open wait in the queue behind it.
 - **Stop declines.** Stop or `/cancel` while a request is open declines it and stops the turn.
 - **Undelivered means no.** If a bridge cannot deliver the request, for example when QQ refuses to send, the call does not run.
 - **Scheduled tasks ask too.** A task that wants to send an email at 7:00 asks in its chat. If you are asleep, the call is declined after 60 minutes. Creating or removing a task needs no approval, because a task can do nothing outward without asking. [Scheduled tasks](Schedule.md#trust)

@@ -21,7 +21,7 @@ Two tests failed in parser.rs. …
 
 The model calls `run_command` with `background: true`. The command runs in its own Bubblewrap sandbox under the same rules as any command: the workspace, the project's dev shell, the network, and the shell cache. The call returns a job ID such as `j1` straight away, and the turn goes on or ends as usual. [Shell commands](EnvironmentInterface.md#shell-commands)
 
-You can also start a job yourself, without the model, by typing `/job` and the command, in the TUI or in a chat:
+You can also start a job yourself, without the model, by sending `/job` and the command in a chat:
 
 ```text
 › /job cargo test --workspace
@@ -32,18 +32,15 @@ You can also start a job yourself, without the model, by typing `/job` and the c
 
 ## Watching and stopping
 
-The model uses the `job` tool to list jobs, check one's status and latest output, or stop it. It can read a job's full output with `read_file` through the job's `log_path`. The TUI status line shows how many jobs are running.
+The model uses the `job` tool to list jobs, check one's status and latest output, or stop it. It can read a job's full output with `read_file` through the job's `log_path`.
 
 Stop and `/cancel` end the current turn, not jobs. To end a job, ask the model, for example "stop the test run," or end the session.
 
 ## When a job ends
 
-When a job's command exits or reaches its time limit, a message joins the session's queue, like one of yours. It names the job, its status, its run time, and its command, followed by the last lines of output. When its turn comes, the model sees it and decides what to do next. A job you or the model stopped sends no message.
+When a job's command exits or reaches its time limit, Alyosha tells the bridge, and the bridge sends a message back as a prompt, so it joins the session's queue like one of yours. ACP lets only the bridge start a turn. [Chat channels](Channels.md#what-alyosha-acp-does) The message names the job, its status, its run time, and its command, followed by the last lines of output. When its turn comes, the model sees it and decides what to do next. A job you or the model stopped sends no message.
 
-- **TUI.** The message prints as **· Job j1 finished** and starts its turn when the session is free.
 - **Telegram and QQ.** The chat shows **⚙ Job finished:**, then the reply, as for a scheduled task. In QQ the reply follows the delivery rules for scheduled results, because it answers no message of yours. [Delivering on QQ](Schedule.md#delivering-on-qq)
-
-ACP lets only the bridge start a turn, so in ACP mode Alyosha tells the bridge that a job finished, and the bridge sends the message as a prompt. [Chat channels](Channels.md#what-alyosha-acp-does)
 
 ## Limits
 
@@ -53,7 +50,7 @@ ACP lets only the bridge start a turn, so in ACP mode Alyosha tells the bridge t
 
 ## Lifetime
 
-Jobs belong to the process running their session and end with it. Quitting the TUI, `/new` in a chat, and a bridge restart or crash all kill the session's jobs. A resumed session does not bring them back. [Durable sessions](SessionStore.md#what-is-saved) If jobs are running when you quit the TUI, it warns you, and quitting again stops them.
+Jobs belong to the process running their session and end with it. `/new` in a chat and a bridge restart or crash all kill the session's jobs. A resumed session does not bring them back. [Durable sessions](SessionStore.md#what-is-saved)
 
 ## Trust
 
@@ -61,7 +58,7 @@ A job runs in the same sandbox as any command, so it reaches nothing a command c
 
 ## Deferred
 
-- Listing or stopping jobs from the TUI or a chat without the model, such as `/jobs`.
+- Listing or stopping jobs from a chat without the model, such as `/jobs`.
 - Choosing a job's time limit with `/job`. It always uses the four-hour default.
 - Jobs that outlive their session.
 - More than two jobs at once, or limits set in the configuration.

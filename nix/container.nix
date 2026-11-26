@@ -1,8 +1,8 @@
 # The NixOS container that runs Alyosha, GPROXY, the session database, the
 # MCP servers, and the chat bridges as the owner. It sees only the workspace folders (~/work by
 # default) and Alyosha's own folders, and the host's localhost services are
-# unreachable. On the host, `alyosha` runs the container's alyosha in the
-# current folder, so it starts from any terminal like Codex or Claude Code.
+# unreachable. On the host, `alyosha` runs the container's alyosha for the
+# gateway commands.
 # See docs/design/Deployment.md and docs/develop/Deployment.md.
 #
 # In the host configuration:
@@ -31,25 +31,15 @@ let
     hostPath = path;
     isReadOnly = false;
   };
-  # The host's `alyosha`: checks that the folder is shared with the
-  # container, then runs alyosha there in the same folder.
+  # The host's `alyosha`: runs the container's alyosha, for the gateway
+  # commands. You talk to Alyosha through the chat bridges.
   hostCommand = pkgs.writeShellApplication {
     name = "alyosha";
     runtimeInputs = [ pkgs.systemd ];
     text = ''
-      here=$(pwd -P)
-      shared=0
-      roots=(${lib.escapeShellArgs cfg.workspaces})
-      for root in "''${roots[@]}"; do
-        case "$here/" in "$root"/*) shared=1 ;; esac
-      done
-      if [ "$shared" = 0 ]; then
-        echo "alyosha: $here is not shared with the Alyosha container. Work in a folder under: ${lib.concatStringsSep " " cfg.workspaces}" >&2
-        exit 2
-      fi
       exec machinectl shell -q --uid=${cfg.user} \
-        --setenv=TERM="''${TERM:-xterm-256color}" --setenv=COLORTERM="''${COLORTERM:-}" \
-        alyosha /run/current-system/sw/bin/env -C "$here" /run/current-system/sw/bin/alyosha "$@"
+        --setenv=TERM="''${TERM:-xterm-256color}" \
+        alyosha /run/current-system/sw/bin/alyosha "$@"
     '';
   };
   # The session database's major version. Moving to another needs a dump
@@ -98,7 +88,7 @@ in
     hostCommand = lib.mkOption {
       type = lib.types.bool;
       default = true;
-      description = "Install `alyosha` on the host, which runs the container's alyosha in the current folder, and let the owner open shells in the container without a password.";
+      description = "Install `alyosha` on the host, which runs the container's alyosha for the gateway commands, and let the owner open shells in the container without a password.";
     };
     externalInterface = lib.mkOption {
       type = lib.types.str;

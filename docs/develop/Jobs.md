@@ -1,6 +1,6 @@
 # Implement background jobs
 
-Add a per-session `JobManager`, a `background` input on `run_command`, the `job` tool, and one way for a finished job to start a turn in each front end. Build the TUI side with the shell at step 3 and the ACP side with the bridges at step 7. [Background jobs design](../design/Jobs.md) · [Architecture overview](../README.md)
+Add a per-session `JobManager`, a `background` input on `run_command`, the `job` tool, and a way for a finished job to start a turn through the bridge. Build the job manager with the shell at step 3 and the ACP side with the bridges at step 7. [Background jobs design](../design/Jobs.md) · [Architecture overview](../README.md)
 
 ## Job manager
 
@@ -53,7 +53,6 @@ The front ends recognize a message that starts with `/job` followed by a space a
 
 The session driver handles it at once, without the work slot or the queue, so it also works during a turn. It calls `JobManager::start` with the default four-hour deadline and returns a command status outside history: **Job j1 started: <command>**, or the tool error's text, such as the two-job limit. Record the job's origin as `Owner`. [Job manager](#job-manager)
 
-- **TUI.** `UiCommand::StartJob(command)`, answered with `CommandStatus`. [TUI](TUI.md#input)
 - **ACP mode.** A prompt whose text starts with `/job ` runs the command and answers with the status as an `agent_message_chunk` and `end_turn`, without queuing. List `job` in `available_commands_update`, described as "Run a shell command as a background job", with the input hint `command`. [Prompts](Channels.md#prompts)
 - **Bridges.** Telegram and QQ pass `/job …` through as prompt text, like `/compact`. Telegram adds `job` to its command menu.
 
@@ -69,20 +68,15 @@ Last output:
 
 Use `TimedOut` in place of the status for a job that reached its deadline, and add `Earlier output was dropped.` when `output_dropped` is set. For a job the owner started with `/job`, the first line ends with ` · started by the owner with /job`.
 
-- **TUI.** The driver queues the text as a message with `origin: Job` and a fresh message ID. It gets a clock line like any message and runs when its turn comes. The TUI prints `  · Job j1 finished` instead of `›` and the text. [Agent State fields](AgentState.md#session-fields)
-- **ACP mode.** The driver does not queue it. `alyosha acp` sends the extension notification `_alyosha/job_finished` with `sessionId`, `jobId`, and `text`. ACP reserves method names beginning with `_` for extensions, and a client that does not know one ignores it. [ACP extensibility](https://agentclientprotocol.com/protocol/extensibility) · [ACP mode](Channels.md)
+- **Session driver.** The driver never queues it. It emits `SessionEvent::JobFinished { job_id, text }`, and nothing joins the queue until the bridge sends the text back.
+- **ACP mode.** `alyosha acp` sends the extension notification `_alyosha/job_finished` with `sessionId`, `jobId`, and `text`. ACP reserves method names beginning with `_` for extensions, and a client that does not know one ignores it. [ACP extensibility](https://agentclientprotocol.com/protocol/extensibility) · [ACP mode](Channels.md)
 - **Bridges.** `alyosha-bridge` turns the notification into an event. The bridge shows **⚙ Job finished:** in the chat, then sends the text as a `session/prompt`, like a scheduled task. QQ sends the reply under its scheduled-reply rules. [The runner](Schedule.md#the-runner) · [Delivering on QQ](Schedule.md#delivering-on-qq)
-
-## TUI
-
-- The status line adds **N jobs** after the queue count while any job runs. Send `UiEvent::Jobs(count)` on every change.
-- On `/quit` or Ctrl+D with jobs running, print `! N jobs running. Quit again to stop them.` A second quit within 5 seconds quits and ends the session, which calls `shutdown`. [TUI](TUI.md#input)
 
 ## Verification
 
 These run under `cargo test` with the scripted model, except those that start a real sandbox, which run with the shell integration checks on NixOS. [Verify on the host](EnvironmentInterface.md#verify-on-the-host)
 
-- Start `sleep 2; echo done` with `background: true`. Check that the call returns `Started` at once, that the turn ends, and that a `JobFinished` message later starts a turn whose text holds the status and `done`.
+- Start `sleep 2; echo done` with `background: true`. Check that the call returns `Started` at once, that the turn ends, that a `JobFinished` event later carries the status and `done` with nothing queued, and that submitting its text, as a bridge does, runs a turn.
 - Start three jobs. Check that the third returns a tool error.
 - Pass `timeout_seconds: 3600` without `background`. Check for a tool error. Give a job a 2-second deadline with `sleep 60`. Check for a `TimedOut` message.
 - Call `job stop` on a running job. Check that its sandbox and children are gone, its state is `Stopped`, and no message is queued.
@@ -92,6 +86,5 @@ These run under `cargo test` with the scripted model, except those that start a 
 - In ACP mode, finish a job. Check for one `_alyosha/job_finished` notification and that nothing enters the queue until a prompt arrives.
 - Type `/job sleep 1; echo hi` during a scripted turn. Check that the job starts at once, that nothing enters history or the queue until it finishes, and that the finished message says the owner started it. Type a bare `/job`. Check for the usage text and no job.
 - In ACP mode, send `/job true` as a prompt. Check for the started status and `end_turn` without a turn, and that `available_commands_update` lists `job`.
-- In the TUI, quit with a job running. Check for the warning, and that a second quit within 5 seconds stops the job.
 
 [Architecture overview](../README.md)

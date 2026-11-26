@@ -37,10 +37,10 @@ impl From<&str> for CallId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MessageOrigin {
-    /// The owner, through a front end.
+    /// The owner, through a front end. A finished job's text also arrives
+    /// this way, sent back by the bridge as a prompt. The field stays so
+    /// that saved history keeps its shape.
     Owner,
-    /// A background job that finished (`docs/design/Jobs.md`).
-    Job,
 }
 
 /// Who wrote a message in a group chat: a platform user ID, such as

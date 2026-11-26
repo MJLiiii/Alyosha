@@ -16,7 +16,6 @@ The folder has mode `0700` and each file `0600`. It is outside every workspace a
 
 | Program | File |
 | --- | --- |
-| The TUI | `alyosha-tui.<date>.log` |
 | `alyosha acp` | `alyosha-acp.<date>.log` |
 | `alyosha acp --guest` | `alyosha-acp-guest.<date>.log` |
 | `alyosha acp --group` | `alyosha-acp-group.<date>.log` |
@@ -24,7 +23,7 @@ The folder has mode `0700` and each file `0600`. It is outside every workspace a
 | `alyosha-qq` | `alyosha-qq.<date>.log` |
 | `alyosha-schedule` | `alyosha-schedule.<date>.log` |
 
-The date is the local date in the configured timezone. Each line starts with the time, the level, the process ID, and the session ID when there is one. Several processes can share a file, such as two TUIs or the two bridges' `alyosha acp` children. Each line is appended with one write to a file opened with `O_APPEND`, so lines never mix.
+The date is the local date in the configured timezone. Each line starts with the time, the level, the process ID, and the session ID when there is one. Several processes can share a file, such as the two bridges' `alyosha acp` children. Each line is appended with one write to a file opened with `O_APPEND`, so lines never mix.
 
 ## What is logged
 
@@ -51,9 +50,9 @@ Every program deletes log files older than 14 days when it starts. Each file is 
 
 ## Before logging starts
 
-An error that stops a program before its log is open, such as a configuration error, goes to standard error. The TUI prints it before touching the terminal. A bridge's standard error, and that of its `alyosha acp` child, goes to the systemd journal. GPROXY logs to the journal as its own service. [Loading](../develop/Configuration.md#loading) · [Run GPROXY as a service](../develop/LLMClientGateway.md#run-gproxy-as-a-service)
+An error that stops a program before its log is open, such as a configuration error, goes to standard error. A bridge's standard error, and that of its `alyosha acp` child, goes to the systemd journal. GPROXY logs to the journal as its own service. [Loading](../develop/Configuration.md#loading) · [Run GPROXY as a service](../develop/LLMClientGateway.md#run-gproxy-as-a-service)
 
-Startup warnings name the file that holds their details, for example *details in ~/.local/share/alyosha/logs/alyosha-tui.2026-11-25.log*.
+Startup warnings name the file that holds their details, for example *details in ~/.local/share/alyosha/logs/alyosha-acp.2026-11-25.log*.
 
 ## Implementation
 

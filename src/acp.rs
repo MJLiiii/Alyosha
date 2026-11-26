@@ -1,5 +1,5 @@
 //! `alyosha acp`: one Agent Client Protocol connection over standard input
-//! and output, driving the same session driver as the TUI.
+//! and output, driving the session driver for a chat bridge.
 //!
 //! Standard output carries only protocol messages: newline-delimited
 //! JSON-RPC 2.0, protocol version 1. Sessions are saved in the session store
@@ -25,7 +25,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     BoxFuture,
-    agent_loop::{JobDelivery, Persistence, SessionDriver, SessionEvent, Status},
+    agent_loop::{Persistence, SessionDriver, SessionEvent, Status},
     agent_state::{HistoryEntry, MessageId, Sender, TurnOutcome},
     approvals::{Approver, OwnerAnswer, OwnerRequest},
     clock::Clock,
@@ -573,7 +573,6 @@ impl Agent {
                     session_id: self.session_id.clone(),
                     open_requests: self.open_requests.clone(),
                 })),
-                job_delivery: JobDelivery::Report,
                 channel_line: self.channel_line(),
                 log_file: self.options.log_file.clone(),
                 on_loading_dev_shell: None,
@@ -739,7 +738,6 @@ impl Agent {
                 json!({"sessionId": session_id, "jobId": job_id, "text": text}),
             ),
             SessionEvent::Queued(_)
-            | SessionEvent::JobMessageQueued { .. }
             | SessionEvent::TurnStarted(_)
             | SessionEvent::Jobs(_) => {}
         }

@@ -1,6 +1,6 @@
 # Implement approvals
 
-Add one dispatch step to the Tool Executor, one built-in tool, and one front-end operation that the TUI and the ACP mode each implement. The bridges show the requests. [Approvals design](../design/Approvals.md) · [Tool Executor](ToolExecutor.md) · [Architecture overview](../README.md)
+Add one dispatch step to the Tool Executor, one built-in tool, and one front-end operation that the ACP mode implements. The bridges show the requests. [Approvals design](../design/Approvals.md) · [Tool Executor](ToolExecutor.md) · [Architecture overview](../README.md)
 
 ## Configuration
 
@@ -71,10 +71,6 @@ Without `choices`, the options are Yes and No. With them, the options are the ch
 | `NoAnswer` | `The owner did not answer within N minutes.` |
 | `Undeliverable` | Tool error: "The question could not be delivered." |
 | `Cancelled` | Cancellation. |
-
-## The TUI
-
-Show the title, the body, and numbered options in the TUI, and read one key: the option's number, or `y` and `n` for two options. [TUI approvals](TUI.md#approvals)
 
 ## The ACP mode
 

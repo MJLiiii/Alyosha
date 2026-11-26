@@ -42,15 +42,6 @@ pub const COMPACT_BUSY: &str = "Busy: try /compact again when the session is idl
 /// The usage a bare `/job` shows.
 pub const JOB_USAGE: &str = "/job <command> starts a background job.";
 
-/// How finished jobs reach the conversation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum JobDelivery {
-    /// The TUI: the driver queues the job's message like one of the owner's.
-    Queue,
-    /// ACP: the driver reports it and the bridge sends it back as a prompt.
-    Report,
-}
-
 /// What a session needs at startup.
 pub struct SessionSetup {
     /// The GPROXY provider name, fixed for the session.
@@ -74,7 +65,6 @@ pub struct SessionSetup {
     pub services: SessionServices,
     /// Background jobs' sandbox, when the session can run commands.
     pub jobs: Option<JobEnvironment>,
-    pub job_delivery: JobDelivery,
     /// Where history is saved, with the session it was created or loaded
     /// as. Without it, history lives only in memory.
     pub persistence: Option<Persistence>,
@@ -114,7 +104,6 @@ impl SessionSetup {
             limits: RouteLimits::for_model(model),
             services: SessionServices::default(),
             jobs: None,
-            job_delivery: JobDelivery::Queue,
             persistence: None,
             rebuild_instruction: None,
         }
@@ -136,11 +125,6 @@ pub enum Status {
 pub enum SessionEvent {
     /// A submitted message joined the queue.
     Queued(MessageId),
-    /// A finished job's message joined the queue.
-    JobMessageQueued {
-        id: MessageId,
-        job_id: String,
-    },
     /// A message's turn started.
     TurnStarted(MessageId),
     Status(Status),
@@ -285,21 +269,17 @@ impl SessionDriver {
         });
         tokio::spawn(consume(session.clone()));
         let weak = Arc::downgrade(&session);
-        let delivery = setup.job_delivery;
+        // A finished job is reported, not queued: the bridge sends its text
+        // back as a prompt (docs/develop/Jobs.md#when-a-job-finishes).
         tokio::spawn(async move {
             while let Some(finished) = job_inbox.recv().await {
                 let Some(session) = weak.upgrade() else {
                     return;
                 };
-                match delivery {
-                    JobDelivery::Queue => {
-                        session.enqueue(finished.text, MessageOrigin::Job, Some(finished.id), None);
-                    }
-                    JobDelivery::Report => session.emit(SessionEvent::JobFinished {
-                        job_id: finished.id,
-                        text: finished.text,
-                    }),
-                }
+                session.emit(SessionEvent::JobFinished {
+                    job_id: finished.id,
+                    text: finished.text,
+                });
             }
         });
         (Self { session }, receiver)
@@ -309,7 +289,7 @@ impl SessionDriver {
     /// its ID.
     pub fn submit(&self, text: impl Into<String>) -> MessageId {
         self.session
-            .enqueue(text.into(), MessageOrigin::Owner, None, None)
+            .enqueue(text.into(), None)
     }
 
     /// Queues a group member's message in a guest session. When its turn
@@ -317,7 +297,7 @@ impl SessionDriver {
     /// writes, and the opening entry carries their notes.
     pub fn submit_from(&self, text: impl Into<String>, sender: Sender) -> MessageId {
         self.session
-            .enqueue(text.into(), MessageOrigin::Owner, None, Some(sender))
+            .enqueue(text.into(), Some(sender))
     }
 
     /// Signals Stop to the active turn or command. Queued messages stay
@@ -527,29 +507,20 @@ async fn consume(session: Arc<Session>) {
 }
 
 impl Session {
-    fn enqueue(
-        &self,
-        text: String,
-        origin: MessageOrigin,
-        job_id: Option<String>,
-        sender: Option<Sender>,
-    ) -> MessageId {
+    fn enqueue(&self, text: String, sender: Option<Sender>) -> MessageId {
         let id = {
             let mut state = self.lock_state();
             let id = MessageId(self.last_message_id.fetch_add(1, Ordering::Relaxed) + 1);
             state.pending_messages.push_back(UserMessage {
                 id,
-                origin,
+                origin: MessageOrigin::Owner,
                 sender,
                 text,
                 submitted_at: self.clock.now(),
             });
             // Sent under the lock, so the front end hears of the message
             // before its turn can start.
-            match job_id {
-                Some(job_id) => self.emit(SessionEvent::JobMessageQueued { id, job_id }),
-                None => self.emit(SessionEvent::Queued(id)),
-            }
+            self.emit(SessionEvent::Queued(id));
             id
         };
         self.wake.notify_one();

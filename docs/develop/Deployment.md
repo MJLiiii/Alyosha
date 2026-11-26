@@ -1,6 +1,6 @@
 # Run Alyosha in a NixOS container
 
-Add the container at step 5 of the build order, after the core, the TUI, search, and the browser work on the host, and before email and the bridges. Nothing in the components changes for it. Alyosha must find its folders through `$HOME` and the XDG variables and take the workspace from where it starts, as the component guides already describe. [Deployment design](../design/Deployment.md) · [Architecture overview](../README.md)
+Add the container at step 5 of the build order, after the core, search, and the browser work on the host, and before email and the bridges. Nothing in the components changes for it. Alyosha must find its folders through `$HOME` and the XDG variables and take the workspace from the bridge, as the component guides already describe. [Deployment design](../design/Deployment.md) · [Architecture overview](../README.md)
 
 ## Host module
 
@@ -76,9 +76,9 @@ Keep secrets out of Nix expressions, including the container module and MCP `env
 machinectl shell mjli@alyosha
 ```
 
-Then `cd` to a workspace and run `alyosha`. Never run it as root inside the container.
+Then run `alyosha gateway …` or probe the sandbox. Never run Alyosha as root inside the container.
 
-The flake's module, `nixosModules.container`, sets `services.alyosha.workspaces` (default `[ "~/work" ]`) as the shared folders and, with `hostCommand` (on by default), installs a host `alyosha`. It checks that the current folder is under a shared folder, then runs `machinectl shell -q --uid=<user> alyosha /run/current-system/sw/bin/env -C <folder> /run/current-system/sw/bin/alyosha <args>`, passing `TERM` on. A polkit rule allows `org.freedesktop.machine1.shell` for the owner into this machine as themselves. Remove a host install of `alyosha` and the host's `gproxy` service when switching to the container.
+The flake's module, `nixosModules.container`, sets `services.alyosha.workspaces` (default `[ "~/work" ]`) as the shared folders and, with `hostCommand` (on by default), installs a host `alyosha`, which runs `machinectl shell -q --uid=<user> alyosha /run/current-system/sw/bin/alyosha <args>`, passing `TERM` on, for the gateway commands. A polkit rule allows `org.freedesktop.machine1.shell` for the owner into this machine as themselves. Remove a host install of `alyosha` and the host's `gproxy` service when switching to the container.
 
 ## Bubblewrap inside the container
 
@@ -167,7 +167,7 @@ A read-only mount may not be enough, because the kernel treats it as locked read
 net bwrap --unshare-user --unshare-pid --unshare-ipc --ro-bind /nix/store /nix/store --dev /dev --proc /proc -- "$sh" -c 'echo /proc/[0-9]*'
 ```
 
-Expect one or two process IDs. Then run `alyosha` in a folder under `~/work` and have it run `pwd; uname -r; nproc`, and work through the shell check in [Verification](#verification). The manual mount disappears when the container restarts.
+Expect one or two process IDs. Then ask Alyosha from Telegram to run `pwd; uname -r; nproc`, and work through the shell check in [Verification](#verification). The manual mount disappears when the container restarts.
 
 **5. Decide.**
 
@@ -187,7 +187,7 @@ These checks need NixOS with the container built from the module above, and a pr
 - Run the shell integration checks from the Environment Interface guide inside the container: a nonzero exit, a sandbox setup error, and a timeout with a subprocess. [Verify on the host](EnvironmentInterface.md#verify-on-the-host)
 - Write a file through `write_file` in a workspace. Check on the host that it belongs to your user.
 - From a shell in the container, check that `~/.ssh` and a folder outside `~/work` do not exist.
-- Run `alyosha` on the host in `~/work/some-project` and in `/tmp`. Check that the first opens the TUI in the container without a password prompt, in that folder, and that the second refuses, naming `~/work`.
+- Run `alyosha --help` on the host. Check that it prints the container's usage without a password prompt.
 - Check that `systemctl show container@alyosha -p MemoryMax` on the host reports the configured value. In the container, run a job that allocates more than the cap. Check that the host stays responsive and the log of the program that lost a process says so, or the bridge restarts.
 - Start a test service on the host's `127.0.0.1`. Check that the container cannot connect to it, and that HTTPS to the provider works, name resolution included.
 - Run one tool exchange through GPROXY with the configured model from inside the container. [Gateway checks](LLMClientGateway.md#verify-with-the-upstream-binary-and-mock-providers)

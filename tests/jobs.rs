@@ -7,8 +7,8 @@ mod support;
 use std::{fs, sync::Arc, time::Duration};
 
 use alyosha::{
-    agent_loop::{JobDelivery, SessionEvent},
-    agent_state::{HistoryEntry, MessageOrigin, ToolOutcome, TurnOutcome},
+    agent_loop::SessionEvent,
+    agent_state::{HistoryEntry, ToolOutcome, TurnOutcome},
     clock::FixedClock,
     session::{self, FrontEnd, Started},
 };
@@ -56,7 +56,6 @@ async fn open(home: &Home, model: Arc<ScriptedModel>) -> Started {
         model,
         FrontEnd {
             approver: None,
-            job_delivery: JobDelivery::Queue,
             channel_line: None,
             log_file: None,
             on_loading_dev_shell: None,
@@ -85,14 +84,15 @@ fn results(started: &Started) -> Vec<(String, ToolOutcome)> {
         .collect()
 }
 
-async fn next_job_message(started: &mut Started) -> (alyosha::agent_state::MessageId, String) {
+/// Waits for a finished job's report and returns its job ID and text.
+async fn next_job_finished(started: &mut Started) -> (String, String) {
     loop {
         let event = tokio::time::timeout(Duration::from_secs(30), started.events.recv())
             .await
-            .expect("a job message")
+            .expect("a finished job")
             .unwrap();
-        if let SessionEvent::JobMessageQueued { id, job_id } = event {
-            return (id, job_id);
+        if let SessionEvent::JobFinished { job_id, text } = event {
+            return (job_id, text);
         }
     }
 }
@@ -173,14 +173,16 @@ async fn a_background_job_starts_a_turn_when_it_ends() {
         TurnOutcome::Completed
     );
 
-    let (job_turn, job_id) = next_job_message(&mut started).await;
+    // Nothing joins the queue until the bridge sends the report back.
+    let (job_id, report) = next_job_finished(&mut started).await;
     assert_eq!(job_id, "j1");
+    assert!(started.driver.snapshot().pending_messages.is_empty());
+    let job_turn = started.driver.submit(report);
     events_until_turn_ends(&mut started.events, job_turn).await;
     let state = started.driver.snapshot();
     let HistoryEntry::User(message) = &state.history[4] else {
         panic!("{:?}", state.history[4])
     };
-    assert_eq!(message.origin, MessageOrigin::Job);
     assert!(
         message.text.contains(
             "[Job j1 finished: status 0 after 1s · sleep 1; echo done]\nLast output:\ndone\n"
@@ -234,20 +236,7 @@ async fn jobs_have_limits_and_stop_without_a_message() {
     // /job runs at once; the session ending kills the running jobs quietly.
     let status = started.driver.start_job("sleep 1; echo hi");
     assert_eq!(status, "Job j3 started: sleep 1; echo hi");
-    let (job_turn, _) = next_job_message(&mut started).await;
-    let state = started.driver.snapshot();
-    let text = state
-        .pending_messages
-        .iter()
-        .find(|message| message.id == job_turn)
-        .map(|message| message.text.clone())
-        .or_else(|| {
-            state.history.iter().find_map(|entry| match entry {
-                HistoryEntry::User(user) if user.message_id == job_turn => Some(user.text.clone()),
-                _ => None,
-            })
-        })
-        .unwrap_or_default();
+    let (_, text) = next_job_finished(&mut started).await;
     assert!(text.contains("· started by the owner with /job]"), "{text}");
     let ended = std::time::Instant::now();
     started.driver.end().await;

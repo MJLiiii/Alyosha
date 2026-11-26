@@ -2,7 +2,7 @@
 
 This page lists the capabilities Alyosha needs beyond the browser to work like a personal assistant. Each one gets its own design page once discussed. Designed items stay here, marked, while later items depend on them. [Architecture overview](../README.md#v1-decisions-and-open-work) · [Browser](Browser.md)
 
-The biggest gap is that Alyosha works only while you sit at the TUI. A human assistant keeps working while you are away and can reach you. The order below follows that gap, and later items depend on earlier ones.
+The biggest gap was that Alyosha worked only while you sat at a terminal. You now reach it only through chat apps. A human assistant keeps working while you are away and can reach you. The order below follows that gap, and later items depend on earlier ones.
 
 ```text
 1. Chat channel ──┬─► 2. Tasks that start on their own

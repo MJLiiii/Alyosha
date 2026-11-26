@@ -1,6 +1,6 @@
 # Chat channels
 
-A chat channel lets you talk to Alyosha from a messaging app when you are away from the TUI. Telegram and QQ are the first two. Alyosha has no code for any messaging app. It has one generic mode, `alyosha acp`, in which another program drives a session over standard input and output using the [Agent Client Protocol](https://agentclientprotocol.com/protocol/overview) (ACP). Each messaging app gets a separate **bridge** program that starts `alyosha acp`, passes your messages in, and sends the replies back. [Architecture overview](../README.md) · [What Alyosha still needs](todo.md)
+A chat channel lets you talk to Alyosha from a messaging app and is the only way to talk to it. Telegram and QQ are the first two. Alyosha has no code for any messaging app. It has one generic mode, `alyosha acp`, in which another program drives a session over standard input and output using the [Agent Client Protocol](https://agentclientprotocol.com/protocol/overview) (ACP). Each messaging app gets a separate **bridge** program that starts `alyosha acp`, passes your messages in, and sends the replies back. [Architecture overview](../README.md) · [What Alyosha still needs](todo.md)
 
 ```text
 your phone ── Telegram ──► telegram bridge ── ACP over stdio ──► alyosha acp ──► agent core
@@ -27,13 +27,13 @@ A protocol of Alyosha's own, like the JSON-lines RPC mode of the pi agent, would
 
 ## What `alyosha acp` does
 
-`alyosha acp` runs the same session driver and turn loop as the TUI. Only the front end differs. [Agent Loop](AgentLoop.md)
+`alyosha acp` runs the session driver and turn loop. It is the only front end; the TUI was removed on 2026-11-26. [Agent Loop](AgentLoop.md)
 
 - **One session at a time.** `session/new` starts a session in the folder the bridge names, any existing folder, under a key the bridge chooses for the conversation, such as `owner:telegram`. If a session is already open, it ends first, so a bridge's "new conversation" command gives the model a fresh start. Memory carries lasting facts across sessions as usual. [Memory](Memory.md)
 - **Sessions survive restarts.** Every history entry is saved to a database as it happens. A bridge that starts sends `session/load` with its key and gets the conversation back, so a crash, a configuration change, or a container reboot costs only the turn in progress and any queued messages. The first reply after a resume says so. There is no nightly fresh start: compaction keeps the conversation small, and the memory and skills indexes are rebuilt at each compaction. [Durable sessions](SessionStore.md)
-- **Messages wait their turn.** Each `session/prompt` becomes one queued message. If a turn is running, the next prompt waits in the queue and is answered when its own turn ends, just as in the TUI.
-- **You see what it does.** Each tool call is reported as an ACP tool call, titled like the TUI status area, for example **MCP: chromium.browser_click** or **Remembered: thesis-repo**. Status lines such as **Compacting context…** are reported the same way, as pseudo tool calls, so the bridge shows them without any code of its own. The reply arrives as message text when the turn ends. Startup warnings, such as an MCP server that failed to start, come before the first reply.
-- **Stop works as in the TUI.** `session/cancel` signals the active turn, and the prompt ends as cancelled.
+- **Messages wait their turn.** Each `session/prompt` becomes one queued message. If a turn is running, the next prompt waits in the queue and is answered when its own turn ends.
+- **You see what it does.** Each tool call is reported as an ACP tool call, with a short title, for example **MCP: chromium.browser_click** or **Remembered: thesis-repo**. Status lines such as **Compacting context…** are reported the same way, as pseudo tool calls, so the bridge shows them without any code of its own. The reply arrives as message text when the turn ends. Startup warnings, such as an MCP server that failed to start, come before the first reply.
+- **Stop works.** `session/cancel` signals the active turn, and the prompt ends as cancelled.
 - **The configuration decides the tools.** Alyosha starts the MCP servers in its own configuration and ignores servers the bridge offers in `session/new`, so a bridge cannot add tools. It also ignores the editor features ACP offers, such as the client's file system and terminals, because the Environment Interface already handles files and shell commands. [Environment Interface](EnvironmentInterface.md)
 - **Finished jobs reach the bridge.** ACP lets only the client start a turn, so when a background job ends, Alyosha sends the bridge a notification of its own, and the bridge sends the job's message back as a prompt. [Background jobs](Jobs.md#when-a-job-ends)
 - **Text only.** Alyosha accepts text and links. Photos, files, and voice wait until tool results and prompts support images.
@@ -78,7 +78,7 @@ containers.alyosha
 
 Your settings go in a `[telegram]` section of `~/.config/alyosha/config.toml`: your Telegram user ID and the workspace folder. The bot token goes in the same file, which must be readable only by you. [Configuration](../reference/Configuration.md#telegram)
 
-Both the bridge's `alyosha acp` and a TUI session use the same GPROXY service, so you can use the TUI while the bridge runs. [Gateway lifetime](LLMClientGateway.md#provider-accounts-and-gateway-lifetime)
+Every bridge's `alyosha acp` uses the same GPROXY service. [Gateway lifetime](LLMClientGateway.md#provider-accounts-and-gateway-lifetime)
 
 ## The QQ bridge
 
@@ -149,6 +149,5 @@ A group that is not listed gets a guest session as before. Removing a group from
 - Rate limits for group mentions, and an allowlist of groups.
 - Answering group messages that do not mention Alyosha.
 - Typing indicators in QQ groups.
-- Turning the TUI into an ACP client, so that it is a bridge too.
 
 [Chat channels implementation guide](../develop/Channels.md)

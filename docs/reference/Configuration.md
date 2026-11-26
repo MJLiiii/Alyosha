@@ -1,17 +1,17 @@
 # Configuration
 
-All of Alyosha's settings live in one file, `${XDG_CONFIG_HOME:-$HOME/.config}/alyosha/config.toml`. You write it, and Alyosha never changes it. Every Alyosha program reads it: the TUI, `alyosha acp`, the Telegram and QQ bridges, and the schedule server. [Implementation guide](../develop/Configuration.md) · [Architecture overview](../README.md)
+All of Alyosha's settings live in one file, `${XDG_CONFIG_HOME:-$HOME/.config}/alyosha/config.toml`. You write it, and Alyosha never changes it. Every Alyosha program reads it: `alyosha acp`, the Telegram and QQ bridges, and the schedule server. [Implementation guide](../develop/Configuration.md) · [Architecture overview](../README.md)
 
 ## Rules
 
 - **Mode 600.** The file holds your secrets, so every program refuses to start if anyone but you can read it.
 - **Strict.** An unknown section or key is an error, and the program refuses to start. A misspelled `ask` would otherwise turn off an approval without notice. The error names the line and the key.
 - **Optional.** A missing file is the same as an empty one. Every section has defaults except `[mcp.servers.*]`, `[telegram]`, and `[qq]`. Without them there are no MCP servers and the bridges refuse to start.
-- **Read at start.** The TUI and `alyosha acp` read the file when a session starts. The bridges and the schedule server read it when they start. Restart a bridge's service after editing.
+- **Read at start.** `alyosha acp` reads the file when a session starts. The bridges and the schedule server read it when they start. Restart a bridge's service after editing.
 - **TOML 1.0.** Inline tables must fit on one line, so write longer tables, such as an MCP server's `env`, as their own sections.
 - **What Alyosha writes goes elsewhere.** The gateway's master key, admin key, and gateway key are in `gproxy.env` beside this file. You write `config.toml`, and Alyosha writes `gproxy.env`. [Run GPROXY as a service](../develop/LLMClientGateway.md#run-gproxy-as-a-service)
 
-The folders for memory, skills, and data follow the XDG locations and are not configurable. The TUI takes its workspace from where you start it. [TUI startup](../design/TUI.md#starting)
+The folders for memory, skills, and data follow the XDG locations and are not configurable. Each bridge names its workspace below.
 
 ## Example
 
@@ -66,7 +66,7 @@ MODE = "stdio"
 | `provider` | string | `"chatgpt"` | The GPROXY provider name. `alyosha gateway login` creates it with this name. [Gateway login](../develop/LLMClientGateway.md#run-gproxy-as-a-service) |
 | `api` | `"codex"`, `"openai"`, `"claudeapi"`, `"aistudio"`, or `"deepseek"` | `"codex"` | The provider's native API, which decides how the client encodes requests. [Native requests](../develop/LLMClientGateway.md#native-requests-and-credentials) |
 | `name` | string | `"gpt-6.2-sol"` | The exact model ID. |
-| `effort` | `"low"`, `"medium"`, or `"high"` | none | How hard the model reasons, for every session: private chats, trusted groups, guests, and the TUI. Higher is slower and uses more quota. Without it, the provider's default applies. Only the `codex` and `openai` APIs take it for now; with any other `api`, the configuration is refused. [Native requests](../develop/LLMClientGateway.md#native-requests-and-credentials) |
+| `effort` | `"low"`, `"medium"`, or `"high"` | none | How hard the model reasons, for every session: private chats, trusted groups, and guests. Higher is slower and uses more quota. Without it, the provider's default applies. Only the `codex` and `openai` APIs take it for now; with any other `api`, the configuration is refused. [Native requests](../develop/LLMClientGateway.md#native-requests-and-credentials) |
 
 ### `[gateway]`
 
@@ -128,7 +128,7 @@ One section per MCP server. `<name>` matches `[a-z0-9][a-z0-9-]{0,31}` and becom
 
 | Program | Sections it uses |
 | --- | --- |
-| `alyosha` (TUI and `acp`) | Top level, `[model]`, `[gateway]`, `[approvals]`, `[mcp.servers.*]`, and in guest mode `[guest]` |
+| `alyosha acp` | Top level, `[model]`, `[gateway]`, `[approvals]`, `[mcp.servers.*]`, and in guest mode `[guest]` |
 | `alyosha-telegram` | Top level, for its task runner, and `[telegram]` |
 | `alyosha-qq` | Top level, for its task runner, and `[qq]` |
 | `alyosha-schedule` | Top level, and whether `[telegram]` and `[qq]` exist |

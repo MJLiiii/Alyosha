@@ -16,7 +16,7 @@ updated: 2026-11-24
 The thesis lives in ~/thesis. Build it with `latexmk -pdf main.tex`.
 ```
 
-The store is global. Every workspace sees the same memories. You can read, edit, delete, or back up the files with ordinary tools while Alyosha is stopped. The `owner` directory holds what Alyosha knows about you. Your sessions, in the TUI and your private chats, see only it. So do the sessions of group chats you list as trusted. Guest sessions in other group chats never see it; they use the notes kept for each person in the sibling `users` directory. [People in group chats](#people-in-group-chats)
+The store is global. Every workspace sees the same memories. You can read, edit, delete, or back up the files with ordinary tools while Alyosha is stopped. The `owner` directory holds what Alyosha knows about you. Your sessions, in your private chats, see only it. So do the sessions of group chats you list as trusted. Guest sessions in other group chats never see it; they use the notes kept for each person in the sibling `users` directory. [People in group chats](#people-in-group-chats)
 
 ## What the model sees
 
@@ -26,7 +26,7 @@ The index has a 4 KiB budget. The model reads a memory's full text when it needs
 
 ## How memories are written
 
-The model writes memories with the `memory` tool during a turn. It writes when you state something lasting, correct it, or tell it to remember something. It does not need your approval. Each write or delete shows in the TUI status area, for example **Remembered: thesis-repo**, so injected instructions cannot change memory unseen. Alyosha sets the update date and keeps the index consistent. [Built-in tool contracts](../reference/BuiltInTools.md#memory)
+The model writes memories with the `memory` tool during a turn. It writes when you state something lasting, correct it, or tell it to remember something. It does not need your approval. Each write or delete shows in the chat's progress message, for example **Remembered: thesis-repo**, so injected instructions cannot change memory unseen. Alyosha sets the update date and keeps the index consistent. [Built-in tool contracts](../reference/BuiltInTools.md#memory)
 
 The guidance tells the model to:
 

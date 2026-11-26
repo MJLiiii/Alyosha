@@ -1,5 +1,5 @@
-# Every Alyosha program in one package: alyosha (the TUI, `alyosha acp`, and
-# the gateway commands), alyosha-schedule, alyosha-telegram, and alyosha-qq.
+# Every Alyosha program in one package: alyosha (`alyosha acp` and the
+# gateway commands), alyosha-schedule, alyosha-telegram, and alyosha-qq.
 #
 # `alyosha` is wrapped so the shell sandbox finds Bubblewrap, pasta, Bash,
 # and the default tools as Nix store paths (docs/develop/EnvironmentInterface.md).

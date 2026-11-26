@@ -1,6 +1,6 @@
 # Implement durable sessions
 
-Write each history entry and checkpoint to PostgreSQL as the session driver commits it, and resume a session by its key. Build this at step 10 of the build order, after the bridges work, because it changes how the TUI, `alyosha acp`, and both bridges open sessions. [Durable sessions design](../design/SessionStore.md) · [Agent State](AgentState.md) · [Architecture overview](../README.md)
+Write each history entry and checkpoint to PostgreSQL as the session driver commits it, and resume a session by its key. Build this at step 10 of the build order, after the bridges work, because it changes how `alyosha acp` and both bridges open sessions. [Durable sessions design](../design/SessionStore.md) · [Agent State](AgentState.md) · [Architecture overview](../README.md)
 
 ## Placement and libraries
 
@@ -8,7 +8,7 @@ Put the store in `src/session_store.rs` in the root `alyosha` crate. The bridges
 
 Use [`tokio-postgres`](https://docs.rs/tokio-postgres) with the `with-serde_json-1` and `with-chrono-0_4` features, which fits the existing tokio runtime. Each process opens one connection when its first session opens and keeps it, because the session lock lives on that connection. `sqlx` was not chosen: its compile-time query checks need a database during the Nix build.
 
-Connect to `host=/run/postgresql dbname=alyosha` as the user in `USER`, which peer authentication maps to the role of the same name. The environment variable `ALYOSHA_DATABASE`, a libpq connection string, replaces this for tests and for development outside the container, as `ALYOSHA_LOG` does for logging. If the connection fails, stop with **Could not reach the session database at /run/postgresql. Check `systemctl status postgresql`.** and the driver's error. The TUI prints it before touching the terminal, and `alyosha acp` writes it to standard error and exits. [Before logging starts](../reference/Logging.md#before-logging-starts)
+Connect to `host=/run/postgresql dbname=alyosha` as the user in `USER`, which peer authentication maps to the role of the same name. The environment variable `ALYOSHA_DATABASE`, a libpq connection string, replaces this for tests and for development outside the container, as `ALYOSHA_LOG` does for logging. If the connection fails, stop with **Could not reach the session database at /run/postgresql. Check `systemctl status postgresql`.** and the driver's error. `alyosha acp` writes it to standard error and exits. [Before logging starts](../reference/Logging.md#before-logging-starts)
 
 ## Schema
 
@@ -73,7 +73,7 @@ struct StoredSession {
     entries: Vec<HistoryEntry>,          // from first_kept_seq, or all
     next_seq: u64,
     next_message_id: u64,                // max stored message_id + 1
-    updated_at: DateTime<Utc>,           // for the TUI's resume line
+    updated_at: DateTime<Utc>,
 }
 ```
 
@@ -120,10 +120,6 @@ The shared `alyosha-bridge` crate opens a session in one call, `open_session(wor
 | Trusted group | `group:telegram:<chat ID>`, `group:qq:<group_openid>` |
 | Guest group | `guest:telegram:<chat ID>`, `guest:qq:<group_openid>` |
 
-## TUI
-
-`alyosha --continue [path]` loads the current session for `tui:<absolute workspace path>`. The header then reads **Resumed the session from <local date and time>**, and the TUI prints your last message and the last reply below it, so you see where you left off. If there is no session for the folder, it starts a new one and says **No earlier session here; started a new one.** `StoreError::Busy` stops the TUI with its message. Without `--continue`, the TUI creates a new session under the folder's key. Quitting closes the session but leaves it current. [TUI](TUI.md)
-
 ## Container
 
 `nix/container.nix` adds the database to the container. Pin the major version: moving between majors needs a dump and restore. [Host module](Deployment.md#host-module)
@@ -149,7 +145,7 @@ Bubblewrap must not mount `/run/postgresql`. The launch contract mounts no host 
 
 These run under `cargo test` with `MemoryStore` and the scripted model. [Turn fixture](AgentLoop.md#verification-with-a-scripted-model-and-fake-tools)
 
-The scripted cases are in `tests/session_store.rs`, `tests/session.rs`, `tests/acp.rs`, and the unit tests of `session_store`, `bridge`, the log store, and the TUI state. The PostgreSQL cases are in `tests/pg_store.rs`.
+The scripted cases are in `tests/session_store.rs`, `tests/session.rs`, `tests/acp.rs`, and the unit tests of `session_store`, `bridge`, and the log store. The PostgreSQL cases are in `tests/pg_store.rs`.
 
 - Run the two-file turn. Check that the store holds the user entry, both assistant entries, and both results, with `seq` 0 to 4, and that each was stored before it appeared in memory.
 - Make `append` fail on the second tool result. Check that the turn ends `Failed` with "Could not save history", that memory and store both hold the first result and not the second, and that the next turn runs.
@@ -159,7 +155,6 @@ The scripted cases are in `tests/session_store.rs`, `tests/session.rs`, `tests/a
 - Load a session twice from one store. Check that the second gets `Busy`.
 - Over ACP: `initialize` reports `loadSession: true`. `session/load` of an unknown key returns `-32002`. `session/new` with a key and two turns, then a new process with `session/load` of the key: check the replayed chunks without clock lines, the empty result, and that a follow-up prompt sees the earlier turns.
 - In the shared bridge crate with a fake agent, check that `open_session` falls back to `session/new` with the key and drops updates received before the load response.
-- `alyosha --continue` in a folder with no session starts a new one and says so. After a turn and a quit, `--continue` shows the last message and reply.
 
 With PostgreSQL, using `ALYOSHA_DATABASE`. These start a throwaway cluster with `initdb` and `pg_ctl` in a temporary directory when those are on `PATH`, and print a skip notice otherwise:
 

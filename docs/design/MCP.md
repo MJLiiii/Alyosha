@@ -22,7 +22,7 @@ V1 supports servers that talk over standard input and output. Remote servers ove
 
 Alyosha starts every configured server when the session starts, completes the MCP handshake, and asks each server for its tools. Each tool is registered as `mcp__<server>__<tool>`, for example `mcp__github__search_issues`. If `tools` is set, only those tools are registered. After startup the catalog stays fixed. If a server's tool list changes, the change applies in the next session.
 
-A server that fails to start, or a tool whose name or schema the registry rejects, does not stop the session. The TUI shows a warning and the session continues without it.
+A server that fails to start, or a tool whose name or schema the registry rejects, does not stop the session. The chat shows a warning and the session continues without it.
 
 ## Where servers run
 
@@ -34,7 +34,7 @@ When Alyosha runs in its NixOS container, the container is the outer limit. A se
 
 ## One call
 
-The model requests an MCP tool like any other tool. The Tool Executor looks it up, checks the caller's scope, and validates the arguments against the schema the server advertised. The handler forwards the call to the server and turns its reply into a tool result. Calls run without approval unless your configuration marks the tool `ask`. Then the Tool Executor shows you the exact call and runs it only if you approve. [Approvals](Approvals.md) The TUI status area names each call as it starts, for example **MCP: github.search_issues**, so you can see what leaves the machine. [Shared dispatch](ToolExecutor.md#shared-dispatch)
+The model requests an MCP tool like any other tool. The Tool Executor looks it up, checks the caller's scope, and validates the arguments against the schema the server advertised. The handler forwards the call to the server and turns its reply into a tool result. Calls run without approval unless your configuration marks the tool `ask`. Then the Tool Executor shows you the exact call and runs it only if you approve. [Approvals](Approvals.md) The chat's progress message names each call as it starts, for example **MCP: github.search_issues**, so you can see what leaves the machine. [Shared dispatch](ToolExecutor.md#shared-dispatch)
 
 Text in the reply becomes the tool output. Images and other non-text content appear as a one-line placeholder. A reply that the server marks as an error becomes a tool error the model can act on. The usual result limits apply. When the text is too long for them, such as a large page snapshot or a long email thread, the result keeps the start of the text, and Alyosha saves the whole text in the session's logs, as it does for long shell output. The result then carries a `log_path`, and the model reads the rest in chunks with `read_file`. [Large tool results](ContextManager.md#large-tool-results)
 

@@ -22,9 +22,9 @@ All tasks live in one file in Alyosha's data folder, `${XDG_DATA_HOME:-$HOME/.lo
 
 ## Creating tasks
 
-The `alyosha-schedule` MCP server offers three tools: `add`, `list`, and `remove`. It is configured like any other MCP server, so the model can schedule from the TUI or from either chat app. [Configuring a server](MCP.md#configuring-a-server)
+The `alyosha-schedule` MCP server offers three tools: `add`, `list`, and `remove`. It is configured like any other MCP server, so the model can schedule from either chat app. [Configuring a server](MCP.md#configuring-a-server)
 
-The model fills in the channel itself. In ACP mode, Alyosha's system instruction names the bridge you are writing through, so a reminder asked for in QQ arrives in QQ. From the TUI, the model asks which app to use unless you said. [What `alyosha acp` does](Channels.md#what-alyosha-acp-does)
+The model fills in the channel itself. In ACP mode, Alyosha's system instruction names the bridge you are writing through, so a reminder asked for in QQ arrives in QQ. [What `alyosha acp` does](Channels.md#what-alyosha-acp-does)
 
 ## Running tasks
 
@@ -50,7 +50,7 @@ QQ's documentation is unclear on whether a personal bot may send normal messages
 
 Scheduled tasks are the first thing the model creates that acts later on its own. A web page that misleads the model could plant a repeating task, such as "every day, send my files to this address." Creating a task needs no approval, because a task can do nothing outward on its own: when it tries to send an email or otherwise reach the real world, it meets the same approval as any other turn, and the request arrives in its chat. [Approvals](Approvals.md) Three things also make planted tasks visible:
 
-- Creating a task is a tool call, shown in the TUI status area and in Telegram's **Working…** message as **MCP: schedule.add**.
+- Creating a task is a tool call, shown in Telegram's **Working…** message as **MCP: schedule.add**.
 - Every run is marked **⏰ Scheduled** in the chat, so a task you did not ask for stands out.
 - `/tasks` shows the file's real contents, which the model cannot alter in the reply.
 

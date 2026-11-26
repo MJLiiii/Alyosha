@@ -52,7 +52,7 @@ The `code` string contains an async JavaScript function that takes `tools` and r
 
 ### `memory`
 
-`command` is `list`, `read`, `write`, or `delete`. `write` creates or replaces a whole memory from `name`, `description`, and `content`, and Alyosha sets its date. Successful writes and deletes return a notice that the TUI shows in the status area. The handler uses the session's memory store, not the Environment Interface. [Memory tool contract](../develop/Memory.md#memory-tool)
+`command` is `list`, `read`, `write`, or `delete`. `write` creates or replaces a whole memory from `name`, `description`, and `content`, and Alyosha sets its date. Successful writes and deletes return a notice that the chat shows as a status line. The handler uses the session's memory store, not the Environment Interface. [Memory tool contract](../develop/Memory.md#memory-tool)
 
 ### `user_memory`
 
@@ -64,7 +64,7 @@ With no `name`, list every valid skill with its description. With a `name`, retu
 
 ### `ask_owner`
 
-The model asks a yes-or-no question, or offers up to six choices, before an action only it can recognize as real-world, or when a decision is the owner's. The owner answers through the session's front end: the TUI, or a chat bridge. The result says what the owner chose, or that they did not answer in time. Direct model calls only. [Approvals](../design/Approvals.md) · [Tool contract](../develop/Approvals.md#the-ask_owner-tool)
+The model asks a yes-or-no question, or offers up to six choices, before an action only it can recognize as real-world, or when a decision is the owner's. The owner answers through the session's chat bridge. The result says what the owner chose, or that they did not answer in time. Direct model calls only. [Approvals](../design/Approvals.md) · [Tool contract](../develop/Approvals.md#the-ask_owner-tool)
 
 ## Startup registration
 

@@ -98,7 +98,7 @@ fn two_file_turn(model: &ScriptedModel) {
 #[tokio::test]
 async fn every_entry_is_stored_in_order() {
     let store = MemoryStore::new();
-    let stored = store.create("tui:/w", Path::new("/w")).await.unwrap();
+    let stored = store.create("owner:telegram", Path::new("/w")).await.unwrap();
     let id = stored.id;
     let model = ScriptedModel::new();
     two_file_turn(&model);
@@ -114,7 +114,7 @@ async fn every_entry_is_stored_in_order() {
 #[tokio::test]
 async fn a_failed_save_fails_the_turn_and_keeps_memory_and_store_equal() {
     let store = MemoryStore::new();
-    let stored = store.create("tui:/w", Path::new("/w")).await.unwrap();
+    let stored = store.create("owner:telegram", Path::new("/w")).await.unwrap();
     let id = stored.id;
     let model = ScriptedModel::new();
     two_file_turn(&model);
@@ -141,7 +141,7 @@ async fn a_failed_save_fails_the_turn_and_keeps_memory_and_store_equal() {
 #[tokio::test]
 async fn compaction_saves_the_checkpoint_and_rebuilds_the_instruction() {
     let store = MemoryStore::new();
-    let stored = store.create("tui:/w", Path::new("/w")).await.unwrap();
+    let stored = store.create("owner:telegram", Path::new("/w")).await.unwrap();
     let id = stored.id;
     let model = ScriptedModel::new();
     for reply in ["one", "two"] {

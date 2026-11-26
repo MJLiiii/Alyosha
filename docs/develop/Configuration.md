@@ -30,7 +30,7 @@ Mark every struct `#[serde(deny_unknown_fields)]` and give each optional key its
 4. Parse it. On a syntax error, an unknown key, or a wrong type, fail with the `toml` crate's message, which names the line and key.
 5. Check the values the types cannot: `timezone` is a known IANA name, `gateway.url` is an `http` URL, `timeout_minutes` is at least 1, `reply_chunk` is 200 to 4000, each workspace is an absolute path, each MCP server name matches its pattern, and each `ask` entry is also in that server's `tools` when `tools` is set. Report every failed check, not only the first.
 
-Each program calls `load` once at startup, then opens its log file. [Logging](../reference/Logging.md) The TUI prints the error and exits with status 2 before touching the terminal. `alyosha acp` writes it to standard error and exits with status 2 before answering `initialize`. The bridges and the schedule server log it and exit, which systemd reports as a failed start. [TUI startup](TUI.md#startup)
+Each program calls `load` once at startup, then opens its log file. [Logging](../reference/Logging.md) `alyosha acp` writes it to standard error and exits with status 2 before answering `initialize`. The bridges and the schedule server log it and exit, which systemd reports as a failed start.
 
 A bridge that finds its own section missing exits with an error naming the section. `alyosha-schedule` treats a missing `[telegram]` or `[qq]` as that channel being unavailable. [The MCP server](Schedule.md#the-mcp-server)
 

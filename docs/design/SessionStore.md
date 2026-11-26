@@ -1,12 +1,12 @@
 # Durable sessions
 
-A session's conversation survives a restart. Alyosha writes every history entry to a PostgreSQL database as it happens. When a bridge or its `alyosha acp` restarts, after a crash, a configuration change, or a container reboot, the conversation picks up where it stopped. In the TUI, `alyosha --continue` does the same for the folder you are in. A session ends only when you start a new one. There is no nightly fresh start. [Agent State](AgentState.md) · [Chat channels](Channels.md) · [Architecture overview](../README.md)
+A session's conversation survives a restart. Alyosha writes every history entry to a PostgreSQL database as it happens. When a bridge or its `alyosha acp` restarts, after a crash, a configuration change, or a container reboot, the conversation picks up where it stopped. A session ends only when you start a new one. There is no nightly fresh start. [Agent State](AgentState.md) · [Chat channels](Channels.md) · [Architecture overview](../README.md)
 
 ## What is saved
 
 | Saved | Lost on restart |
 | --- | --- |
-| Which session each chat or TUI folder is using | Messages waiting in the queue |
+| Which session each chat is using | Messages waiting in the queue |
 | Every history entry: your messages, the model's replies and tool calls with provider replay data, and tool results | A turn in progress, which ends as stopped |
 | Each compaction's summary and where verbatim history resumes | Open approvals and `ask_owner` questions |
 | | Background jobs, MCP servers and their state, such as browser tabs, and the dev shell |
@@ -25,11 +25,10 @@ Memory, skills, `schedule.toml`, and `config.toml` stay files you edit by hand. 
 | Your private chat | `owner:telegram`, `owner:qq` |
 | A trusted group | `group:telegram:<chat ID>`, `group:qq:<group_openid>` |
 | A guest group | `guest:telegram:<chat ID>`, `guest:qq:<group_openid>` |
-| The TUI | `tui:<absolute workspace path>` |
 
 A bridge that starts asks to load its key's current session and starts a new one only if there is none. `/new` starts a new session under the same key. The old one stays in the database. A guest session stopped after an hour of quiet resumes on the next mention instead of starting blank.
 
-**One process per session.** A process holds a database lock on the session it runs. A second process that tries to open the same session, such as `alyosha --continue` while another TUI has it open, stops with **This session is open in another Alyosha process.** The lock goes away with the process, so a crash never leaves it held.
+**One process per session.** A process holds a database lock on the session it runs. A second process that tries to open the same session, such as a second bridge started by hand while the service runs, stops with **This session is open in another Alyosha process.** The lock goes away with the process, so a crash never leaves it held.
 
 **Resuming.** Alyosha loads the latest summary and the entries after it. Older entries stay in the database but not in memory. If the last reply asked for tool calls that have no results, Alyosha records each as an error: *Alyosha restarted before this call finished. It may or may not have run; check before repeating it.* The first reply after a resume starts with *Resumed after a restart.*, adding *The turn in progress was stopped, and messages sent while Alyosha was down may need resending.* when a turn was interrupted.
 
@@ -52,7 +51,7 @@ The model's shell runs in Bubblewrap, which does not mount the socket, so the mo
 
 The database holds what was said, which the logs never do. [Logging](../reference/Logging.md)
 
-If the database cannot be reached, the TUI and `alyosha acp` stop with an error instead of running without saving.
+If the database cannot be reached, `alyosha acp` stops with an error instead of running without saving.
 
 ## Deferred
 

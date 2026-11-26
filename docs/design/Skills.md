@@ -34,7 +34,7 @@ When a session starts, Alyosha reads the skills directory and builds an **index*
 
 When a task matches a description, the model loads the skill with the `skill` tool. The tool returns the instructions and a list of the skill's other files. For example, you ask “publish the post about Nix flakes.” The model sees `blog-release` in the index, loads it, and follows its steps. [Built-in tool contracts](../reference/BuiltInTools.md#skill)
 
-A skill with a missing or invalid header is left out of the index, and the TUI shows a warning at startup.
+A skill with a missing or invalid header is left out of the index, and the session reports a warning at startup.
 
 ## Bundled files
 
@@ -53,7 +53,7 @@ Skills are instructions you wrote, so the model treats them like your own reques
 
 - Skills the model writes or edits.
 - Per-workspace skills.
-- Invoking a skill directly from the TUI, such as `/blog-release`.
+- Invoking a skill directly from a chat, such as `/blog-release`.
 - Honoring the optional `allowed-tools` header field.
 - Access from Code Mode.
 

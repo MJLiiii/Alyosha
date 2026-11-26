@@ -1,4 +1,4 @@
-//! Whole sessions started like the TUI starts them, in a temporary home, with
+//! Whole sessions started like `alyosha acp` starts them, in a temporary home, with
 //! a scripted model: the file tools, Code Mode, memory, skills, MCP, and
 //! approvals. See the verification sections of `docs/develop/`.
 
@@ -14,7 +14,7 @@ use std::{
 
 use alyosha::{
     BoxFuture,
-    agent_loop::{JobDelivery, SessionEvent},
+    agent_loop::SessionEvent,
     agent_state::{HistoryEntry, ToolOutcome, TurnOutcome, TurnPhase},
     approvals::{Approver, OwnerAnswer, OwnerRequest},
     clock::FixedClock,
@@ -96,7 +96,6 @@ async fn open(
         model,
         FrontEnd {
             approver,
-            job_delivery: JobDelivery::Queue,
             channel_line: None,
             log_file: None,
             on_loading_dev_shell: None,
@@ -809,7 +808,7 @@ async fn a_resumed_session_closes_the_turn_a_restart_cut_off() {
     };
     let home = home();
     let store = MemoryStore::new();
-    let created = store.create("tui:/w", &home.workspace).await.unwrap();
+    let created = store.create("owner:telegram", &home.workspace).await.unwrap();
     // The process died after the first of two calls had its result.
     let saved = [
         support::user(alyosha::agent_state::MessageId(4), "read both"),
@@ -823,7 +822,7 @@ async fn a_resumed_session_closes_the_turn_a_restart_cut_off() {
         store.append(created.id, seq as u64, entry).await.unwrap();
     }
     store.close(created.id).await.unwrap();
-    let stored = store.load_current("tui:/w").await.unwrap().unwrap();
+    let stored = store.load_current("owner:telegram").await.unwrap().unwrap();
     let model = ScriptedModel::new();
     model.reply(vec![text("Done.")]);
     let mut started = session::start_with_clock(
@@ -833,7 +832,6 @@ async fn a_resumed_session_closes_the_turn_a_restart_cut_off() {
         model,
         FrontEnd {
             approver: None,
-            job_delivery: JobDelivery::Queue,
             channel_line: None,
             log_file: None,
             on_loading_dev_shell: None,

@@ -9,7 +9,7 @@ Create one in-memory `AgentState` per session. The Agent Loop’s session driver
 | `provider` | Provider account identifier | Fixed when the session opens. |
 | `history` | `Vec<HistoryEntry>` | Append `User`, complete `Assistant`, and `ToolResult` entries in order. Preserve text, calls, their order, and native replay fields within each assistant entry. Keep each result’s original call ID. [Model reply contract](LLMClientGateway.md) |
 | `context_checkpoint` | `Option<ContextCheckpoint>` | Latest summary and index of the first retained history entry. The Context Manager supplies the candidate. The driver commits a validated replacement for the active turn or manual compaction after checking cancellation. [Checkpoint contract](ContextManager.md) |
-| `pending_messages` | `VecDeque<UserMessage>` | Hold each message, its session-unique ID, and its origin, `Owner` or `Job`, until its turn starts. A finished background job queues a `Job` message. [Background jobs](Jobs.md#when-a-job-finishes) |
+| `pending_messages` | `VecDeque<UserMessage>` | Hold each message, its session-unique ID, and its origin, always `Owner`, until its turn starts. A finished background job is not queued directly: the bridge sends its text back as a prompt. [Background jobs](Jobs.md#when-a-job-finishes) |
 | `active_work` | `Option<ActiveWork>` | Either `Turn(ActiveTurn)`, `ManualCompaction { model_id, cancel }`, or an empty slot. |
 | `outcomes` | `HashMap<MessageId, TurnOutcome>` | One final `Completed`, `Stopped`, or `Failed(reason)` per finished user turn. |
 
