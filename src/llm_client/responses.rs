@@ -20,7 +20,11 @@ pub(crate) const ROUTE: &str = "responses";
 
 /// `with_output_limit` is false for the `codex` channel, whose backend
 /// accepts no output limit.
-pub(crate) fn encode(request: &ModelRequest, with_output_limit: bool) -> Encoded {
+pub(crate) fn encode(
+    request: &ModelRequest,
+    with_output_limit: bool,
+    effort: Option<alyosha_config::Effort>,
+) -> Encoded {
     let mut input = Vec::new();
     if let Some(summary) = &request.summary {
         input.push(user_message(&summary_text(summary)));
@@ -64,6 +68,9 @@ pub(crate) fn encode(request: &ModelRequest, with_output_limit: bool) -> Encoded
         "store": false,
         "include": ["reasoning.encrypted_content"],
     });
+    if let Some(effort) = effort {
+        body["reasoning"] = json!({"effort": effort.as_str()});
+    }
     if !request.tools.is_empty() {
         let tools: Vec<Value> = request
             .tools
@@ -194,5 +201,31 @@ impl Assembler for Stream {
             }
         }
         Ok((AssistantEntry { parts }, self.usage))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn request() -> ModelRequest {
+        ModelRequest {
+            provider: "chatgpt".to_owned(),
+            model: "test-model".to_owned(),
+            system_instruction: "Be brief.".to_owned(),
+            summary: None,
+            history: Vec::new(),
+            tools: Vec::new(),
+            max_output_tokens: None,
+        }
+    }
+
+    #[test]
+    fn effort_is_sent_only_when_configured() {
+        let none = encode(&request(), false, None);
+        assert!(none.body.get("reasoning").is_none());
+        let high = encode(&request(), false, Some(alyosha_config::Effort::High));
+        assert_eq!(high.body["reasoning"], json!({"effort": "high"}));
+        assert_eq!(high.body["include"], json!(["reasoning.encrypted_content"]));
     }
 }

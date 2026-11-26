@@ -108,12 +108,15 @@ impl ModelClient for NotSignedIn {
 /// `gproxy.env`. Sessions never sign in.
 pub fn model_client(config: &Config, paths: &Paths) -> Arc<dyn ModelClient> {
     match GatewayFiles::new(paths).gateway_key() {
-        Ok(Some(key)) => Arc::new(GatewayClient::new(
-            &config.gateway.url,
-            &key,
-            config.model.api,
-            Timeouts::default(),
-        )),
+        Ok(Some(key)) => Arc::new(
+            GatewayClient::new(
+                &config.gateway.url,
+                &key,
+                config.model.api,
+                Timeouts::default(),
+            )
+            .with_effort(config.model.effort),
+        ),
         _ => Arc::new(NotSignedIn),
     }
 }

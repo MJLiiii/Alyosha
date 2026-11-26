@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use alyosha_config::Api;
+use alyosha_config::{Api, Effort};
 use reqwest::{StatusCode, header::HeaderMap};
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
@@ -56,6 +56,7 @@ pub struct GatewayClient {
     gateway_key: String,
     api: Api,
     timeouts: Timeouts,
+    effort: Option<Effort>,
 }
 
 impl GatewayClient {
@@ -70,13 +71,21 @@ impl GatewayClient {
             gateway_key: gateway_key.to_owned(),
             api,
             timeouts,
+            effort: None,
         }
+    }
+
+    /// Sends `effort` with every request, where the API takes one.
+    #[must_use]
+    pub fn with_effort(mut self, effort: Option<Effort>) -> Self {
+        self.effort = effort;
+        self
     }
 
     fn encode(&self, request: &ModelRequest) -> Encoded {
         match self.api {
-            Api::Codex => responses::encode(request, false),
-            Api::Openai => responses::encode(request, true),
+            Api::Codex => responses::encode(request, false, self.effort),
+            Api::Openai => responses::encode(request, true, self.effort),
             Api::Claudeapi => claude::encode(request),
             Api::Deepseek => chat::encode(request),
             Api::Aistudio => gemini::encode(request),

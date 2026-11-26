@@ -66,6 +66,7 @@ MODE = "stdio"
 | `provider` | string | `"chatgpt"` | The GPROXY provider name. `alyosha gateway login` creates it with this name. [Gateway login](../develop/LLMClientGateway.md#run-gproxy-as-a-service) |
 | `api` | `"codex"`, `"openai"`, `"claudeapi"`, `"aistudio"`, or `"deepseek"` | `"codex"` | The provider's native API, which decides how the client encodes requests. [Native requests](../develop/LLMClientGateway.md#native-requests-and-credentials) |
 | `name` | string | `"gpt-6.2-sol"` | The exact model ID. |
+| `effort` | `"low"`, `"medium"`, or `"high"` | none | How hard the model reasons, for every session: private chats, trusted groups, guests, and the TUI. Higher is slower and uses more quota. Without it, the provider's default applies. Only the `codex` and `openai` APIs take it for now; with any other `api`, the configuration is refused. [Native requests](../develop/LLMClientGateway.md#native-requests-and-credentials) |
 
 ### `[gateway]`
 

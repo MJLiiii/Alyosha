@@ -7,6 +7,7 @@ timezone = "Europe/Amsterdam"
 provider = "chatgpt"   # the GPROXY provider `alyosha gateway login` creates
 api = "codex"          # codex, openai, claudeapi, aistudio, or deepseek
 name = "gpt-6.2-sol"
+# effort = "high"     # low, medium, or high; codex and openai only. Unset: the provider's default
 
 [gateway]
 url = "http://127.0.0.1:18787"

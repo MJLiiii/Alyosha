@@ -62,6 +62,8 @@ pub struct ModelConfig {
     pub api: Api,
     /// The exact model ID.
     pub name: String,
+    /// How hard the model reasons; `None` keeps the provider's default.
+    pub effort: Option<Effort>,
 }
 
 impl Default for ModelConfig {
@@ -70,6 +72,27 @@ impl Default for ModelConfig {
             provider: "chatgpt".to_owned(),
             api: Api::Codex,
             name: "gpt-6.2-sol".to_owned(),
+            effort: None,
+        }
+    }
+}
+
+/// `[model] effort`: the reasoning effort sent with every request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Effort {
+    Low,
+    Medium,
+    High,
+}
+
+impl Effort {
+    /// The value as the Responses API spells it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
         }
     }
 }
@@ -392,6 +415,9 @@ fn parse(text: &str) -> Result<Config, Problem> {
         ));
         chrono_tz::Europe::Amsterdam
     });
+    if file.model.effort.is_some() && !matches!(file.model.api, Api::Codex | Api::Openai) {
+        problems.push("model.effort: only the codex and openai APIs support it for now".to_owned());
+    }
     if !is_http_url(&file.gateway.url) {
         problems.push(format!(
             "gateway.url: {:?} is not an http:// URL",
@@ -677,6 +703,18 @@ token = "t"
         assert!(message.contains("\"send\""), "{message}");
         // Without `tools`, every tool is registered, so any `ask` entry is allowed.
         load_text("[mcp.servers.google]\ncommand = \"gog\"\nask = [\"send\"]\n").unwrap();
+    }
+
+    #[test]
+    fn effort_is_optional_and_only_for_the_responses_apis() {
+        assert_eq!(load_text("").unwrap().model.effort, None);
+        let config = load_text("[model]\neffort = \"high\"\n").unwrap();
+        assert_eq!(config.model.effort, Some(Effort::High));
+        let message = load_text("[model]\napi = \"claudeapi\"\neffort = \"low\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains("model.effort"), "{message}");
+        assert!(load_text("[model]\neffort = \"extreme\"\n").is_err());
     }
 
     #[test]
