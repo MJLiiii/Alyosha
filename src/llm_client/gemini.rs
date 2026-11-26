@@ -43,7 +43,17 @@ pub(crate) fn encode(request: &ModelRequest) -> Encoded {
     }
     for entry in &request.history {
         match entry {
-            HistoryEntry::User(user) => push("user", json!({"text": user.text})),
+            HistoryEntry::User(user) => {
+                push("user", json!({"text": user.text}));
+                for image in &user.images {
+                    push(
+                        "user",
+                        json!({"inlineData": {
+                            "mimeType": image.mime_type(), "data": image.data(),
+                        }}),
+                    );
+                }
+            }
             HistoryEntry::Assistant(assistant) => {
                 let mut signature = None;
                 for part in &assistant.parts {

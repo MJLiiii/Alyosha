@@ -36,6 +36,7 @@ name = "alyosha"
 version = "0.1.0"
 dependencies = [
  "alyosha-config",
+ "base64 0.22.1",
  "chrono",
  "chrono-tz",
  "crossterm",
@@ -92,6 +93,7 @@ dependencies = [
  "alyosha-bridge",
  "alyosha-config",
  "alyosha-schedule",
+ "base64 0.22.1",
  "chrono",
  "chrono-tz",
  "futures-util",

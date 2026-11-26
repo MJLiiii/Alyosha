@@ -238,6 +238,7 @@ pub fn user(id: MessageId, text: &str) -> HistoryEntry {
         message_id: id,
         origin: MessageOrigin::Owner,
         text: format!("{CLOCK_LINE}\n{text}"),
+        images: Vec::new(),
     })
 }
 

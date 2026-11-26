@@ -7,6 +7,7 @@
 //! anyone go to the group's guest session. See `docs/develop/QQBridge.md`.
 
 pub mod gateway;
+mod images;
 
 use std::{
     collections::HashMap,
@@ -25,7 +26,6 @@ use crate::gateway::GatewayError;
 pub const REPLY_LIMIT: usize = 4;
 pub const CUT_OFF_NOTE: &str = "(cut off — ask me to continue)";
 pub const MORE_LATER_NOTE: &str = "(more when you next write)";
-pub const TEXT_ONLY: &str = "Only text messages work for now.";
 
 /// Codes that mean the passive window for a message is closed.
 const PASSIVE_CLOSED: [i64; 3] = [40034128, 40034005, 304103];

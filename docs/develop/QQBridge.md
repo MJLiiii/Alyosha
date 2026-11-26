@@ -50,11 +50,11 @@ Send `Authorization: QQBot <access_token>` on every API call to `https://api.bot
 
 ## Incoming messages
 
-Handle only `C2C_MESSAGE_CREATE` dispatches. In each, `d.id` is the message ID, `d.author.user_openid` the sender, `d.content` the text, and `d.attachments` any files. QQ may deliver the same message twice. Skip a message ID already seen in the last hour. [C2C message event](https://bot.q.qq.com/wiki/develop/api-v2/autogen/event/c2c_message_create.html)
+For private messages, handle `C2C_MESSAGE_CREATE` dispatches. In each, `d.id` is the message ID, `d.author.user_openid` the sender, `d.content` the text, and `d.attachments` any files. QQ may deliver the same message twice. Skip a message ID already seen in the last hour. [C2C message event](https://bot.q.qq.com/wiki/develop/api-v2/autogen/event/c2c_message_create.html)
 
 Drop a message, logging the sender's `user_openid`, unless it equals `owner_openid`. Send nothing back.
 
-For a message from the owner, trim the text, then act as the Telegram bridge does: `/new`, `/cancel`, `/compact`, `/job`, and `/tasks` behave the same, and other text becomes a `session/prompt`. Send `initialize` with `clientInfo.name` set to `alyosha-qq`, and start the task runner for the `qq` channel. Handle `_alyosha/job_finished` as the Telegram bridge does. Scheduled and job replies have no message to answer and follow their own delivery rules. [Delivering on QQ](Schedule.md#delivering-on-qq) A message with attachments and no text gets the reply **Only text messages work for now.** [Incoming messages](TelegramBridge.md#incoming-messages)
+For a message from the owner, trim the text, then act as the Telegram bridge does: `/new`, `/cancel`, `/compact`, `/job`, and `/tasks` behave the same, and other text becomes a `session/prompt`. Send `initialize` with `clientInfo.name` set to `alyosha-qq`, and start the task runner for the `qq` channel. Handle `_alyosha/job_finished` as the Telegram bridge does. Scheduled and job replies have no message to answer and follow their own delivery rules. [Delivering on QQ](Schedule.md#delivering-on-qq) Approval answers and local commands must be bare text.
 
 ## Group chats
 
@@ -64,9 +64,17 @@ A group where the bot has QQ's "receive all messages" mode on sends every messag
 
 A mention in a group whose `group_openid` is in `trusted_groups` goes to the group's full session, as in the Telegram bridge: `alyosha acp --group` in `<workspace>/groups/<group_openid>`, with `<nickname>: <text>` as the prompt, approvals sent to the owner's private chat after **In group <group_openid>:**, and finished jobs given to the group's session with the reply sent to the group as a reply to its latest mention, which falls back to an active message once that window has closed. The pool never stops it for being idle. A `/yes`, `/no`, or number from the owner answers the oldest open request, whichever session it came from; `/cancel` cancels only the private session and its requests. [Trusted groups](TelegramBridge.md#trusted-groups)
 
-Every other group message goes to the group's guest session from the shared pool, the owner's included, as the Telegram bridge does: `initialize` with `alyosha-qq`, the sender `qq-<member_openid>`, and the nickname, or `QQ user` without one. A message with attachments and no text gets **Only text messages work for now.** [Telegram group chats](TelegramBridge.md#group-chats)
+Every other group message goes to the group's guest session from the shared pool, the owner's included, as the Telegram bridge does: `initialize` with `alyosha-qq`, the sender `qq-<member_openid>`, and the nickname, or `QQ user` without one. [Telegram group chats](TelegramBridge.md#group-chats)
 
 Send the reply with `POST /v2/groups/{group_openid}/messages`, as passive replies to the mention's `msg_id` with `msg_seq` counting from 1, split into at most four parts as for private replies. QQ allows five replies within 60 minutes. If the window has closed, try the same request without `msg_id`. Log a reply that still fails, and drop it. Nothing is kept for later in a group, and there is no typing indicator. Log the `group_openid` of every mention at info level, so the owner can copy it into `trusted_groups`. [Send a group message](https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_groups_group_openid_messages.post.html)
+
+## Inbound images
+
+Owner DMs and group mentions accept up to four JPEG, PNG, or WebP images of up to 2 MiB each, with or without a caption. Read `attachments` on the event and on nested `msg_elements` (including embedded quotes). If QQ sends only `ref_msg_idx`, the bridge has no image to fetch: it does not look up message history or use a quote token as a URL. GIF, voice, video, and other file types are not supported.
+
+Use a separate unauthenticated HTTPS client. Only known QQ image CDN hosts in `qq/src/images.rs` are accepted, and only their public DNS addresses are passed to the connector. No proxy or redirects. Downloads have a three-second connection timeout and an eight-second total timeout. Check the byte limit while streaming even if no length is advertised. The file signature must match any supplied image MIME type. Do not log signed URLs or bytes. Downloads run concurrently, but prompts stay in arrival order.
+
+Forward successful images as inline ACP `image` blocks, never pass the CDN URL to the model. Keep the caption and any other successful images after a failure and mark omitted images. If no text or usable image remains, reply with a short attachment notice without sending a prompt. A vision-capable model must be configured; the DeepSeek text route receives the caption with an image-unavailable note instead.
 
 ## Sending replies
 
@@ -131,5 +139,6 @@ With a real bot, which needs a registered bot, real-name QQ account, and network
 - The longest text QQ accepts in one message. Set `reply_chunk` below it.
 - Whether active messages work for this bot, and their limits.
 - Ask a question in QQ. Check that the reply arrives, and that messages from a second QQ account get nothing.
+- With a vision model configured, send an image alone and with text in a DM, then mention the bot with multiple images in a group. Ask about an image quoted by a mention whose event embeds the quoted attachment. Confirm the answers describe what is actually visible. Send a non-image file and verify the attachment notice.
 
 [Architecture overview](../README.md)

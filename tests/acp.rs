@@ -200,9 +200,93 @@ async fn initialize_reports_the_capabilities() {
     assert_eq!(result["agentCapabilities"]["loadSession"], false);
     assert_eq!(
         result["agentCapabilities"]["promptCapabilities"],
-        json!({"image": false, "audio": false, "embeddedContext": false})
+        json!({"image": true, "audio": false, "embeddedContext": false})
     );
     assert_eq!(result["authMethods"], json!([]));
+}
+
+#[tokio::test]
+async fn inline_images_reach_the_model_in_owner_and_guest_turns() {
+    const DATA: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jKZkAAAAASUVORK5CYII=";
+    for mode in [Mode::Owner, Mode::Guest] {
+        let model = ScriptedModel::new();
+        model.reply(vec![text("I see it.")]);
+        let mut client = Client::start_as(model.clone(), mode).await;
+        client.initialize(Some("alyosha-qq")).await;
+        let session = client.new_session().await;
+        let image = json!({"type": "image", "mimeType": "image/png", "data": DATA});
+        let meta = json!({"alyosha": {"sender": {"id": "qq-M1", "name": "Bob"}}});
+        for prompt in [
+            json!([{"type": "image", "mimeType": "image/png", "data": "not base64"}]),
+            json!([{"type": "image", "mimeType": "image/jpeg", "data": DATA}]),
+            json!(vec![image.clone(); 5]),
+        ] {
+            let id = client
+                .request(
+                    "session/prompt",
+                    json!({"sessionId": session, "prompt": prompt, "_meta": meta}),
+                )
+                .await;
+            assert_eq!(
+                client.until_response(id).await.pop().unwrap()["error"]["code"],
+                -32602
+            );
+        }
+        // A caption that looks like a command belongs to the image prompt.
+        let prompt = if mode == Mode::Owner {
+            json!([{"type": "text", "text": "/compact"}, image])
+        } else {
+            json!([image])
+        };
+        let id = client
+            .request(
+                "session/prompt",
+                json!({"sessionId": session, "prompt": prompt, "_meta": meta}),
+            )
+            .await;
+        assert!(updates(&client.until_response(id).await).contains(&"chunk I see it.".to_owned()));
+        let requests = model.requests();
+        assert_eq!(requests.len(), 1);
+        let Some(alyosha::agent_state::HistoryEntry::User(user)) = requests[0].history.last()
+        else {
+            panic!("the request should have a user entry");
+        };
+        assert_eq!(user.images.len(), 1);
+        assert_eq!(user.images[0].mime_type(), "image/png");
+        assert_eq!(user.images[0].data(), DATA);
+        assert!(user.text.contains(if mode == Mode::Owner {
+            "/compact"
+        } else {
+            "Bob"
+        }));
+    }
+}
+
+#[tokio::test]
+async fn a_failed_image_prompt_does_not_replay_its_image_in_a_later_text_turn() {
+    let model = ScriptedModel::new();
+    model.fail(ModelError::Provider("could not decode image".into()));
+    model.reply(vec![text("Text works.")]);
+    let mut client = Client::start(model.clone()).await;
+    client.initialize(Some("alyosha-qq")).await;
+    let session = client.new_session().await;
+    let id = client
+        .request(
+            "session/prompt",
+            json!({
+                "sessionId": session,
+                "prompt": [{"type": "image", "mimeType": "image/png", "data": "iVBORw0KGgo="}]
+            }),
+        )
+        .await;
+    assert!(client.until_response(id).await.last().unwrap()["error"].is_object());
+    let id = client.prompt(&session, "just text").await;
+    assert!(updates(&client.until_response(id).await).contains(&"chunk Text works.".into()));
+    let requests = model.requests();
+    assert!(requests[1].history.iter().all(|entry| match entry {
+        alyosha::agent_state::HistoryEntry::User(user) => user.images.is_empty(),
+        _ => true,
+    }));
 }
 
 #[tokio::test]

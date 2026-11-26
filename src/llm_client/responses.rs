@@ -27,11 +27,11 @@ pub(crate) fn encode(
 ) -> Encoded {
     let mut input = Vec::new();
     if let Some(summary) = &request.summary {
-        input.push(user_message(&summary_text(summary)));
+        input.push(user_message(&summary_text(summary), &[]));
     }
     for entry in &request.history {
         match entry {
-            HistoryEntry::User(user) => input.push(user_message(&user.text)),
+            HistoryEntry::User(user) => input.push(user_message(&user.text, &user.images)),
             HistoryEntry::Assistant(assistant) => {
                 for part in &assistant.parts {
                     match part {
@@ -98,12 +98,12 @@ pub(crate) fn encode(
     }
 }
 
-fn user_message(text: &str) -> Value {
-    json!({
-        "type": "message",
-        "role": "user",
-        "content": [{"type": "input_text", "text": text}],
-    })
+fn user_message(text: &str, images: &[crate::agent_state::UserImage]) -> Value {
+    let mut content = vec![json!({"type": "input_text", "text": text})];
+    content.extend(images.iter().map(
+        |image| json!({"type": "input_image", "image_url": image.data_url(), "detail": "auto"}),
+    ));
+    json!({"type": "message", "role": "user", "content": content})
 }
 
 /// Collects finished output items until `response.completed`.

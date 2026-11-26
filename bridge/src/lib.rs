@@ -29,6 +29,12 @@ use tokio::{
     sync::{mpsc, oneshot},
 };
 
+/// An inline ACP image, with raw bytes encoded as standard base64.
+pub struct PromptImage {
+    pub mime_type: &'static str,
+    pub data: String,
+}
+
 /// One tool call of a prompt, as the chat shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolLine {
@@ -274,17 +280,18 @@ impl Bridge {
     /// Sends a prompt at once. Its updates and response arrive as events
     /// tagged with `key`.
     pub fn prompt(&self, key: &str, text: &str) {
-        self.send_prompt(key, text, None);
+        self.prompt_with_images(key, text, &[], None);
     }
 
-    /// Sends a group member's prompt to a guest session, with its sender in
-    /// `_meta`. See `docs/develop/Channels.md#guest-mode`.
-    pub fn prompt_from(&self, key: &str, text: &str, sender_id: &str, sender_name: &str) {
-        let meta = json!({"alyosha": {"sender": {"id": sender_id, "name": sender_name}}});
-        self.send_prompt(key, text, Some(meta));
-    }
-
-    fn send_prompt(&self, key: &str, text: &str, meta: Option<Value>) {
+    /// Sends text and inline images. Guest sessions need the sender's ID and
+    /// name in `_meta` (see `docs/develop/Channels.md#guest-mode`).
+    pub fn prompt_with_images(
+        &self,
+        key: &str,
+        text: &str,
+        images: &[PromptImage],
+        sender: Option<(&str, &str)>,
+    ) {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let session = {
             let mut shared = self.lock();
@@ -295,12 +302,16 @@ impl Bridge {
             shared.prompt_requests.insert(id, key.to_owned());
             shared.session.clone().unwrap_or_default()
         };
-        let mut params = json!({
-            "sessionId": session,
-            "prompt": [{"type": "text", "text": text}],
-        });
-        if let Some(meta) = meta {
-            params["_meta"] = meta;
+        let mut prompt = Vec::new();
+        if !text.is_empty() || images.is_empty() {
+            prompt.push(json!({"type": "text", "text": text}));
+        }
+        prompt.extend(images.iter().map(
+            |image| json!({"type": "image", "mimeType": image.mime_type, "data": image.data}),
+        ));
+        let mut params = json!({"sessionId": session, "prompt": prompt});
+        if let Some((id, name)) = sender {
+            params["_meta"] = json!({"alyosha": {"sender": {"id": id, "name": name}}});
         }
         let _ = self.out.send(
             json!({"jsonrpc": "2.0", "id": id, "method": "session/prompt", "params": params})
@@ -648,6 +659,31 @@ mod tests {
             BufReader::new(agent_read).lines(),
             agent_write,
         )
+    }
+
+    #[tokio::test]
+    async fn image_blocks_share_the_prompt_with_caption_and_guest_sender() {
+        let (bridge, _, mut agent_in, _agent_out) = fake().await;
+        bridge.lock().session = Some("s1".into());
+        let image = PromptImage {
+            mime_type: "image/png",
+            data: "iVBORw0KGgo=".into(),
+        };
+        bridge.prompt_with_images("m1", "what is this?", &[image], Some(("qq-M1", "Bob")));
+        let req: Value =
+            serde_json::from_str(&agent_in.next_line().await.unwrap().unwrap()).unwrap();
+        assert_eq!(req["method"], "session/prompt");
+        assert_eq!(
+            req["params"],
+            json!({
+                "sessionId": "s1",
+                "prompt": [
+                    {"type": "text", "text": "what is this?"},
+                    {"type": "image", "mimeType": "image/png", "data": "iVBORw0KGgo="}
+                ],
+                "_meta": {"alyosha": {"sender": {"id": "qq-M1", "name": "Bob"}}}
+            })
+        );
     }
 
     #[tokio::test]

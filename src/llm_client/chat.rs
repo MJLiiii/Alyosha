@@ -26,7 +26,17 @@ pub(crate) fn encode(request: &ModelRequest) -> Encoded {
     for entry in &request.history {
         match entry {
             HistoryEntry::User(user) => {
-                messages.push(json!({"role": "user", "content": user.text}))
+                // This route serves DeepSeek's text models. Keep the caption
+                // and explicitly say the image contents are not available.
+                let content = if user.images.is_empty() {
+                    user.text.clone()
+                } else {
+                    format!(
+                        "{}\n[Image attachments are not available on this text-only model route.]",
+                        user.text
+                    )
+                };
+                messages.push(json!({"role": "user", "content": content}));
             }
             HistoryEntry::Assistant(assistant) => {
                 let mut message = json!({"role": "assistant", "content": assistant.text()});

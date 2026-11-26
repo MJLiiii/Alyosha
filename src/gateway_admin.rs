@@ -240,6 +240,7 @@ pub async fn login(
                 message_id: crate::agent_state::MessageId(0),
                 origin: crate::agent_state::MessageOrigin::Owner,
                 text: "Say OK.".into(),
+                images: Vec::new(),
             },
         )],
         tools: Vec::new(),

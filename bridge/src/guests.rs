@@ -14,7 +14,7 @@ use std::{
 
 use tokio::sync::mpsc;
 
-use crate::{Bridge, Event};
+use crate::{Bridge, Event, PromptImage};
 
 /// How long a group may have no open prompt before its guest stops.
 pub const IDLE_LIMIT: Duration = Duration::from_secs(60 * 60);
@@ -103,6 +103,19 @@ impl GuestPool {
         sender_id: &str,
         sender_name: &str,
     ) -> Result<(), String> {
+        self.prompt_with_images(group, key, text, sender_id, sender_name, &[])
+            .await
+    }
+
+    pub async fn prompt_with_images(
+        &mut self,
+        group: &str,
+        key: &str,
+        text: &str,
+        sender_id: &str,
+        sender_name: &str,
+        images: &[PromptImage],
+    ) -> Result<(), String> {
         if !self.guests.contains_key(group) {
             let guest = self.start(group).await?;
             self.guests.insert(group.to_owned(), guest);
@@ -110,9 +123,13 @@ impl GuestPool {
         let guest = self.guests.get_mut(group).expect("inserted above");
         guest.last_active = Instant::now();
         if guest.trusted {
-            guest.bridge.prompt(key, &format!("{sender_name}: {text}"));
+            guest
+                .bridge
+                .prompt_with_images(key, &format!("{sender_name}: {text}"), images, None);
         } else {
-            guest.bridge.prompt_from(key, text, sender_id, sender_name);
+            guest
+                .bridge
+                .prompt_with_images(key, text, images, Some((sender_id, sender_name)));
         }
         Ok(())
     }

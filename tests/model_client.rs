@@ -14,7 +14,7 @@ use std::{
 
 use alyosha::{
     agent_loop::{SessionDriver, SessionEvent, SessionSetup},
-    agent_state::TurnOutcome,
+    agent_state::{HistoryEntry, MessageId, TurnOutcome, UserImage},
     clock::FixedClock,
     llm_client::{GatewayClient, ModelClient, ModelError, ModelRequest, Timeouts},
 };
@@ -407,6 +407,70 @@ async fn generate_once(
     client(&fixture.url, api)
         .generate(request("p"), CancellationToken::new())
         .await
+}
+
+#[tokio::test]
+async fn image_prompts_use_each_providers_native_format() {
+    const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jKZkAAAAASUVORK5CYII=";
+    let mut user = support::user(MessageId(1), "describe the picture");
+    if let HistoryEntry::User(user) = &mut user {
+        user.images
+            .push(UserImage::from_base64("image/png", PNG).unwrap());
+    }
+    for api in [
+        Api::Codex,
+        Api::Openai,
+        Api::Claudeapi,
+        Api::Aistudio,
+        Api::Deepseek,
+    ] {
+        let events = match api {
+            Api::Codex | Api::Openai => vec![json!({"type": "response.completed"})],
+            Api::Claudeapi => vec![json!({"type": "message_stop"})],
+            Api::Aistudio => vec![
+                json!({"candidates": [{"content": {"parts": [{"text": "ok"}]}, "finishReason": "STOP"}]}),
+            ],
+            Api::Deepseek => {
+                vec![json!({"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]})]
+            }
+        };
+        let fixture = Fixture::start(vec![Reply::stream(&events)]).await;
+        let mut request = request("p");
+        request.history.push(user.clone());
+        client(&fixture.url, api)
+            .generate(request, CancellationToken::new())
+            .await
+            .unwrap();
+        let body = &fixture.requests()[0].body;
+        let caption = format!("{CLOCK_LINE}\ndescribe the picture");
+        match api {
+            Api::Codex | Api::Openai => assert_eq!(
+                body["input"][0]["content"],
+                json!([
+                    {"type": "input_text", "text": caption},
+                    {"type": "input_image", "image_url": format!("data:image/png;base64,{PNG}"), "detail": "auto"},
+                ])
+            ),
+            Api::Claudeapi => assert_eq!(
+                body["messages"][0]["content"],
+                json!([
+                    {"type": "text", "text": caption},
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": PNG}},
+                ])
+            ),
+            Api::Aistudio => assert_eq!(
+                body["contents"][0]["parts"],
+                json!([
+                    {"text": caption}, {"inlineData": {"mimeType": "image/png", "data": PNG}},
+                ])
+            ),
+            Api::Deepseek => {
+                let content = body["messages"][1]["content"].as_str().unwrap();
+                assert!(content.starts_with(&caption) && content.contains("text-only"));
+                assert!(!content.contains(PNG));
+            }
+        }
+    }
 }
 
 #[tokio::test]

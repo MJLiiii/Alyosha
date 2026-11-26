@@ -46,6 +46,61 @@ pub struct Sender {
     pub name: String,
 }
 
+/// One inline user image. Cloning history shares the encoded bytes.
+#[derive(Clone, PartialEq, Eq)]
+pub struct UserImage {
+    mime_type: &'static str,
+    data: std::sync::Arc<str>,
+}
+
+impl std::fmt::Debug for UserImage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UserImage")
+            .field("mime_type", &self.mime_type)
+            .field("encoded_bytes", &self.data.len())
+            .finish()
+    }
+}
+
+impl UserImage {
+    pub fn from_base64(mime_type: &str, data: &str) -> Option<Self> {
+        use base64::{Engine, engine::general_purpose::STANDARD};
+
+        const MAX_BYTES: usize = 2 * 1024 * 1024;
+        if data.len() > MAX_BYTES.div_ceil(3) * 4 {
+            return None;
+        }
+        let mime_type = match mime_type {
+            "image/jpeg" => "image/jpeg",
+            "image/png" => "image/png",
+            "image/webp" => "image/webp",
+            _ => return None,
+        };
+        let bytes = STANDARD.decode(data).ok()?;
+        let matches = match mime_type {
+            "image/jpeg" => bytes.starts_with(b"\xff\xd8\xff"),
+            "image/png" => bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
+            _ => bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP"),
+        };
+        (matches && bytes.len() <= MAX_BYTES).then(|| Self {
+            mime_type,
+            data: data.into(),
+        })
+    }
+
+    pub fn mime_type(&self) -> &str {
+        self.mime_type
+    }
+
+    pub fn data(&self) -> &str {
+        &self.data
+    }
+
+    pub fn data_url(&self) -> String {
+        format!("data:{};base64,{}", self.mime_type, self.data)
+    }
+}
+
 /// A message waiting in the queue for its turn.
 #[derive(Debug, Clone, PartialEq)]
 pub struct UserMessage {
@@ -55,6 +110,7 @@ pub struct UserMessage {
     pub sender: Option<Sender>,
     /// The text as submitted, without the clock line.
     pub text: String,
+    pub images: Vec<UserImage>,
     /// When it was submitted. Its clock line shows this time, not the time
     /// its turn starts.
     pub submitted_at: DateTime<Utc>,
@@ -75,6 +131,7 @@ pub struct UserEntry {
     pub origin: MessageOrigin,
     /// The clock line, a line break, and the submitted text.
     pub text: String,
+    pub images: Vec<UserImage>,
 }
 
 /// One complete assistant response.

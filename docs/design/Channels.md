@@ -35,7 +35,7 @@ A protocol of Alyosha's own, like the JSON-lines RPC mode of the pi agent, would
 - **Stop works as in the TUI.** `session/cancel` signals the active turn, and the prompt ends as cancelled.
 - **The configuration decides the tools.** Alyosha starts the MCP servers in its own configuration and ignores servers the bridge offers in `session/new`, so a bridge cannot add tools. It also ignores the editor features ACP offers, such as the client's file system and terminals, because the Environment Interface already handles files and shell commands. [Environment Interface](EnvironmentInterface.md)
 - **Finished jobs reach the bridge.** ACP lets only the client start a turn, so when a background job ends, Alyosha sends the bridge a notification of its own, and the bridge sends the job's message back as a prompt. [Background jobs](Jobs.md#when-a-job-ends)
-- **Text only.** Alyosha accepts text and links. Photos, files, and voice wait until tool results and prompts support images.
+- **Prompt content.** Alyosha accepts text, links, and inline images in ACP prompts. Files, voice, and images in tool results are not supported.
 - **The model knows the app.** The system instruction gains one line naming the bridge, taken from ACP's `initialize`, such as "The owner is talking to you through alyosha-qq." The model uses it to send scheduled results to the app you wrote from. [Scheduled tasks](Schedule.md#creating-tasks)
 
 ## Trust
@@ -92,7 +92,7 @@ The official API limits replies, and that shapes the bridge:
 
 Approvals and questions arrive as text, and you answer with `/yes`, `/no`, or the number of a choice, because buttons need extra permission from QQ. The request uses one of the four replies, and your answer gives the turn a fresh set of four. [Approvals](Approvals.md)
 
-Otherwise it behaves like the Telegram bridge. In private chats it answers only your account, identified by the `openid` QQ assigns you for this bot, and drops other private messages without replying. In groups it answers anyone who @-mentions it, through the group's own session. [Group chats](#group-chats) It runs one long-lived session with `/new`, `/cancel`, `/compact`, `/job`, and `/tasks`, runs QQ's scheduled tasks, accepts text only, and starts fresh after a crash. Replies use QQ's native Markdown when QQ allows the bot to send it. A bot QQ has not granted Markdown gets the same reply as plain text, with the markers removed. Its settings go in a `[qq]` section of `config.toml`, together with the bot's secret.
+Otherwise it behaves like the Telegram bridge. In private chats it answers only your account, identified by the `openid` QQ assigns you for this bot, and drops other private messages without replying. In groups it answers anyone who @-mentions it, through the group's own session. [Group chats](#group-chats) It runs one long-lived session with `/new`, `/cancel`, `/compact`, `/job`, and `/tasks`, runs QQ's scheduled tasks, accepts text and JPEG, PNG, or WebP attachments (including those embedded in quotes), and starts fresh after a crash. Replies use QQ's native Markdown when QQ allows the bot to send it. A bot QQ has not granted Markdown gets the same reply as plain text, with the markers removed. Its settings go in a `[qq]` section of `config.toml`, together with the bot's secret.
 
 A bot registered by an individual can be used privately by its creator and by test users added in the bot's settings, without Tencent's review. That covers personal use.
 

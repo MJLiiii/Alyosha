@@ -22,7 +22,7 @@ use crate::{
     agent_state::{
         ActiveTurn, ActiveWork, AgentState, CallId, ContextCheckpoint, HistoryEntry, MessageId,
         MessageOrigin, Sender, ToolCall, ToolOutcome, ToolResultEntry, TurnOutcome, TurnPhase,
-        UserEntry, UserMessage,
+        UserEntry, UserImage, UserMessage,
     },
     approvals::{Approver, ObservedApprover, OwnerRequest},
     clock::{Clock, clock_line},
@@ -251,7 +251,13 @@ impl SessionDriver {
                 };
                 match delivery {
                     JobDelivery::Queue => {
-                        session.enqueue(finished.text, MessageOrigin::Job, Some(finished.id), None);
+                        session.enqueue(
+                            finished.text,
+                            Vec::new(),
+                            MessageOrigin::Job,
+                            Some(finished.id),
+                            None,
+                        );
                     }
                     JobDelivery::Report => session.emit(SessionEvent::JobFinished {
                         job_id: finished.id,
@@ -266,16 +272,19 @@ impl SessionDriver {
     /// Queues one of the owner's messages behind any earlier ones and returns
     /// its ID.
     pub fn submit(&self, text: impl Into<String>) -> MessageId {
-        self.session
-            .enqueue(text.into(), MessageOrigin::Owner, None, None)
+        self.submit_prompt(text.into(), Vec::new(), None)
     }
 
-    /// Queues a group member's message in a guest session. When its turn
-    /// starts, the sender becomes the speaker whose notes `user_memory`
-    /// writes, and the opening entry carries their notes.
-    pub fn submit_from(&self, text: impl Into<String>, sender: Sender) -> MessageId {
+    /// Queues text and inline images. In a guest session, the sender becomes
+    /// the speaker whose notes `user_memory` writes when the turn starts.
+    pub fn submit_prompt(
+        &self,
+        text: String,
+        images: Vec<UserImage>,
+        sender: Option<Sender>,
+    ) -> MessageId {
         self.session
-            .enqueue(text.into(), MessageOrigin::Owner, None, Some(sender))
+            .enqueue(text, images, MessageOrigin::Owner, None, sender)
     }
 
     /// Signals Stop to the active turn or command. Queued messages stay
@@ -452,6 +461,7 @@ async fn consume(session: Arc<Session>) {
             continue;
         };
         let turn_id = message.id;
+        let had_images = !message.images.is_empty();
         session.emit(SessionEvent::TurnStarted(turn_id));
         let (outcome, reply) = match session.run_turn(message, &model, &cancel).await {
             TurnEnd::Completed(reply) => (TurnOutcome::Completed, Some(reply)),
@@ -460,6 +470,19 @@ async fn consume(session: Arc<Session>) {
         };
         let idle = {
             let mut state = session.lock_state();
+            // Do not replay pixels from a failed prompt: an unsupported or
+            // corrupt image could otherwise also break later text-only turns.
+            if had_images && matches!(outcome, TurnOutcome::Failed(_)) {
+                for entry in state.history.iter_mut().rev() {
+                    if let HistoryEntry::User(user) = entry {
+                        debug_assert_eq!(user.message_id, turn_id);
+                        user.images.clear();
+                        user.text
+                            .push_str("\n[Images from this failed turn are no longer available.]");
+                        break;
+                    }
+                }
+            }
             state.outcomes.insert(turn_id, outcome.clone());
             state.active_work = None;
             state.pending_messages.is_empty()
@@ -474,10 +497,30 @@ async fn consume(session: Arc<Session>) {
     }
 }
 
+/// Keep the newest image data within a separate byte budget: image tokens
+/// depend on pixels, but base64 still takes space in memory and on the wire.
+fn retain_recent_images(history: &mut [HistoryEntry]) {
+    let mut remaining = 16 * 1024 * 1024;
+    for entry in history.iter_mut().rev() {
+        if let HistoryEntry::User(user) = entry {
+            let size: usize = user.images.iter().map(|image| image.data().len()).sum();
+            if size <= remaining {
+                remaining -= size;
+            } else {
+                remaining = 0;
+                user.images.clear();
+                user.text
+                    .push_str("\n[Earlier image attachments are no longer available.]");
+            }
+        }
+    }
+}
+
 impl Session {
     fn enqueue(
         &self,
         text: String,
+        images: Vec<UserImage>,
         origin: MessageOrigin,
         job_id: Option<String>,
         sender: Option<Sender>,
@@ -490,6 +533,7 @@ impl Session {
                 origin,
                 sender,
                 text,
+                images,
                 submitted_at: self.clock.now(),
             });
             // Sent under the lock, so the front end hears of the message
@@ -607,10 +651,15 @@ impl Session {
                 clock_line(message.submitted_at, self.timezone),
                 body
             ),
+            images: message.images,
         };
         let opening_index = {
             let mut state = self.lock_state();
+            let has_images = !opening.images.is_empty();
             state.history.push(HistoryEntry::User(opening));
+            if has_images {
+                retain_recent_images(&mut state.history);
+            }
             state.history.len() - 1
         };
         let settings = self.settings_for(model);

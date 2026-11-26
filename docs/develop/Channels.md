@@ -15,7 +15,8 @@ Answer `initialize` with protocol version `1` and these agent capabilities:
 | Capability | Value | Why |
 | --- | --- | --- |
 | `loadSession` | `false` | History lives only in memory. |
-| `promptCapabilities` `image`, `audio`, `embeddedContext` | `false` | V1 accepts text and links only. |
+| `promptCapabilities.image` | `true` | Inline JPEG, PNG, or WebP. |
+| `promptCapabilities` `audio`, `embeddedContext` | `false` | Neither is supported. |
 | `mcpCapabilities` `http`, `sse` | `false` | Bridge-supplied servers are ignored. |
 | `authMethods` | empty | Only a program that can start Alyosha as you can connect. |
 
@@ -44,9 +45,9 @@ Requests naming any other `sessionId` get a JSON-RPC error.
 
 ## Prompts
 
-Join the prompt's `text` blocks with blank lines. Render each `resource_link` block as its name and URI on its own line. That text is one user message. If it is exactly `/compact`, run manual compaction instead of queuing a message. [Compaction command](ContextManager.md#compact-command)
+Join the prompt's `text` blocks with blank lines. Render each `resource_link` block as its name and URI on its own line. Accept at most four `image` blocks with `mimeType` and standard base64 `data` (up to 2 MiB decoded per image). Invalid or oversized blocks get an invalid-params error. Text and images together form one user message. If it has no images and the text is exactly `/compact`, run manual compaction instead of queuing a message. [Compaction command](ContextManager.md#compact-command)
 
-Enqueue the message and keep the JSON-RPC request open until that message's turn closes. Several prompts may be open at once. Each is answered in queue order. ACP does not say whether a client may send a second prompt during a turn, so accept it rather than reject it.
+Enqueue the message and keep the JSON-RPC request open until that message's turn closes. History keeps up to 16 MiB of recent encoded images per session, dropping old image data but keeping the text. Failed turns do not replay their images in later requests. Several prompts may be open at once. Each is answered in queue order. ACP does not say whether a client may send a second prompt during a turn, so accept it rather than reject it.
 
 While the turn runs, send `session/update` notifications for that session:
 
@@ -70,7 +71,7 @@ Answer the prompt from the turn outcome: [Turn outcomes](AgentState.md#state-tra
 | `Stopped` | `stopReason: "cancelled"` |
 | `Failed(reason)` | A JSON-RPC error whose message gives the reason |
 
-A prompt starting with `/job ` starts a background job without queuing and answers the same way. [`/job` command](Jobs.md#job-command) A `/compact` prompt sends the command's status text, such as **No older context to compact** or the busy message, as an `agent_message_chunk` and ends with `end_turn`.
+A text-only prompt starting with `/job ` starts a background job without queuing and answers the same way. [`/job` command](Jobs.md#job-command) A `/compact` prompt sends the command's status text, such as **No older context to compact** or the busy message, as an `agent_message_chunk` and ends with `end_turn`.
 
 ## Daily fresh session
 
@@ -128,7 +129,7 @@ to someone else.
 
 These run under `cargo test` with an in-process ACP client and the scripted model from the turn fixture. [Turn fixture](AgentLoop.md#verification-with-a-scripted-model-and-fake-tools)
 
-- Send `initialize`. Check protocol version `1`, `loadSession: false`, and no image, audio, or embedded-context support.
+- Send `initialize`. Check protocol version `1`, `loadSession: false`, image support, and no audio or embedded-context support. Verify an inline image makes it to the model request and an invalid image is rejected.
 - Send `session/new` with a relative `cwd`, then one that does not exist. Check that both fail and no session starts.
 - Send `session/new` with a valid `cwd` and an `mcpServers` entry. Check that only configured servers start and that `available_commands_update` lists `compact` and `job`.
 - Script a turn that crosses the compaction threshold. Check for a `tool_call` titled **Compacting context…** with kind `think` and an `alyosha-status-` ID, then its `completed` update, before the next tool call or the reply.

@@ -14,15 +14,23 @@ use alyosha_bridge::{
 use alyosha_schedule::Schedule;
 use chrono::Utc;
 use chrono_tz::Tz;
-use futures_util::{SinkExt, StreamExt, future::BoxFuture};
+use futures_util::{
+    SinkExt, StreamExt,
+    future::{BoxFuture, ready},
+    stream,
+};
 use serde_json::{Value, json};
 use tokio::sync::{Mutex, mpsc};
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::{
-    MarkdownRefused, ReplyTo, Seen, SendError, Sender, TEXT_ONLY, deliver, deliver_reply,
+    MarkdownRefused, ReplyTo, Seen, SendError, Sender, deliver, deliver_reply,
+    images::{Attachments, Downloader},
     parse_answer, parse_token, permission_text, reply_parts,
 };
+
+const NO_IMAGE: &str = "I couldn't read that attachment. Please send a JPEG, PNG, or WebP image (up to 2 MiB), or send text.";
+const OMITTED_IMAGES: &str = "[Some QQ image attachments could not be included.]";
 
 /// `GROUP_AND_C2C_EVENT`.
 pub const INTENTS: u64 = 1 << 25;
@@ -196,7 +204,7 @@ pub struct GroupMessage {
     /// The member's nickname, or `QQ user` when QQ sends none.
     pub name: String,
     pub content: String,
-    pub has_attachments: bool,
+    attachments: Attachments,
 }
 
 /// A private message from the gateway.
@@ -205,7 +213,7 @@ pub struct C2cMessage {
     pub id: String,
     pub openid: String,
     pub content: String,
-    pub has_attachments: bool,
+    attachments: Attachments,
 }
 
 /// Keeps a WebSocket connection to the gateway and forwards private
@@ -302,13 +310,7 @@ async fn connect_once(
                         }
                         Some("RESUMED") => tracing::info!("resumed the QQ gateway session"),
                         Some("C2C_MESSAGE_CREATE") => {
-                            let d = &payload["d"];
-                            let _ = messages.send(QqMessage::C2c(C2cMessage {
-                                id: d["id"].as_str().unwrap_or_default().to_owned(),
-                                openid: d["author"]["user_openid"].as_str().unwrap_or_default().to_owned(),
-                                content: d["content"].as_str().unwrap_or_default().trim().to_owned(),
-                                has_attachments: d["attachments"].as_array().is_some_and(|items| !items.is_empty()),
-                            }));
+                            let _ = messages.send(QqMessage::C2c(c2c_message(&payload["d"])));
                         }
                         Some("GROUP_AT_MESSAGE_CREATE") => {
                             let _ = messages.send(QqMessage::Group(group_message(&payload["d"])));
@@ -358,6 +360,18 @@ pub fn full_mode_mention(d: &Value) -> Option<GroupMessage> {
     Some(message)
 }
 
+fn c2c_message(d: &Value) -> C2cMessage {
+    C2cMessage {
+        id: d["id"].as_str().unwrap_or_default().to_owned(),
+        openid: d["author"]["user_openid"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned(),
+        content: d["content"].as_str().unwrap_or_default().trim().to_owned(),
+        attachments: Attachments::parse(d),
+    }
+}
+
 /// Reads a `GROUP_AT_MESSAGE_CREATE` dispatch's `d`.
 pub fn group_message(d: &Value) -> GroupMessage {
     let name = d["author"]["member_nickname"]
@@ -374,9 +388,7 @@ pub fn group_message(d: &Value) -> GroupMessage {
             .to_owned(),
         name: name.to_owned(),
         content: d["content"].as_str().unwrap_or_default().trim().to_owned(),
-        has_attachments: d["attachments"]
-            .as_array()
-            .is_some_and(|items| !items.is_empty()),
+        attachments: Attachments::parse(d),
     }
 }
 
@@ -454,6 +466,36 @@ pub async fn run(
         ));
     }
     let seen = Seen::default();
+    let downloader = Downloader::new();
+    let owner_openid = &settings.owner_openid;
+    // Download concurrently with bridge events and other downloads, but
+    // submit in arrival order. Discard duplicate and unauthorized events first.
+    let inbound = stream::poll_fn(|cx| messages.poll_recv(cx))
+        .filter(|message| {
+            ready(match message {
+                QqMessage::Group(message) => seen.first(&message.id, Instant::now()),
+                QqMessage::C2c(message) if !owner_openid.is_empty() && message.openid == *owner_openid => {
+                    seen.first(&message.id, Instant::now())
+                }
+                QqMessage::C2c(message) => {
+                    tracing::info!(user_openid = %message.openid, "dropped a message from someone else");
+                    false
+                }
+            })
+        })
+        .map(|message| {
+            let downloader = &downloader;
+            async move {
+                let attachments = match &message {
+                    QqMessage::Group(message) => &message.attachments,
+                    QqMessage::C2c(message) => &message.attachments,
+                };
+                let (images, omitted) = downloader.download(attachments).await;
+                (message, images, omitted)
+            }
+        })
+        .buffered(4);
+    tokio::pin!(inbound);
     let markdown = MarkdownRefused::default();
     let (mut pool, mut guest_events) = GuestPool::new(
         settings.groups.clone(),
@@ -475,18 +517,15 @@ pub async fn run(
         .expect("a SIGTERM handler");
     loop {
         tokio::select! {
-            message = messages.recv() => {
+            message = inbound.next() => {
+                let Some((message, images, omitted)) = message else { return 1 };
                 let message = match message {
-                    None => return 1,
-                    Some(QqMessage::C2c(message)) => message,
-                    Some(QqMessage::Group(message)) => {
-                        if !seen.first(&message.id, Instant::now()) {
-                            continue;
-                        }
+                    QqMessage::C2c(message) => message,
+                    QqMessage::Group(message) => {
                         let to = ToGroup { api: api.clone(), group_openid: message.group_openid.clone() };
                         let mut reply = ReplyTo::message(&message.id);
-                        if message.content.is_empty() && message.has_attachments {
-                            if deliver(&to, &[TEXT_ONLY.to_owned()], &mut reply).await.is_some() {
+                        if message.content.is_empty() && message.attachments.present && images.is_empty() {
+                            if deliver(&to, &[NO_IMAGE.to_owned()], &mut reply).await.is_some() {
                                 tracing::warn!(group = %message.group_openid, "a group reply failed; dropped");
                             }
                             continue;
@@ -496,20 +535,14 @@ pub async fn run(
                         let key = format!("g{}:{}", message.group_openid, message.id);
                         group_replies.insert(key.clone(), (message.group_openid.clone(), reply));
                         let user = format!("qq-{}", message.member_openid);
-                        if let Err(error) = pool.prompt(&message.group_openid, &key, &message.content, &user, &message.name).await {
+                        let text = prompt_text(message.content, omitted);
+                        if let Err(error) = pool.prompt_with_images(&message.group_openid, &key, &text, &user, &message.name, &images).await {
                             tracing::warn!(group = %message.group_openid, error = %error, "the group session did not start");
                             group_replies.remove(&key);
                         }
                         continue;
                     }
                 };
-                if !seen.first(&message.id, Instant::now()) {
-                    continue;
-                }
-                if settings.owner_openid.is_empty() || message.openid != settings.owner_openid {
-                    tracing::info!(user_openid = %message.openid, "dropped a message from someone else");
-                    continue;
-                }
                 let mut reply = ReplyTo::message(&message.id);
                 // Replies that could not be delivered go first.
                 let waiting: Vec<String> = kept.lock().await.drain(..).collect();
@@ -522,13 +555,14 @@ pub async fn run(
                     expired_notice = false;
                     let _ = deliver(&owner, &["Expired — not approved.".to_owned()], &mut reply).await;
                 }
-                if message.content.is_empty() && message.has_attachments {
-                    let _ = deliver(&owner, &[TEXT_ONLY.to_owned()], &mut reply).await;
+                if message.content.is_empty() && message.attachments.present && images.is_empty() {
+                    let _ = deliver(&owner, &[NO_IMAGE.to_owned()], &mut reply).await;
                     continue;
                 }
-                // An answer to an open request.
+                // Only bare text can be an approval answer or local command.
+                let command = if message.attachments.present { "" } else { message.content.as_str() };
                 if let Some(open) = requests.first()
-                    && let Some(index) = parse_answer(&message.content, open.options.len())
+                    && let Some(index) = parse_answer(command, open.options.len())
                 {
                     let open = requests.remove(0);
                     let option_id = open.permission.options[index].0.clone();
@@ -548,7 +582,7 @@ pub async fn run(
                     }
                     continue;
                 }
-                match message.content.as_str() {
+                match command {
                     "/new" => {
                         let text = match bridge.new_session(&settings.workspace).await {
                             Ok(_) => "New session started.".to_owned(),
@@ -569,10 +603,11 @@ pub async fn run(
                         };
                         let _ = deliver(&owner, &reply_parts(&text, chunk), &mut reply).await;
                     }
-                    text => {
+                    _ => {
                         let key = format!("m{}", message.id);
                         replies.lock().await.insert(key.clone(), reply);
-                        bridge.prompt(&key, text);
+                        let text = prompt_text(message.content, omitted);
+                        bridge.prompt_with_images(&key, &text, &images, None);
                     }
                 }
             }
@@ -688,6 +723,16 @@ pub async fn run(
     }
 }
 
+fn prompt_text(mut text: String, omitted: bool) -> String {
+    if omitted {
+        if !text.is_empty() {
+            text.push_str("\n\n");
+        }
+        text.push_str(OMITTED_IMAGES);
+    }
+    text
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -712,12 +757,26 @@ mod tests {
             ),
             ("m1", "G1", "M7", "Bob", "what is 2+2?")
         );
-        assert!(!message.has_attachments);
+        assert!(!message.attachments.present);
         let unnamed = group_message(
             &json!({"id": "m2", "group_openid": "G1", "author": {"member_openid": "M8"}, "content": "", "attachments": [{"url": "x"}]}),
         );
         assert_eq!(unnamed.name, "QQ user");
-        assert!(unnamed.content.is_empty() && unnamed.has_attachments);
+        assert!(unnamed.content.is_empty() && unnamed.attachments.present);
+    }
+
+    #[test]
+    fn owner_captions_and_image_only_group_mentions_keep_their_attachments() {
+        let image = json!({"content_type": "image/png", "url": "//gchat.qpic.cn/test"});
+        let dm = c2c_message(&json!({"content": " describe this ", "attachments": [image]}));
+        assert_eq!(dm.content, "describe this");
+        assert!(dm.attachments.present);
+        let group = json!({
+            "content": "<@B1> ", "mentions": [{"id": "B1", "is_you": true}],
+            "msg_elements": [{"attachments": [image]}]
+        });
+        let mention = full_mode_mention(&group).unwrap();
+        assert!(mention.content.is_empty() && mention.attachments.present);
     }
 
     #[test]

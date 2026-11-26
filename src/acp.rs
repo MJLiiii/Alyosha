@@ -26,7 +26,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     BoxFuture,
     agent_loop::{JobDelivery, SessionDriver, SessionEvent, Status},
-    agent_state::{MessageId, Sender, TurnOutcome},
+    agent_state::{MessageId, Sender, TurnOutcome, UserImage},
     approvals::{Approver, OwnerAnswer, OwnerRequest},
     clock::Clock,
     llm_client::ModelClient,
@@ -313,7 +313,7 @@ impl Agent {
                         "protocolVersion": PROTOCOL_VERSION,
                         "agentCapabilities": {
                             "loadSession": false,
-                            "promptCapabilities": {"image": false, "audio": false, "embeddedContext": false},
+                            "promptCapabilities": {"image": true, "audio": false, "embeddedContext": false},
                             "mcpCapabilities": {"http": false, "sse": false},
                         },
                         "authMethods": [],
@@ -511,9 +511,28 @@ impl Agent {
             return;
         };
         let mut parts = Vec::new();
+        let mut images = Vec::new();
         for block in params["prompt"].as_array().into_iter().flatten() {
             match block["type"].as_str() {
                 Some("text") => parts.push(block["text"].as_str().unwrap_or_default().to_owned()),
+                Some("image") => {
+                    if images.len() == 4 {
+                        self.out.error(&id, -32602, "too many images (max 4)");
+                        return;
+                    }
+                    let Some(image) = UserImage::from_base64(
+                        block["mimeType"].as_str().unwrap_or_default(),
+                        block["data"].as_str().unwrap_or_default(),
+                    ) else {
+                        self.out.error(
+                            &id,
+                            -32602,
+                            "expected an inline JPEG, PNG, or WebP image up to 2 MiB",
+                        );
+                        return;
+                    };
+                    images.push(image);
+                }
                 Some("resource_link") => parts.push(format!(
                     "{} {}",
                     block["name"].as_str().unwrap_or_default(),
@@ -539,11 +558,12 @@ impl Agent {
                 id: id_text.to_owned(),
                 name: sender["name"].as_str().unwrap_or_default().to_owned(),
             };
-            let message_id = open.driver.submit_from(text, sender);
+            let message_id = open.driver.submit_prompt(text, images, Some(sender));
             open.prompts.push_back((id, Waiting::Turn(message_id)));
             return;
         }
-        let trimmed = text.trim();
+        // Commands are text-only; a caption that looks like a command is a prompt.
+        let trimmed = if images.is_empty() { text.trim() } else { "" };
         if trimmed == "/compact" {
             open.prompts.push_back((id, Waiting::Compact));
             open.driver.compact();
@@ -558,7 +578,7 @@ impl Agent {
             self.out.respond(&id, json!({"stopReason": "end_turn"}));
         } else {
             // Submit under the lock, so the ID is mapped before its turn ends.
-            let message_id = open.driver.submit(text);
+            let message_id = open.driver.submit_prompt(text, images, None);
             open.prompts.push_back((id, Waiting::Turn(message_id)));
         }
     }

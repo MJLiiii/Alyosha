@@ -92,7 +92,8 @@ fn text_tokens(text: &str) -> u64 {
 pub fn entry_tokens(entry: &HistoryEntry) -> u64 {
     FRAMING_TOKENS
         + match entry {
-            HistoryEntry::User(user) => text_tokens(&user.text),
+            // Image tokens depend on provider and resolution, not on base64 length.
+            HistoryEntry::User(user) => text_tokens(&user.text) + 4096 * user.images.len() as u64,
             HistoryEntry::Assistant(assistant) => assistant
                 .parts
                 .iter()
@@ -375,6 +376,7 @@ impl Preparation<'_> {
                 message_id: MessageId(0),
                 origin: MessageOrigin::Owner,
                 text: transcript,
+                images: Vec::new(),
             })],
             tools: Vec::new(),
             max_output_tokens: Some(SUMMARY_REPLY as u32),
@@ -437,6 +439,9 @@ fn transcript(previous: Option<&str>, entries: &[HistoryEntry]) -> String {
             HistoryEntry::User(user) => {
                 text.push_str("\n[Owner]\n");
                 text.push_str(&user.text);
+                if !user.images.is_empty() {
+                    text.push_str("\n[Image attachments omitted from the summary transcript.]");
+                }
                 text.push('\n');
             }
             HistoryEntry::Assistant(assistant) => {
@@ -694,6 +699,7 @@ mod tests {
             message_id: MessageId(1),
             origin: MessageOrigin::Owner,
             text: text.into(),
+            images: Vec::new(),
         })
     }
 
