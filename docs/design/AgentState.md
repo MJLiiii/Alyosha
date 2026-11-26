@@ -1,6 +1,6 @@
 # Agent State
 
-Agent State is the in-memory record of one session. The session driver owns the queue, active work, and turn outcomes. Its turn driver, `run_turn`, appends conversation history. A restart creates a fresh session. [Agent Loop](AgentLoop.md)
+Agent State is the in-memory record of one session. The session driver owns the queue, active work, and turn outcomes. Its turn driver, `run_turn`, appends conversation history. Each history entry and context checkpoint is also saved to the session store before it takes effect, so a restarted process can resume the session. The queue, active work, and turn outcomes are not saved. [Agent Loop](AgentLoop.md) · [Durable sessions](SessionStore.md)
 
 | What the state holds | Why it matters |
 | --- | --- |

@@ -7,7 +7,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::{
     agent_loop::{JOB_USAGE, SessionEvent, Status},
-    agent_state::{MessageId, TurnOutcome},
+    agent_state::{HistoryEntry, MessageId, MessageOrigin, TurnOutcome},
     approvals::{OwnerAnswer, OwnerRequest},
 };
 
@@ -52,6 +52,40 @@ impl PrintLine {
             style: LineStyle::Warning,
         }
     }
+}
+
+/// Your last message and the reply after it, as the scrollback showed them,
+/// for a resumed session.
+pub fn last_exchange(history: &[HistoryEntry]) -> Vec<PrintLine> {
+    let Some(start) = history.iter().rposition(
+        |entry| matches!(entry, HistoryEntry::User(user) if user.origin == MessageOrigin::Owner),
+    ) else {
+        return Vec::new();
+    };
+    let HistoryEntry::User(user) = &history[start] else {
+        unreachable!("found above");
+    };
+    let text = user.text.split_once('\n').map_or("", |(_, rest)| rest);
+    let mut lines: Vec<PrintLine> = text
+        .lines()
+        .enumerate()
+        .map(|(index, line)| {
+            let prefix = if index == 0 { "› " } else { "  " };
+            PrintLine::plain(format!("{prefix}{line}"))
+        })
+        .collect();
+    let reply = history[start + 1..]
+        .iter()
+        .rev()
+        .find_map(|entry| match entry {
+            HistoryEntry::Assistant(reply) if !reply.text().trim().is_empty() => Some(reply.text()),
+            _ => None,
+        });
+    if let Some(reply) = reply {
+        lines.push(PrintLine::plain(""));
+        lines.extend(reply.lines().map(PrintLine::plain));
+    }
+    lines
 }
 
 /// What the TUI asks of the session or the terminal.
@@ -620,6 +654,36 @@ mod tests {
     use crossterm::event::{KeyEventKind, KeyEventState};
 
     use super::*;
+
+    #[test]
+    fn a_resume_shows_the_last_message_and_reply() {
+        use crate::agent_state::{AssistantEntry, AssistantPart, UserEntry};
+        let user = |id: u64, origin: MessageOrigin, text: &str| {
+            HistoryEntry::User(UserEntry {
+                message_id: MessageId(id),
+                origin,
+                text: format!("[clock]\n{text}"),
+            })
+        };
+        let reply = |text: &str| {
+            HistoryEntry::Assistant(AssistantEntry {
+                parts: vec![AssistantPart::Text(text.into())],
+            })
+        };
+        let history = vec![
+            user(1, MessageOrigin::Owner, "first"),
+            reply("one"),
+            user(2, MessageOrigin::Owner, "second\nline"),
+            reply("two"),
+            user(3, MessageOrigin::Job, "job done"),
+        ];
+        let lines: Vec<String> = last_exchange(&history)
+            .into_iter()
+            .map(|line| line.text)
+            .collect();
+        assert_eq!(lines, ["› second", "  line", "", "two"]);
+        assert!(last_exchange(&[]).is_empty());
+    }
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent {

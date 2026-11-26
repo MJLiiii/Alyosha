@@ -35,9 +35,10 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use self::state::{Action, LineStyle, MAX_INPUT_LINES, PrintLine, UiState};
 use crate::{
     BoxFuture,
-    agent_loop::{JobDelivery, SessionDriver},
+    agent_loop::{JobDelivery, Persistence, SessionDriver},
     approvals::{Approver, OwnerAnswer, OwnerRequest},
     session::{self, FrontEnd},
+    session_store::{PgStore, SessionStore},
 };
 
 /// Two status lines plus the input box at its largest.
@@ -66,9 +67,9 @@ impl Approver for TuiApprover {
     }
 }
 
-/// Runs the TUI in `workspace` (the current folder by default). Returns the
-/// process exit status.
-pub fn run(workspace: Option<String>) -> u8 {
+/// Runs the TUI in `workspace` (the current folder by default), resuming
+/// the folder's last session with `resume`. Returns the process exit status.
+pub fn run(workspace: Option<String>, resume: bool) -> u8 {
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
         eprintln!("alyosha: the TUI needs a terminal. Programs should use `alyosha acp`.");
         return 2;
@@ -100,6 +101,15 @@ pub fn run(workspace: Option<String>) -> u8 {
     };
     let log_file = alyosha_config::logging::init("alyosha-tui", config.timezone, &paths).ok();
     let runtime = tokio::runtime::Runtime::new().expect("a Tokio runtime starts");
+    let opened = runtime.block_on(open_session(&workspace, resume, config.timezone));
+    let (persistence, note) = match opened {
+        Ok(opened) => opened,
+        Err(error) => {
+            tracing::error!(error = %error, "the session could not be opened");
+            eprintln!("alyosha: {error}");
+            return 1;
+        }
+    };
     runtime.block_on(async move {
         let mut terminal = match setup_terminal() {
             Ok(terminal) => terminal,
@@ -108,12 +118,81 @@ pub fn run(workspace: Option<String>) -> u8 {
                 return 1;
             }
         };
-        let code = session_loop(&mut terminal, &config, &paths, &workspace, log_file).await;
+        let code = session_loop(
+            &mut terminal,
+            &config,
+            &paths,
+            &workspace,
+            log_file,
+            persistence,
+            note,
+        )
+        .await;
         restore_terminal();
         let _ = terminal.show_cursor();
         println!();
         code
     })
+}
+
+/// Connects to the session store and creates the folder's session, or with
+/// `resume` loads its current one. Returns the line to print under the
+/// header, if any.
+async fn open_session(
+    workspace: &std::path::Path,
+    resume: bool,
+    timezone: chrono_tz::Tz,
+) -> Result<(Persistence, Option<String>), String> {
+    let store: Arc<dyn SessionStore> = PgStore::connect_default()
+        .await
+        .map_err(|error| crate::acp::database_error(&error))?;
+    let key = format!("tui:{}", workspace.display());
+    if resume {
+        match store.load_current(&key).await {
+            Ok(Some(stored)) => {
+                let when = stored
+                    .updated_at
+                    .with_timezone(&timezone)
+                    .format("%a %Y-%m-%d %H:%M");
+                let note = format!("Resumed the session from {when}");
+                return Ok((
+                    Persistence {
+                        store,
+                        stored,
+                        resumed: true,
+                    },
+                    Some(note),
+                ));
+            }
+            Ok(None) => {
+                let stored = store
+                    .create(&key, workspace)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                return Ok((
+                    Persistence {
+                        store,
+                        stored,
+                        resumed: false,
+                    },
+                    Some("No earlier session here; started a new one.".into()),
+                ));
+            }
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    let stored = store
+        .create(&key, workspace)
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok((
+        Persistence {
+            store,
+            stored,
+            resumed: false,
+        },
+        None,
+    ))
 }
 
 fn setup_terminal() -> std::io::Result<Terminal<CrosstermBackend<Stdout>>> {
@@ -162,19 +241,26 @@ async fn session_loop(
     paths: &Paths,
     workspace: &std::path::Path,
     log_file: Option<PathBuf>,
+    persistence: Persistence,
+    note: Option<String>,
 ) -> u8 {
     let mut ui = UiState::new();
-    print(
-        terminal,
-        &[PrintLine {
-            text: format!(
-                "alyosha · {} · {}",
-                home_relative(workspace, &paths.home),
-                config.model.name
-            ),
-            style: LineStyle::Plain,
-        }],
-    );
+    let resumed = persistence.resumed;
+    let mut header = vec![PrintLine {
+        text: format!(
+            "alyosha · {} · {}",
+            home_relative(workspace, &paths.home),
+            config.model.name
+        ),
+        style: LineStyle::Plain,
+    }];
+    if let Some(note) = note {
+        header.push(PrintLine {
+            text: note,
+            style: LineStyle::Dim,
+        });
+    }
+    print(terminal, &header);
     let (requests, mut asks) = mpsc::unbounded_channel::<Ask>();
     let starting = if workspace.join("flake.nix").is_file() {
         "Loading dev shell…"
@@ -193,6 +279,7 @@ async fn session_loop(
             channel_line: None,
             log_file,
             on_loading_dev_shell: None,
+            persistence: Some(persistence),
         },
     )
     .await;
@@ -209,6 +296,12 @@ async fn session_loop(
             return 1;
         }
     };
+    if resumed {
+        print(
+            terminal,
+            &state::last_exchange(&started.driver.snapshot().history),
+        );
+    }
     let warnings: Vec<PrintLine> = started
         .warnings
         .iter()

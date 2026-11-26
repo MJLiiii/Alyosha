@@ -11,6 +11,8 @@ use alyosha_config::Paths;
 const USAGE: &str = "\
 Usage:
   alyosha [path]          Start the TUI in a folder (default: here)
+  alyosha --continue [path]
+                          Resume the folder's last TUI session
   alyosha acp             Serve one ACP agent connection on stdin and stdout
   alyosha acp --guest     The same, as a group chat's guest session
   alyosha acp --group     The same, as a trusted group chat's full session
@@ -31,9 +33,13 @@ fn main() -> ExitCode {
         ["acp"] => ExitCode::from(alyosha::acp::run(Mode::Owner)),
         ["acp", "--guest"] => ExitCode::from(alyosha::acp::run(Mode::Guest)),
         ["acp", "--group"] => ExitCode::from(alyosha::acp::run(Mode::Group)),
-        [] => ExitCode::from(alyosha::tui::run(None)),
+        [] => ExitCode::from(alyosha::tui::run(None, false)),
         [path] if !path.starts_with('-') => {
-            ExitCode::from(alyosha::tui::run(Some((*path).to_owned())))
+            ExitCode::from(alyosha::tui::run(Some((*path).to_owned()), false))
+        }
+        ["--continue"] => ExitCode::from(alyosha::tui::run(None, true)),
+        ["--continue", path] if !path.starts_with('-') => {
+            ExitCode::from(alyosha::tui::run(Some((*path).to_owned()), true))
         }
         _ => usage_error(),
     }

@@ -48,7 +48,9 @@ The container mounts three host folders writable, each at the same path it has o
 
 - The workspace folders, `~/work` by default, which hold every project. Alyosha accepts any folder as a workspace, so this mount is the real limit: nothing else of your home exists in the container.
 - `~/.config/alyosha`, with the configuration file, skills, and GPROXY's secrets.
-- `~/.local/share/alyosha`, with memory, GPROXY's database, the shell's download cache, and Alyosha's log files. [Logging](../reference/Logging.md)
+- `~/.local/share/alyosha`, with memory, GPROXY's database, the shell's download cache, Alyosha's log files, and daily dumps of the session database. [Logging](../reference/Logging.md)
+
+The session database itself runs as a PostgreSQL service inside the container, reachable only through its Unix socket, with its data in the container's own state. [Durable sessions](SessionStore.md#the-database)
 
 Using the same paths keeps file names identical on both sides, so a path in a memory, a log line, or an error means the same thing on the host. You edit skills and memories with your usual tools on the host, and they survive a rebuild of the container. Everything else on the host, such as your home directory, `~/.ssh`, and other projects, does not exist inside.
 
@@ -56,7 +58,7 @@ The container has its own network with a route to the internet through the host.
 
 ## Limits on memory and CPU
 
-The container has a memory cap, set in the host configuration. When everything inside together uses more, the kernel stops processes inside the container instead of freezing your machine. A bridge whose agent is stopped this way restarts with a fresh session. Shell commands and background jobs also run at a lower CPU priority, so a long build leaves the host responsive. [Container module](../develop/Deployment.md#host-module)
+The container has a memory cap, set in the host configuration. When everything inside together uses more, the kernel stops processes inside the container instead of freezing your machine. A bridge whose agent is stopped this way restarts and resumes its session. [Durable sessions](SessionStore.md) Shell commands and background jobs also run at a lower CPU priority, so a long build leaves the host responsive. [Container module](../develop/Deployment.md#host-module)
 
 ## Using it
 

@@ -1,5 +1,6 @@
 //! The ACP side shared by Alyosha's chat bridges: starting `alyosha acp`,
-//! `initialize` and `session/new`, sending prompts, attributing updates to
+//! `initialize`, opening a session by key with `session/load` or
+//! `session/new`, sending prompts, attributing updates to
 //! the oldest open prompt, collecting each prompt's tool calls, text, and
 //! outcome, and the scheduled-task runner.
 //!
@@ -132,9 +133,22 @@ struct Shared {
     prompts: VecDeque<Prompt>,
     /// The JSON-RPC ID of each open prompt's request.
     prompt_requests: HashMap<u64, String>,
-    pending: HashMap<u64, oneshot::Sender<Result<Value, String>>>,
+    pending: HashMap<u64, oneshot::Sender<Result<Value, RpcError>>>,
     open_permissions: Vec<String>,
+    /// While `session/load` replays the conversation, its updates are
+    /// dropped, so they never reach a chat.
+    loading: bool,
 }
+
+/// A JSON-RPC error from `alyosha acp`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RpcError {
+    code: i64,
+    message: String,
+}
+
+/// The error `session/load` gives for a key with no session.
+const RESOURCE_NOT_FOUND: i64 = -32002;
 
 /// A connection to `alyosha acp`.
 #[derive(Clone)]
@@ -228,15 +242,22 @@ impl Bridge {
     }
 
     async fn request(&self, method: &str, params: Value) -> Result<Value, String> {
+        self.request_coded(method, params)
+            .await
+            .map_err(|error| error.message)
+    }
+
+    async fn request_coded(&self, method: &str, params: Value) -> Result<Value, RpcError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (sender, receiver) = oneshot::channel();
         self.lock().pending.insert(id, sender);
         let _ = self.out.send(
             json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}).to_string(),
         );
-        receiver
-            .await
-            .map_err(|_| "alyosha acp stopped".to_owned())?
+        receiver.await.map_err(|_| RpcError {
+            code: 0,
+            message: "alyosha acp stopped".to_owned(),
+        })?
     }
 
     fn notify(&self, method: &str, params: Value) {
@@ -255,12 +276,18 @@ impl Bridge {
         .map(drop)
     }
 
-    /// `session/new` in the workspace; waits until Alyosha's startup ends.
-    pub async fn new_session(&self, workspace: &Path) -> Result<String, String> {
+    /// `session/new` under `key` in the workspace; waits until Alyosha's
+    /// startup ends. The old session stays saved under the key, and this
+    /// one becomes its current session.
+    pub async fn new_session(&self, workspace: &Path, key: &str) -> Result<String, String> {
         let result = self
             .request(
                 "session/new",
-                json!({"cwd": workspace.display().to_string(), "mcpServers": []}),
+                json!({
+                    "cwd": workspace.display().to_string(),
+                    "mcpServers": [],
+                    "_meta": {"alyosha": {"sessionKey": key}},
+                }),
             )
             .await?;
         let session = result["sessionId"]
@@ -269,6 +296,31 @@ impl Bridge {
             .to_owned();
         self.lock().session = Some(session.clone());
         Ok(session)
+    }
+
+    /// Resumes the key's current session with `session/load`, or starts one
+    /// with `session/new` if the key has none. The conversation `session/load`
+    /// replays is dropped. Returns whether a session was resumed.
+    /// See `docs/develop/SessionStore.md#bridges`.
+    pub async fn open_session(&self, workspace: &Path, key: &str) -> Result<bool, String> {
+        self.lock().loading = true;
+        let loaded = self
+            .request_coded(
+                "session/load",
+                json!({"sessionId": key, "cwd": workspace.display().to_string(), "mcpServers": []}),
+            )
+            .await;
+        self.lock().loading = false;
+        match loaded {
+            Ok(_) => {
+                self.lock().session = Some(key.to_owned());
+                Ok(true)
+            }
+            Err(error) if error.code == RESOURCE_NOT_FOUND => {
+                self.new_session(workspace, key).await.map(|_| false)
+            }
+            Err(error) => Err(error.message),
+        }
     }
 
     /// Sends a prompt at once. Its updates and response arrive as events
@@ -399,7 +451,10 @@ impl Bridge {
                 let waiter = self.lock().pending.remove(&id);
                 if let Some(waiter) = waiter {
                     let result = match message.get("error") {
-                        Some(error) => Err(error["message"].as_str().unwrap_or("error").to_owned()),
+                        Some(error) => Err(RpcError {
+                            code: error["code"].as_i64().unwrap_or_default(),
+                            message: error["message"].as_str().unwrap_or("error").to_owned(),
+                        }),
                         None => Ok(message.get("result").cloned().unwrap_or(Value::Null)),
                     };
                     let _ = waiter.send(result);
@@ -463,6 +518,9 @@ impl Bridge {
     /// Attributes an update to the oldest open prompt.
     fn update(&self, update: &Value) {
         let mut shared = self.lock();
+        if shared.loading {
+            return;
+        }
         let kind = update["sessionUpdate"].as_str().unwrap_or_default();
         if kind == "tool_call_update" && update["status"] == "failed" {
             let id = update["toolCallId"].as_str().unwrap_or_default();
@@ -648,6 +706,75 @@ mod tests {
             BufReader::new(agent_read).lines(),
             agent_write,
         )
+    }
+
+    async fn read(
+        agent_in: &mut tokio::io::Lines<BufReader<tokio::io::ReadHalf<tokio::io::DuplexStream>>>,
+    ) -> Value {
+        serde_json::from_str(&agent_in.next_line().await.unwrap().unwrap()).unwrap()
+    }
+
+    async fn write(agent_out: &mut tokio::io::WriteHalf<tokio::io::DuplexStream>, message: Value) {
+        agent_out
+            .write_all(format!("{message}\n").as_bytes())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn open_session_falls_back_to_new_under_the_key() {
+        let (bridge, _events, mut agent_in, mut agent_out) = fake().await;
+        let opening = tokio::spawn({
+            let bridge = bridge.clone();
+            async move { bridge.open_session(Path::new("/w"), "owner:qq").await }
+        });
+        let load = read(&mut agent_in).await;
+        assert_eq!(load["method"], "session/load");
+        assert_eq!(load["params"]["sessionId"], "owner:qq");
+        write(&mut agent_out, json!({"jsonrpc": "2.0", "id": load["id"], "error": {"code": -32002, "message": "Resource not found"}})).await;
+        let new = read(&mut agent_in).await;
+        assert_eq!(new["method"], "session/new");
+        assert_eq!(new["params"]["_meta"]["alyosha"]["sessionKey"], "owner:qq");
+        write(
+            &mut agent_out,
+            json!({"jsonrpc": "2.0", "id": new["id"], "result": {"sessionId": "owner:qq"}}),
+        )
+        .await;
+        assert_eq!(opening.await.unwrap(), Ok(false));
+        assert_eq!(bridge.lock().session.as_deref(), Some("owner:qq"));
+    }
+
+    #[tokio::test]
+    async fn the_replay_of_a_loaded_session_never_reaches_a_prompt() {
+        let (bridge, mut events, mut agent_in, mut agent_out) = fake().await;
+        let opening = tokio::spawn({
+            let bridge = bridge.clone();
+            async move { bridge.open_session(Path::new("/w"), "owner:qq").await }
+        });
+        let load = read(&mut agent_in).await;
+        let update = |text: &str| json!({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "owner:qq", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": text}}}});
+        write(&mut agent_out, update("an old reply")).await;
+        write(
+            &mut agent_out,
+            json!({"jsonrpc": "2.0", "id": load["id"], "result": {}}),
+        )
+        .await;
+        assert_eq!(opening.await.unwrap(), Ok(true));
+        bridge.prompt("m1", "hello");
+        let prompt = read(&mut agent_in).await;
+        assert_eq!(prompt["params"]["sessionId"], "owner:qq");
+        write(&mut agent_out, update("new")).await;
+        write(
+            &mut agent_out,
+            json!({"jsonrpc": "2.0", "id": prompt["id"], "result": {"stopReason": "end_turn"}}),
+        )
+        .await;
+        loop {
+            if let Some(Event::Finished(finished)) = events.recv().await {
+                assert_eq!(finished.text, "new");
+                break;
+            }
+        }
     }
 
     #[tokio::test]

@@ -53,7 +53,7 @@ ACP lets only the bridge start a turn, so in ACP mode Alyosha tells the bridge t
 
 ## Lifetime
 
-Jobs belong to their session and end with it. The nightly fresh start of a chat session waits for another night while a job runs. [Chat channels](Channels.md#what-alyosha-acp-does) Quitting the TUI, `/new` in a chat, and a bridge restart or crash all kill the session's jobs. If jobs are running when you quit the TUI, it warns you, and quitting again stops them.
+Jobs belong to the process running their session and end with it. Quitting the TUI, `/new` in a chat, and a bridge restart or crash all kill the session's jobs. A resumed session does not bring them back. [Durable sessions](SessionStore.md#what-is-saved) If jobs are running when you quit the TUI, it warns you, and quitting again stops them.
 
 ## Trust
 

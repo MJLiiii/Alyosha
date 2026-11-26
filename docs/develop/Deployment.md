@@ -32,8 +32,10 @@ in {
       # playwright-mcp (Browser.md), gogcli (EmailCalendar.md), and
       # open-websearch (WebSearch.md).
       environment.systemPackages = [ alyosha gproxy ];
-      # Add systemd.services.gproxy from LLMClientGateway.md, and the
-      # bridge services from TelegramBridge.md and QQBridge.md, here.
+      # Add systemd.services.gproxy from LLMClientGateway.md, PostgreSQL,
+      # alyosha-db, and its backup from SessionStore.md, and the bridge
+      # services from TelegramBridge.md and QQBridge.md, here. The flake's
+      # nixosModules.container (nix/container.nix) does all of this.
       # Set system.stateVersion to the host's value.
     };
   };

@@ -19,6 +19,7 @@ pub mod llm_client;
 pub mod mcp;
 pub mod memory;
 pub mod session;
+pub mod session_store;
 pub mod skills;
 pub mod tools;
 pub mod tui;

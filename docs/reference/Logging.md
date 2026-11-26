@@ -1,6 +1,6 @@
 # Logging
 
-Every Alyosha program writes a debug log, a plain text file you can read on the host while Alyosha runs in the container. It records what happened, not what was said: events, names, IDs, durations, and errors, never the conversation. [Architecture overview](../README.md) · [Configuration](Configuration.md)
+Every Alyosha program writes a debug log, a plain text file you can read on the host while Alyosha runs in the container. It records what happened, not what was said: events, names, IDs, durations, and errors, never the conversation. The conversation is kept only in the session database. [Durable sessions](../design/SessionStore.md) [Architecture overview](../README.md) · [Configuration](Configuration.md)
 
 ## Where the logs are
 
@@ -34,7 +34,7 @@ The date is the local date in the configured timezone. Each line starts with the
 | Model requests: route, model, duration, token usage, GPROXY's request ID, and errors | Tool arguments and tool output |
 | Tool calls: name and call ID when each starts, then its duration and outcome kind | Approval request bodies and `ask_owner` questions |
 | Waiting for the owner: when an approval or `ask_owner` question is sent, and how it ended (answered, expired, undeliverable, or cancelled) with how long it took | |
-| Jobs, compaction, approvals answered or expired, the nightly fresh session, and bridge delivery failures with their error codes | Secrets: tokens, keys, passwords, and the configuration's secret fields |
+| Jobs, compaction, approvals answered or expired, sessions created, resumed, or refused as busy, session store errors, and bridge delivery failures with their error codes | Secrets: tokens, keys, passwords, and the configuration's secret fields |
 | MCP servers' standard error, each line prefixed with the server's name and cut to 1 KiB | |
 
 MCP servers' standard error is their own diagnostics, which Alyosha cannot check. A server that prints content there puts it in the log.

@@ -9,7 +9,7 @@ Turn the repository root into a Cargo workspace with these packages:
 | Folder | Package | Holds |
 | --- | --- | --- |
 | root | `alyosha` | Alyosha itself, including `alyosha acp` |
-| `bridge/` | `alyosha-bridge` | A library shared by the bridges: starting `alyosha acp`, `initialize` and `session/new`, sending prompts, attributing updates to the oldest open prompt, collecting each prompt's tool calls, text, and outcome, and the pool of guest sessions for group chats |
+| `bridge/` | `alyosha-bridge` | A library shared by the bridges: starting `alyosha acp`, `initialize`, opening a session by key with `session/load` or `session/new`, sending prompts, attributing updates to the oldest open prompt, collecting each prompt's tool calls, text, and outcome, and the pool of guest sessions for group chats |
 | `telegram/` | `alyosha-telegram` | The Telegram side |
 | `qq/` | `alyosha-qq` | The QQ side. [QQ bridge](QQBridge.md) |
 | `config/` | `alyosha-config` | The configuration schema and loader, used by every program. [Configuration](Configuration.md) |
@@ -35,7 +35,7 @@ Create the bot with Telegram's @BotFather, which issues the token. Get your user
 
 1. Read the configuration and token.
 2. Start `alyosha acp` from `PATH` with piped standard input and output. Send its standard error to the bridge's own standard error, which the journal keeps, for failures before its log file opens. Both programs write their own log files. [Logging](../reference/Logging.md)
-3. Send `initialize` with protocol version `1`, `clientInfo.name` set to `alyosha-telegram`, and no client capabilities, then `session/new` with the configured workspace and an empty `mcpServers` list.
+3. Send `initialize` with protocol version `1`, `clientInfo.name` set to `alyosha-telegram`, and no client capabilities, then open the session `owner:telegram` in the configured workspace with an empty `mcpServers` list: `session/load`, or `session/new` if there is none. [Durable sessions: bridges](SessionStore.md#bridges)
 4. Call `getMe` and keep the bot's user ID and username, which group mentions name. Network errors are retried as for every call; if Telegram refuses it, as for a wrong token, exit with an error.
 5. Call `setMyCommands` with `new`, `cancel`, `compact`, `job`, and `tasks`, each with a one-line description.
 6. Start long polling with `getUpdates`, asking only for `message` and `callback_query` updates.
@@ -53,7 +53,7 @@ For a message from the owner:
 | Message | Action |
 | --- | --- |
 | `/start` | Reply with a short help text listing the commands. |
-| `/new` | Send `session/new` with the configured workspace. Reply **New session started.** once it returns, which can take minutes while a project's dev shell builds. [Sessions](Channels.md#sessions) |
+| `/new` | Send `session/new` with the configured workspace and the key `owner:telegram`. Reply **New session started.** once it returns, which can take minutes while a project's dev shell builds. [Sessions](Channels.md#sessions) |
 | `/cancel` | Send `session/cancel` for the current session. |
 | `/compact`, `/job …` | Send it as the text of a `session/prompt`. [`/job` command](Jobs.md#job-command) |
 | `/tasks` | List scheduled tasks from the file, without the model. [`/tasks`](Schedule.md#tasks) |
@@ -101,7 +101,7 @@ A group message is a **mention** when its `entities` hold a `mention` whose text
 
 For a mention in a group whose chat ID is in `trusted_groups`, see [Trusted groups](#trusted-groups). For any other mention:
 
-1. Take the group's guest session from the pool, starting `alyosha acp --guest` for it if none runs: `initialize` with `alyosha-telegram`, then `session/new` with the configured workspace, which guest mode ignores.
+1. Take the group's guest session from the pool, starting `alyosha acp --guest` for it if none runs: `initialize` with `alyosha-telegram`, then open the session `guest:telegram:<chat ID>` with the configured workspace, which guest mode ignores.
 2. Send the text as a prompt with the sender `telegram-<from.id>` and the display name, the first and last name, or the username if there is none. A mention with no text and a photo, file, or voice message gets **Only text messages work for now.** and no prompt.
 3. While the group's prompt is open, send `typing` to the group every 5 seconds.
 4. When the response arrives, send the reply to the group rendered and split like a private reply, with `reply_parameters` naming the mention and `allow_sending_without_reply`. A failed send is logged and dropped. Guest sessions send no tool calls worth showing, so there is no **Working…** message.
@@ -112,7 +112,7 @@ The pool keeps one guest child per group ID. Stop a child, closing its input as 
 
 For a mention in a trusted group: [Trusted groups design](../design/Channels.md#trusted-groups)
 
-1. Take the group's session from the pool, starting `alyosha acp --group` for it if none runs: create `<workspace>/groups/<chat ID>` if missing, `initialize` with `alyosha-telegram`, then `session/new` with that folder.
+1. Take the group's session from the pool, starting `alyosha acp --group` for it if none runs: create `<workspace>/groups/<chat ID>` if missing, `initialize` with `alyosha-telegram`, then open the session `group:telegram:<chat ID>` in that folder.
 2. Send `<display name>: <text>` as a plain prompt, without `_meta`. Typing and the reply work as for a guest group.
 3. **Approvals.** Send the request to the owner's private chat as usual, with **In group <chat ID>:** and a blank line in front of the title. Give it a request number of its own, so a button press answers the right child. `/cancel` in the private chat cancels only the private session and its requests; a group's requests stay open until answered or expired.
 4. **Jobs.** On a finished job, send **⚙ Job finished:** to the group, prompt the group's session with the result, and send its reply to the group without `reply_parameters`.
@@ -120,7 +120,7 @@ For a mention in a trusted group: [Trusted groups design](../design/Channels.md#
 
 ## Failures and shutdown
 
-- **`alyosha acp` exits.** Send **Alyosha stopped unexpectedly. Restarting with a new session.**, then exit with a nonzero status. systemd restarts the bridge, which starts a new child.
+- **`alyosha acp` exits.** Send **Alyosha stopped unexpectedly. Restarting.**, then exit with a nonzero status. systemd restarts the bridge, which starts a new child and loads the same session.
 - **Telegram API errors.** On a `429` reply, wait the `retry_after` it gives. On other network errors, retry with backoff up to one minute. Never drop a reply because of a temporary error.
 - **SIGTERM.** Stop polling, close the child's standard input, wait up to 10 seconds for it to exit, then kill it.
 

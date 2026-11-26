@@ -69,8 +69,9 @@ The TUI's `Approver` sends `Request` with a one-shot responder and waits for the
 
 ## Startup
 
-1. Take the workspace from the first argument, or the current directory. Resolve it to an absolute path without symlinks. It must be an existing directory. Otherwise print the reason and exit with status 2 before touching the terminal.
-2. Start the session as the session driver describes, then send `Header` and each startup warning. [Session startup](AgentLoop.md#session-driver)
+1. Accept `--continue` before the path. Take the workspace from the first other argument, or the current directory. Resolve it to an absolute path without symlinks. It must be an existing directory. Otherwise print the reason and exit with status 2 before touching the terminal.
+2. Connect to the session store. With `--continue`, load the current session for `tui:<workspace>`. Otherwise, or if there is none, create one under that key. Print a store error, including a busy session, and exit with status 1 before touching the terminal. [Durable sessions: TUI](SessionStore.md#tui)
+3. Start the session as the session driver describes, then send `Header` and each startup warning. After a resume, print your last message and the last reply below the header.
 
 ## Verification
 

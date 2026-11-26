@@ -10,9 +10,10 @@ use std::{
 };
 
 use alyosha::{
-    acp::{FRESH_SESSION_LINE, Mode, ServeOptions, serve},
+    acp::{Mode, ServeOptions, serve},
     clock::Clock,
     llm_client::ModelError,
+    session_store::{MemoryStore, RESUMED_LINE, SessionStore},
 };
 use alyosha_config::{Config, Paths};
 use chrono::{DateTime, TimeZone, Utc};
@@ -31,7 +32,10 @@ impl Clock for MovableClock {
 }
 
 struct Client {
-    _root: tempfile::TempDir,
+    _root: Arc<tempfile::TempDir>,
+    paths: Paths,
+    store: Arc<MemoryStore>,
+    mode: Mode,
     workspace: String,
     projects: std::path::PathBuf,
     writer: WriteHalf<DuplexStream>,
@@ -62,23 +66,13 @@ impl Client {
         let clock = Arc::new(MovableClock(Mutex::new(
             Utc.with_ymd_and_hms(2026, 11, 25, 9, 2, 0).unwrap(),
         )));
-        let (ours, theirs) = tokio::io::duplex(1 << 20);
-        let (their_read, their_write) = tokio::io::split(theirs);
-        let options = ServeOptions {
-            paths: paths.clone(),
-            load_config: Arc::new(|| Ok(Config::default())),
-            model: Arc::new(move |_: &Config| {
-                model.clone() as Arc<dyn alyosha::llm_client::ModelClient>
-            }),
-            clock: clock.clone(),
-            log_file: None,
-            renewal_check: Duration::from_millis(50),
-            mode,
-        };
-        let server = tokio::spawn(serve(their_read, their_write, options));
-        let (read, writer) = tokio::io::split(ours);
+        let store = MemoryStore::new();
+        let (server, writer, read) = spawn_server(&paths, &store, model, mode, &clock);
         Self {
-            _root: root,
+            _root: Arc::new(root),
+            paths,
+            store,
+            mode,
             workspace: workspace.display().to_string(),
             projects: base.join("Projects"),
             writer,
@@ -88,6 +82,22 @@ impl Client {
             clock,
             server,
         }
+    }
+
+    /// Closes the connection, waits for the process to end, and starts a
+    /// new one on the same store, as after a restart.
+    async fn reconnect(&mut self, model: Arc<ScriptedModel>) {
+        self.writer.shutdown().await.unwrap();
+        let (server, writer, read) =
+            spawn_server(&self.paths, &self.store, model, self.mode, &self.clock);
+        let old = std::mem::replace(&mut self.server, server);
+        tokio::time::timeout(Duration::from_secs(10), old)
+            .await
+            .unwrap()
+            .unwrap();
+        self.writer = writer;
+        self.lines = BufReader::new(read).lines();
+        self.next_id = 1;
     }
 
     async fn send(&mut self, message: Value) {
@@ -151,11 +161,17 @@ impl Client {
             .to_owned()
     }
 
-    /// Waits `wait` and checks that nothing arrives, such as a renewal.
-    async fn quiet_for(&mut self, wait: Duration) {
-        if let Ok(line) = tokio::time::timeout(wait, self.lines.next_line()).await {
-            panic!("expected nothing, got {line:?}");
-        }
+    /// `session/new` under a key, which becomes the session ID.
+    async fn new_keyed_session(&mut self, key: &str) -> String {
+        let workspace = self.workspace.clone();
+        let id = self
+            .request(
+                "session/new",
+                json!({"cwd": workspace, "mcpServers": [], "_meta": {"alyosha": {"sessionKey": key}}}),
+            )
+            .await;
+        let response = self.until_response(id).await.pop().unwrap();
+        response["result"]["sessionId"].as_str().unwrap().to_owned()
     }
 
     async fn prompt(&mut self, session: &str, text: &str) -> u64 {
@@ -165,6 +181,35 @@ impl Client {
         )
         .await
     }
+}
+
+fn spawn_server(
+    paths: &Paths,
+    store: &Arc<MemoryStore>,
+    model: Arc<ScriptedModel>,
+    mode: Mode,
+    clock: &Arc<MovableClock>,
+) -> (
+    tokio::task::JoinHandle<()>,
+    WriteHalf<DuplexStream>,
+    ReadHalf<DuplexStream>,
+) {
+    let (ours, theirs) = tokio::io::duplex(1 << 20);
+    let (their_read, their_write) = tokio::io::split(theirs);
+    let options = ServeOptions {
+        paths: paths.clone(),
+        load_config: Arc::new(|| Ok(Config::default())),
+        model: Arc::new(move |_: &Config| {
+            model.clone() as Arc<dyn alyosha::llm_client::ModelClient>
+        }),
+        clock: clock.clone(),
+        log_file: None,
+        store: store.clone() as Arc<dyn SessionStore>,
+        mode,
+    };
+    let server = tokio::spawn(serve(their_read, their_write, options));
+    let (read, writer) = tokio::io::split(ours);
+    (server, writer, read)
 }
 
 fn updates(messages: &[Value]) -> Vec<String> {
@@ -185,6 +230,9 @@ fn updates(messages: &[Value]) -> Vec<String> {
                 "agent_message_chunk" => {
                     format!("chunk {}", update["content"]["text"].as_str().unwrap())
                 }
+                "user_message_chunk" => {
+                    format!("user {}", update["content"]["text"].as_str().unwrap())
+                }
                 other => other.to_owned(),
             }
         })
@@ -197,7 +245,7 @@ async fn initialize_reports_the_capabilities() {
     let response = client.initialize(None).await;
     let result = &response["result"];
     assert_eq!(result["protocolVersion"], 1);
-    assert_eq!(result["agentCapabilities"]["loadSession"], false);
+    assert_eq!(result["agentCapabilities"]["loadSession"], true);
     assert_eq!(
         result["agentCapabilities"]["promptCapabilities"],
         json!({"image": false, "audio": false, "embeddedContext": false})
@@ -511,43 +559,77 @@ async fn job_prompts_answer_at_once() {
 }
 
 #[tokio::test]
-async fn the_session_renews_at_four_when_idle() {
-    let model = ScriptedModel::new();
-    model.reply(vec![text("before")]);
-    model.reply(vec![text("after")]);
-    let mut client = Client::start(model.clone()).await;
+async fn load_of_an_unknown_key_is_not_found() {
+    let mut client = Client::start(ScriptedModel::new()).await;
     client.initialize(None).await;
-    let session = client.new_session().await;
-    let id = client.prompt(&session, "hello").await;
-    client.until_response(id).await;
-    // Opened at 10:02, the session is that day's: no renewal until 04:00.
-    client.quiet_for(Duration::from_millis(400)).await;
-    // 04:00 in Amsterdam the next day.
-    *client.clock.0.lock().unwrap() = Utc.with_ymd_and_hms(2026, 11, 26, 3, 0, 30).unwrap();
-    // Wait for the renewal's available_commands_update.
-    loop {
-        let message = client.next().await;
-        if message["params"]["update"]["sessionUpdate"] == "available_commands_update" {
-            assert_eq!(
-                message["params"]["sessionId"],
-                json!(session),
-                "the same session ID"
-            );
-            break;
-        }
+    let workspace = client.workspace.clone();
+    let id = client
+        .request(
+            "session/load",
+            json!({"sessionId": "owner:telegram", "cwd": workspace, "mcpServers": []}),
+        )
+        .await;
+    let response = client.until_response(id).await.pop().unwrap();
+    assert_eq!(response["error"]["code"], -32002);
+}
+
+#[tokio::test]
+async fn a_restarted_process_loads_the_session_by_its_key() {
+    let model = ScriptedModel::new();
+    model.reply(vec![text("Noted: blue.")]);
+    model.reply(vec![text("Noted: Tuesday.")]);
+    let mut client = Client::start(model).await;
+    client.initialize(None).await;
+    let session = client.new_keyed_session("owner:telegram").await;
+    assert_eq!(session, "owner:telegram");
+    for message in ["my colour is blue", "my day is Tuesday"] {
+        let id = client.prompt(&session, message).await;
+        client.until_response(id).await;
     }
-    let id = client.prompt(&session, "who am I?").await;
+
+    let model = ScriptedModel::new();
+    model.reply(vec![text("Blue, and Tuesday.")]);
+    client.reconnect(model.clone()).await;
+    client.initialize(None).await;
+    let workspace = client.workspace.clone();
+    let id = client
+        .request(
+            "session/load",
+            json!({"sessionId": "owner:telegram", "cwd": workspace, "mcpServers": []}),
+        )
+        .await;
+    let messages = client.until_response(id).await;
+    assert_eq!(
+        updates(&messages),
+        [
+            "user my colour is blue",
+            "chunk Noted: blue.",
+            "user my day is Tuesday",
+            "chunk Noted: Tuesday.",
+        ],
+        "the conversation is replayed without clock lines"
+    );
+    assert_eq!(messages.last().unwrap()["result"], json!({}));
+    let commands = client.next().await;
+    assert_eq!(
+        commands["params"]["update"]["sessionUpdate"],
+        "available_commands_update"
+    );
+
+    let id = client
+        .prompt("owner:telegram", "what did I tell you?")
+        .await;
     let messages = client.until_response(id).await;
     let chunks = updates(&messages);
-    assert_eq!(chunks[0], format!("chunk {FRESH_SESSION_LINE}"));
+    // Other startup warnings, such as a missing sandbox, may come between.
+    assert_eq!(chunks.first().unwrap(), &format!("chunk {RESUMED_LINE}"));
+    assert_eq!(chunks.last().unwrap(), "chunk Blue, and Tuesday.");
+    let request = model.requests().pop().unwrap();
     assert_eq!(
-        model.requests().last().unwrap().history.len(),
-        1,
-        "earlier conversation is gone"
+        request.history.len(),
+        5,
+        "the earlier turns and the new message"
     );
-    // The renewed session does not renew again later that day.
-    *client.clock.0.lock().unwrap() = Utc.with_ymd_and_hms(2026, 11, 26, 9, 0, 0).unwrap();
-    client.quiet_for(Duration::from_millis(400)).await;
 }
 
 #[tokio::test]

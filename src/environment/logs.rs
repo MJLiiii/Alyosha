@@ -87,6 +87,24 @@ impl SessionLogs {
             .open(self.dir.join(name))
     }
 
+    /// Removes one issued log, by its model-facing path, and releases its
+    /// space. Called for results a compaction replaced.
+    pub fn remove(&self, path: &str) {
+        let Some(name) = path.strip_prefix(LOGS_PREFIX) else {
+            return;
+        };
+        let name = name.trim_start_matches('/');
+        if name.is_empty() || name.contains('/') || name.starts_with('.') {
+            return;
+        }
+        let file = self.dir.join(name);
+        if let Ok(metadata) = fs::symlink_metadata(&file)
+            && fs::remove_file(&file).is_ok()
+        {
+            self.release(metadata.len());
+        }
+    }
+
     /// Removes every log. Called when the session ends.
     pub fn remove_all(&self) {
         let _ = fs::remove_dir_all(&self.dir);
@@ -165,6 +183,22 @@ mod tests {
     use std::io::Read;
 
     use super::*;
+
+    #[test]
+    fn a_removed_log_is_gone_and_its_space_returns() {
+        let root = tempfile::tempdir().unwrap();
+        let logs = Arc::new(SessionLogs::with_budget(root.path().join("logs"), 10));
+        let path = LogCapture::new(logs.clone(), 6, "cmd")
+            .save("abcdef")
+            .unwrap();
+        assert!(!logs.reserve(6), "the budget holds the saved log");
+        logs.remove(&path);
+        assert!(logs.open(path.trim_start_matches(LOGS_PREFIX)).is_err());
+        assert!(logs.reserve(6), "its space is free again");
+        // Paths outside the store are ignored.
+        logs.remove("/session-logs/../x");
+        logs.remove("/workspace/a.txt");
+    }
 
     #[test]
     fn captures_save_within_the_budget_and_open_by_name() {

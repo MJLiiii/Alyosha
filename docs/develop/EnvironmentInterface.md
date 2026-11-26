@@ -98,7 +98,7 @@ Give each session a 64 MiB budget for log content: the full text of shortened co
 
 Publish `log_path` only when the recorded preview omits text and the complete captured output fits in the budget. If the preview includes all the output, discard the temporary capture and release its space. If writing would exceed the budget or saving fails, discard the incomplete log and keep draining command output. Preserve the actual command status and bounded preview. An MCP result follows the same rules, except that its text is complete before the preview is sized, so save it only when the preview omits text. [MCP calls](MCP.md#handle-one-call) When output was omitted, keep the reason the full log was unavailable in the result metadata.
 
-Issue log paths as `/session-logs/<name>`, a prefix no workspace path uses. Keep issued `log_path` references readable through direct `read_file` calls until the session ends. Open them through the session's log store for bounded reads. Remove the session's logs at session end. [Tool permissions](../reference/ToolPermissions.md)
+Issue log paths as `/session-logs/<name>`, a prefix no workspace path uses. Keep issued `log_path` references readable through direct `read_file` calls until the session ends in this process, or until a compaction replaces the result that issued them. Open them through the session's log store for bounded reads. Remove the session's logs when the process ends the session. A resumed session starts with an empty log store, and its earlier paths read as gone. [After each compaction](SessionStore.md#after-each-compaction) [Tool permissions](../reference/ToolPermissions.md)
 
 ## Verify on the host
 

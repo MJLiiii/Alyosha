@@ -100,6 +100,7 @@ async fn open(
             channel_line: None,
             log_file: None,
             on_loading_dev_shell: None,
+            persistence: None,
         },
         Arc::new(FixedClock(
             Utc.with_ymd_and_hms(2026, 11, 25, 9, 2, 0).unwrap(),
@@ -796,4 +797,74 @@ async fn a_dead_server_fails_its_calls_and_the_session_continues() {
     assert!(error(&results[0].1).contains("has stopped"));
     assert!(error(&results[1].1).contains("has stopped"));
     assert_eq!(outcome, TurnOutcome::Completed);
+}
+
+#[tokio::test]
+async fn a_resumed_session_closes_the_turn_a_restart_cut_off() {
+    use alyosha::{
+        agent_loop::Persistence,
+        session_store::{
+            INTERRUPTED_CALL, INTERRUPTED_LINE, MemoryStore, RESUMED_LINE, SessionStore,
+        },
+    };
+    let home = home();
+    let store = MemoryStore::new();
+    let created = store.create("tui:/w", &home.workspace).await.unwrap();
+    // The process died after the first of two calls had its result.
+    let saved = [
+        support::user(alyosha::agent_state::MessageId(4), "read both"),
+        support::assistant(vec![
+            call("call_a", "read_file", json!({"path": "a.txt"})),
+            call("call_b", "read_file", json!({"path": "b.txt"})),
+        ]),
+        support::tool_result("call_a", ToolOutcome::Success("alpha".into())),
+    ];
+    for (seq, entry) in saved.iter().enumerate() {
+        store.append(created.id, seq as u64, entry).await.unwrap();
+    }
+    store.close(created.id).await.unwrap();
+    let stored = store.load_current("tui:/w").await.unwrap().unwrap();
+    let model = ScriptedModel::new();
+    model.reply(vec![text("Done.")]);
+    let mut started = session::start_with_clock(
+        &Config::default(),
+        &home.paths,
+        &home.workspace,
+        model,
+        FrontEnd {
+            approver: None,
+            job_delivery: JobDelivery::Queue,
+            channel_line: None,
+            log_file: None,
+            on_loading_dev_shell: None,
+            persistence: Some(Persistence {
+                store: store.clone() as Arc<dyn SessionStore>,
+                stored,
+                resumed: true,
+            }),
+        },
+        Arc::new(FixedClock(
+            Utc.with_ymd_and_hms(2026, 11, 25, 9, 2, 0).unwrap(),
+        )),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        started.warnings[0],
+        format!("{RESUMED_LINE} {INTERRUPTED_LINE}")
+    );
+    let history = started.driver.snapshot().history;
+    assert_eq!(history.len(), 4);
+    assert_eq!(
+        history[3],
+        support::tool_result("call_b", ToolOutcome::Error(INTERRUPTED_CALL.into()))
+    );
+    let (_, _, outcome) = turn(&mut started, "and now?").await;
+    assert_eq!(outcome, TurnOutcome::Completed);
+    let id = started.driver.snapshot().history[4].clone();
+    let HistoryEntry::User(user) = id else {
+        panic!("the new message follows");
+    };
+    assert_eq!(user.message_id.0, 5, "IDs continue after the stored ones");
+    started.driver.end().await;
 }

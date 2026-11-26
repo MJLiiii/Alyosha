@@ -181,7 +181,9 @@ impl Environment {
                     return Err(ToolError::failed(format!("{path} cannot be opened here.")));
                 }
                 let file = self.logs.open(&name).map_err(|_| {
-                    ToolError::failed(format!("{path} is not a log of this session."))
+                    ToolError::failed(format!(
+                        "{path} is gone. Saved output is removed when older conversation is summarized or Alyosha restarts."
+                    ))
                 })?;
                 return regular(file, path);
             }

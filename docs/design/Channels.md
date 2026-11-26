@@ -19,6 +19,7 @@ ACP is an open standard for a program that drives an agent running as its child 
 | Stop | `session/cancel` |
 | The reply, and the status area's lines | `session/update` notifications |
 | A new session | `session/new` |
+| Resuming a session after a restart | `session/load` |
 | `/compact`, `/job` | Slash commands, sent as the text of a `session/prompt` |
 | An approval or an `ask_owner` question | `session/request_permission` |
 
@@ -28,8 +29,8 @@ A protocol of Alyosha's own, like the JSON-lines RPC mode of the pi agent, would
 
 `alyosha acp` runs the same session driver and turn loop as the TUI. Only the front end differs. [Agent Loop](AgentLoop.md)
 
-- **One session at a time.** `session/new` starts a session in the folder the bridge names, any existing folder. If a session is already open, it ends first, so a bridge's "new conversation" command gives the model a fresh start. Memory carries lasting facts across sessions as usual. [Memory](Memory.md)
-- **A fresh session every night.** A chat session could otherwise last for weeks, and much of what a session holds is meant to last one session: its saved command and MCP output, its memory and skills indexes, its MCP servers and configuration, its dev shell, and its history. So at 04:00 in your timezone, if nothing is running, queued, or waiting for you and no background job is running, `alyosha acp` ends the session and starts a new one in the same folder. The bridge sees no change. If anything is busy at 04:00, that night is skipped, so a reset never cuts into a conversation or an overnight job. The next reply starts with *Started a fresh session at 04:00. Earlier conversation is gone; memory keeps lasting facts.* [Daily fresh session](../develop/Channels.md#daily-fresh-session)
+- **One session at a time.** `session/new` starts a session in the folder the bridge names, any existing folder, under a key the bridge chooses for the conversation, such as `owner:telegram`. If a session is already open, it ends first, so a bridge's "new conversation" command gives the model a fresh start. Memory carries lasting facts across sessions as usual. [Memory](Memory.md)
+- **Sessions survive restarts.** Every history entry is saved to a database as it happens. A bridge that starts sends `session/load` with its key and gets the conversation back, so a crash, a configuration change, or a container reboot costs only the turn in progress and any queued messages. The first reply after a resume says so. There is no nightly fresh start: compaction keeps the conversation small, and the memory and skills indexes are rebuilt at each compaction. [Durable sessions](SessionStore.md)
 - **Messages wait their turn.** Each `session/prompt` becomes one queued message. If a turn is running, the next prompt waits in the queue and is answered when its own turn ends, just as in the TUI.
 - **You see what it does.** Each tool call is reported as an ACP tool call, titled like the TUI status area, for example **MCP: chromium.browser_click** or **Remembered: thesis-repo**. Status lines such as **Compacting context…** are reported the same way, as pseudo tool calls, so the bridge shows them without any code of its own. The reply arrives as message text when the turn ends. Startup warnings, such as an MCP server that failed to start, come before the first reply.
 - **Stop works as in the TUI.** `session/cancel` signals the active turn, and the prompt ends as cancelled.
@@ -67,13 +68,13 @@ containers.alyosha
 ```
 
 - **Only you in private.** In a private chat it answers only your Telegram user ID. Private messages from anyone else are dropped without a reply. In groups it answers anyone who mentions it, through the group's own session. [Group chats](#group-chats)
-- **One long-lived session**, started fresh each night at 04:00 when idle. `/new` starts a fresh one at any time. `/cancel` stops the current turn. `/compact` and `/job` pass through to Alyosha. `/tasks` lists scheduled tasks. Telegram shows the five in its command menu.
+- **One long-lived session**, kept across restarts. `/new` starts a fresh one at any time. `/cancel` stops the current turn. `/compact` and `/job` pass through to Alyosha. `/tasks` lists scheduled tasks. Telegram shows the five in its command menu.
 - **Runs scheduled tasks.** Tasks for Telegram run as prompts in this session, marked **⏰ Scheduled**. [Scheduled tasks](Schedule.md#running-tasks) Finished background jobs come in the same way, marked **⚙ Job finished**. [Background jobs](Jobs.md)
 - **You see it working.** While a turn runs, the chat shows Telegram's typing indicator and one **Working…** message listing tool calls as they happen, such as `MCP: chromium.browser_click`.
 - **Formatted replies.** The model writes Markdown, and the reply shows it formatted: bold, italics, code, code blocks, links, and quotes, with headings as bold lines and lists with bullets. If Telegram refuses the formatting, the same part goes again as plain text without the Markdown markers. Long replies are split into several messages, keeping code blocks whole in each. A failed turn shows its error, and a stopped turn says so.
 - **Text only.** A photo, file, or voice message gets a short reply saying only text works for now.
 - **Approvals as buttons.** An approval or a question from Alyosha arrives as a message with one button per answer. [Approvals](Approvals.md)
-- **Crashes start fresh.** If `alyosha acp` exits, the bridge tells you and exits, and systemd starts both again with a new session.
+- **Crashes resume.** If `alyosha acp` exits, the bridge tells you and exits, and systemd starts both again. The new child loads the same session. [Durable sessions](SessionStore.md)
 
 Your settings go in a `[telegram]` section of `~/.config/alyosha/config.toml`: your Telegram user ID and the workspace folder. The bot token goes in the same file, which must be readable only by you. [Configuration](../reference/Configuration.md#telegram)
 
@@ -92,7 +93,7 @@ The official API limits replies, and that shapes the bridge:
 
 Approvals and questions arrive as text, and you answer with `/yes`, `/no`, or the number of a choice, because buttons need extra permission from QQ. The request uses one of the four replies, and your answer gives the turn a fresh set of four. [Approvals](Approvals.md)
 
-Otherwise it behaves like the Telegram bridge. In private chats it answers only your account, identified by the `openid` QQ assigns you for this bot, and drops other private messages without replying. In groups it answers anyone who @-mentions it, through the group's own session. [Group chats](#group-chats) It runs one long-lived session with `/new`, `/cancel`, `/compact`, `/job`, and `/tasks`, runs QQ's scheduled tasks, accepts text only, and starts fresh after a crash. Replies use QQ's native Markdown when QQ allows the bot to send it. A bot QQ has not granted Markdown gets the same reply as plain text, with the markers removed. Its settings go in a `[qq]` section of `config.toml`, together with the bot's secret.
+Otherwise it behaves like the Telegram bridge. In private chats it answers only your account, identified by the `openid` QQ assigns you for this bot, and drops other private messages without replying. In groups it answers anyone who @-mentions it, through the group's own session. [Group chats](#group-chats) It runs one long-lived session with `/new`, `/cancel`, `/compact`, `/job`, and `/tasks`, runs QQ's scheduled tasks, accepts text only, and resumes its session after a crash. Replies use QQ's native Markdown when QQ allows the bot to send it. A bot QQ has not granted Markdown gets the same reply as plain text, with the markers removed. Its settings go in a `[qq]` section of `config.toml`, together with the bot's secret.
 
 A bot registered by an individual can be used privately by its creator and by test users added in the bot's settings, without Tencent's review. That covers personal use.
 
@@ -114,9 +115,9 @@ your private chat ───────────► bridge ──► alyosha 
 ```
 
 - **What counts as a mention.** In Telegram, `@` followed by the bot's username, or a reply to one of Alyosha's messages. In QQ, an @ of the bot, whether QQ sends the group only @s or, with its "receive all messages" mode, every message. A Telegram mention that replies to someone else's message brings the start of that message along, so "@Alyosha is this true?" works.
-- **A session per group.** Each group gets its own child, started at the first mention. It keeps the group's conversation, so follow-up questions work, and starts fresh at 04:00 like your session. Groups never see each other's conversations or your private chat's.
+- **A session per group.** Each group gets its own child, started at the first mention. It keeps the group's conversation, so follow-up questions work, and survives restarts like your session. Groups never see each other's conversations or your private chat's.
 - **Trusted groups get your powers.** You list trusted groups in the bridge's section of the configuration, by the group ID the bridge logs for every mention. Their session is a full session like yours: shell, files, your memory, skills, background jobs, every MCP server, and your browser sign-ins. Everyone in a trusted group, including people who join later, can use all of it, so list only groups where you would hand every member your computer. [Trusted groups](#trusted-groups)
-- **Other groups get guests.** A group you have not listed gets a guest session. It has no shell, no files, no background jobs, no skills, no `ask_owner`, and not your memory. Its only MCP servers are the ones `[guest]` in the configuration lists, normally just web search. Search is read-only and needs no account, so a guest cannot reach your mail, your sign-ins, or the machine. A guest session that has been quiet for an hour is stopped, so a bot added to many groups does not keep a process for each. [Web search](WebSearch.md) · [Configuration](../reference/Configuration.md#guest)
+- **Other groups get guests.** A group you have not listed gets a guest session. It has no shell, no files, no background jobs, no skills, no `ask_owner`, and not your memory. Its only MCP servers are the ones `[guest]` in the configuration lists, normally just web search. Search is read-only and needs no account, so a guest cannot reach your mail, your sign-ins, or the machine. A guest session that has been quiet for an hour is stopped, so a bot added to many groups does not keep a process for each. Its conversation is saved and resumes at the next mention. [Web search](WebSearch.md) · [Configuration](../reference/Configuration.md#guest)
 - **Everyone is equal in a group, you included.** The bridge does not tell you apart from other members in a group. Your private chat stays the only place for commands and approvals.
 - **A memory for each person, in guest sessions.** A guest session keeps one notes file per person, named by their platform and user ID, and shows it to the model with each of their messages. The model updates it with the `user_memory` tool, which writes only the file of the person whose message it is answering. Trusted groups use your memory instead. [People in group chats](Memory.md#people-in-group-chats)
 - **Names are not proof.** Each message reaches the model with the sender's display name. Anyone can pick any display name, so a guest session's instruction tells the model that nobody in the group is its owner and that it acts for no one there.
@@ -133,7 +134,7 @@ A trusted group's session is `alyosha acp --group`: your normal session with a d
 - **Its own workspace.** It works in `groups/<group ID>` inside the bridge's workspace, which the bridge creates, so a group's edits never collide with your private session's. Its file tools and sandbox reach what yours reach from that folder.
 - **Approvals come to you.** A tool in `ask`, and every `ask_owner` question, goes to your private chat, marked with the group it came from. Only you answer it. Nobody in the group can approve anything.
 - **Jobs report to the group.** When one of its background jobs finishes, the bridge gives the result to the group's session, and its answer goes to the group.
-- **It keeps running.** It is not stopped when the group is quiet, so its running jobs and conversation survive. There are only as many as you list. It ends when the bridge stops.
+- **It keeps running.** It is not stopped when the group is quiet, so its running jobs survive. There are only as many as you list. It stops with the bridge, and its conversation resumes when the bridge starts again.
 - **Scheduled tasks run in your private session.** The schedule belongs to the bridge, not to a group, so a task a group asks for runs and reports in your private chat.
 - **Messages carry the sender's name.** The bridge sends `<display name>: <text>`, so a member's message is never taken for a command such as `/compact`.
 
@@ -142,9 +143,6 @@ A group that is not listed gets a guest session as before. Removing a group from
 ## Deferred
 
 - Photos, files, and voice messages.
-- Resuming a session after a restart with `session/load`, which needs saved history.
-- Carrying the previous session's summary into the nightly fresh session.
-- Choosing the time of the nightly fresh session.
 - Several sessions at once for you, such as one per chat thread.
 - More tools for guests, such as the browser with a profile that holds no sign-ins.
 - Commands such as `/new` and `/cancel` for a trusted group's session.

@@ -20,7 +20,7 @@ The store is global. Every workspace sees the same memories. You can read, edit,
 
 ## What the model sees
 
-When a session starts, Alyosha reads the store and builds an **index** with one line per memory: its name, description, and date. Alyosha appends the index to the normal system instruction, along with short guidance on using memory. The instruction stays the same for the whole session, so compaction never removes it and provider prompt caching keeps working. A memory written during the session appears in the index of the next session, which for a chat means after its nightly fresh start. [Chat channels](Channels.md#what-alyosha-acp-does) The model already sees the write in its own history. [Default instruction](LLMClientGateway.md#default-instruction-for-normal-requests) · [Context Manager](ContextManager.md)
+When a session starts, Alyosha reads the store and builds an **index** with one line per memory: its name, description, and date. Alyosha appends the index to the normal system instruction, along with short guidance on using memory. The instruction stays the same between compactions, so compaction never removes it and provider prompt caching keeps working. A memory written during the session appears in the index after the next compaction or restart, when Alyosha rebuilds the index. [Durable sessions](SessionStore.md#without-the-nightly-fresh-start) The model already sees the write in its own history. [Default instruction](LLMClientGateway.md#default-instruction-for-normal-requests) · [Context Manager](ContextManager.md)
 
 The index has a 4 KiB budget. The model reads a memory's full text when it needs it. For example, you ask “build my thesis”. The model sees `thesis-repo — Thesis repository location and build command` in the index and reads that memory before running the build.
 
@@ -59,7 +59,7 @@ The notes are not mixed with your own memory in either direction. You can read, 
 
 ## Deferred
 
-- Recall of past sessions, which requires persistent history.
+- Recall of past sessions. Their history is now saved in the session store, but nothing searches it yet. [Durable sessions](SessionStore.md)
 - Background extraction of memories after a session.
 - Per-workspace memory.
 - Approval for writes after the turn has read untrusted content.

@@ -411,8 +411,8 @@ pub async fn run(
         tracing::error!(error = %error, "initialize failed");
         return 1;
     }
-    if let Err(error) = bridge.new_session(&settings.workspace).await {
-        tracing::error!(error = %error, "session/new failed");
+    if let Err(error) = bridge.open_session(&settings.workspace, "owner:qq").await {
+        tracing::error!(error = %error, "the session could not be opened");
         return 1;
     }
     let owner = ToOwner {
@@ -550,7 +550,7 @@ pub async fn run(
                 }
                 match message.content.as_str() {
                     "/new" => {
-                        let text = match bridge.new_session(&settings.workspace).await {
+                        let text = match bridge.new_session(&settings.workspace, "owner:qq").await {
                             Ok(_) => "New session started.".to_owned(),
                             Err(error) => format!("Failed: {error}"),
                         };
@@ -618,7 +618,7 @@ pub async fn run(
                         bridge.prompt(&key, &text);
                     }
                     Event::Exited => {
-                        let _ = deliver(&owner, &["Alyosha stopped unexpectedly. Restarting with a new session.".to_owned()], &mut ReplyTo::scheduled()).await;
+                        let _ = deliver(&owner, &["Alyosha stopped unexpectedly. Restarting.".to_owned()], &mut ReplyTo::scheduled()).await;
                         return 1;
                     }
                 }

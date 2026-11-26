@@ -60,6 +60,7 @@ async fn open(home: &Home, model: Arc<ScriptedModel>) -> Started {
             channel_line: None,
             log_file: None,
             on_loading_dev_shell: None,
+            persistence: None,
         },
         Arc::new(FixedClock(
             Utc.with_ymd_and_hms(2026, 11, 25, 9, 2, 0).unwrap(),

@@ -2,20 +2,20 @@
 //! and output, driving the same session driver as the TUI.
 //!
 //! Standard output carries only protocol messages: newline-delimited
-//! JSON-RPC 2.0, protocol version 1. See `docs/develop/Channels.md`.
+//! JSON-RPC 2.0, protocol version 1. Sessions are saved in the session store
+//! under the key the client names, and `session/load` resumes them. See
+//! `docs/develop/Channels.md` and `docs/develop/SessionStore.md#acp`.
 
 use std::{
     collections::{HashMap, VecDeque},
     path::PathBuf,
     sync::{
         Arc, Mutex, PoisonError,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicU64, Ordering},
     },
-    time::Duration,
 };
 
 use alyosha_config::{Config, Paths};
-use chrono::Timelike;
 use serde_json::{Value, json};
 use tokio::{
     io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
@@ -25,19 +25,19 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     BoxFuture,
-    agent_loop::{JobDelivery, SessionDriver, SessionEvent, Status},
-    agent_state::{MessageId, Sender, TurnOutcome},
+    agent_loop::{JobDelivery, Persistence, SessionDriver, SessionEvent, Status},
+    agent_state::{HistoryEntry, MessageId, Sender, TurnOutcome},
     approvals::{Approver, OwnerAnswer, OwnerRequest},
     clock::Clock,
     llm_client::ModelClient,
     session::{self, FrontEnd},
+    session_store::{PgStore, SessionStore, StoreError},
     user_notes::valid_user_id,
 };
 
 pub const PROTOCOL_VERSION: u64 = 1;
-/// The first startup warning after a nightly renewal.
-pub const FRESH_SESSION_LINE: &str =
-    "Started a fresh session at 04:00. Earlier conversation is gone; memory keeps lasting facts.";
+/// The JSON-RPC error for `session/load` of a key with no session.
+pub const RESOURCE_NOT_FOUND: i64 = -32002;
 
 /// Makes the model client for a session from its configuration.
 pub type ModelFactory = Arc<dyn Fn(&Config) -> Arc<dyn ModelClient> + Send + Sync>;
@@ -52,8 +52,8 @@ pub struct ServeOptions {
     pub clock: Arc<dyn Clock>,
     /// The log file that startup warnings name.
     pub log_file: Option<PathBuf>,
-    /// How often to check for the nightly fresh session.
-    pub renewal_check: Duration,
+    /// Where sessions are saved and found again.
+    pub store: Arc<dyn SessionStore>,
     /// Whose session this process serves.
     pub mode: Mode,
 }
@@ -217,7 +217,6 @@ struct Open {
     prompts: VecDeque<(Value, Waiting)>,
     status_counter: u64,
     compacting_status: Option<String>,
-    renewal: CancellationToken,
 }
 
 struct Agent {
@@ -227,8 +226,6 @@ struct Agent {
     session: tokio::sync::Mutex<Option<Open>>,
     session_id: Arc<Mutex<String>>,
     open_requests: Arc<AtomicU64>,
-    next_session: AtomicU64,
-    renewing: AtomicBool,
 }
 
 /// Serves one connection until the input closes.
@@ -262,8 +259,6 @@ where
         session: tokio::sync::Mutex::new(None),
         session_id: Arc::default(),
         open_requests: Arc::default(),
-        next_session: AtomicU64::new(1),
-        renewing: AtomicBool::new(false),
     });
     let mut reader = BufReader::new(input).lines();
     while let Ok(Some(line)) = reader.next_line().await {
@@ -312,7 +307,7 @@ impl Agent {
                     json!({
                         "protocolVersion": PROTOCOL_VERSION,
                         "agentCapabilities": {
-                            "loadSession": false,
+                            "loadSession": true,
                             "promptCapabilities": {"image": false, "audio": false, "embeddedContext": false},
                             "mcpCapabilities": {"http": false, "sse": false},
                         },
@@ -322,6 +317,7 @@ impl Agent {
                 );
             }
             (Some("session/new"), Some(id)) => self.new_session(id, &params).await,
+            (Some("session/load"), Some(id)) => self.load_session(id, &params).await,
             (Some("session/prompt"), Some(id)) => self.prompt(id, &params).await,
             (Some("session/cancel"), None) => {
                 if let Some(open) = self.session.lock().await.as_ref()
@@ -354,31 +350,119 @@ impl Agent {
             })
     }
 
-    async fn new_session(self: &Arc<Self>, id: Value, params: &Value) {
+    /// Checks `cwd` and answers the request with an error if it is unusable.
+    fn workspace(&self, id: &Value, params: &Value) -> Option<PathBuf> {
         let Some(cwd) = params["cwd"]
             .as_str()
             .map(PathBuf::from)
             .filter(|cwd| cwd.is_absolute())
         else {
-            self.out.error(&id, -32602, "cwd must be an absolute path");
+            self.out.error(id, -32602, "cwd must be an absolute path");
+            return None;
+        };
+        match session::resolve_workspace(&cwd) {
+            Ok(workspace) => Some(workspace),
+            Err(error) => {
+                self.out.error(id, -32602, &error.to_string());
+                None
+            }
+        }
+    }
+
+    /// `session/new`: a new session under the key in
+    /// `_meta.alyosha.sessionKey`, which becomes the `sessionId`.
+    async fn new_session(self: &Arc<Self>, id: Value, params: &Value) {
+        let Some(workspace) = self.workspace(&id, params) else {
             return;
         };
-        let workspace = match session::resolve_workspace(&cwd) {
-            Ok(workspace) => workspace,
+        let key = params["_meta"]["alyosha"]["sessionKey"]
+            .as_str()
+            .filter(|key| !key.is_empty())
+            .map_or_else(
+                || format!("acp:{}", crate::environment::random_suffix()),
+                str::to_owned,
+            );
+        self.end_session().await;
+        let stored = match self.options.store.create(&key, &workspace).await {
+            Ok(stored) => stored,
             Err(error) => {
-                self.out.error(&id, -32602, &error.to_string());
+                tracing::warn!(key = %key, error = %error, "the session store refused the session");
+                self.out.error(&id, -32603, &error.to_string());
                 return;
             }
         };
-        self.end_session().await;
-        let session_id = format!("s{}", self.next_session.fetch_add(1, Ordering::Relaxed));
-        match self.open(&workspace, &session_id, Vec::new()).await {
+        let persistence = Persistence {
+            store: self.options.store.clone(),
+            stored,
+            resumed: false,
+        };
+        match self.open(&workspace, &key, persistence).await {
             Ok(()) => {
-                self.out.respond(&id, json!({"sessionId": session_id}));
-                self.available_commands(&session_id);
+                self.out.respond(&id, json!({"sessionId": key}));
+                self.available_commands(&key);
             }
             Err(error) => self.out.error(&id, -32603, &error),
         }
+    }
+
+    /// `session/load`: resumes the current session of the key given as the
+    /// `sessionId`, replaying its conversation before the response.
+    async fn load_session(self: &Arc<Self>, id: Value, params: &Value) {
+        let Some(key) = params["sessionId"].as_str().filter(|key| !key.is_empty()) else {
+            self.out.error(&id, -32602, "sessionId is required");
+            return;
+        };
+        let Some(workspace) = self.workspace(&id, params) else {
+            return;
+        };
+        self.end_session().await;
+        let stored = match self.options.store.load_current(key).await {
+            Ok(Some(stored)) => stored,
+            Ok(None) => {
+                self.out
+                    .error(&id, RESOURCE_NOT_FOUND, "Resource not found");
+                return;
+            }
+            Err(error) => {
+                tracing::warn!(key = %key, error = %error, "the session store refused the session");
+                self.out.error(&id, -32603, &error.to_string());
+                return;
+            }
+        };
+        let persistence = Persistence {
+            store: self.options.store.clone(),
+            stored,
+            resumed: true,
+        };
+        if let Err(error) = self.open(&workspace, key, persistence).await {
+            self.out.error(&id, -32603, &error);
+            return;
+        }
+        let history = match self.session.lock().await.as_ref() {
+            Some(open) => open.driver.snapshot().history,
+            None => Vec::new(),
+        };
+        for entry in &history {
+            match entry {
+                HistoryEntry::User(user) => {
+                    // The clock line is for the model only.
+                    let text = user.text.split_once('\n').map_or("", |(_, rest)| rest);
+                    self.out.update(
+                        key,
+                        json!({"sessionUpdate": "user_message_chunk", "content": {"type": "text", "text": text}}),
+                    );
+                }
+                HistoryEntry::Assistant(reply) => {
+                    let text = reply.text();
+                    if !text.is_empty() {
+                        self.out.update(key, chunk(&text));
+                    }
+                }
+                HistoryEntry::ToolResult(_) => {}
+            }
+        }
+        self.out.respond(&id, json!({}));
+        self.available_commands(key);
     }
 
     fn available_commands(&self, session_id: &str) {
@@ -403,50 +487,64 @@ impl Agent {
         self: &'a Arc<Self>,
         workspace: &'a std::path::Path,
         session_id: &'a str,
-        warnings: Vec<String>,
+        persistence: Persistence,
     ) -> BoxFuture<'a, Result<(), String>> {
-        Box::pin(self.open_inner(workspace, session_id, warnings))
+        Box::pin(self.open_inner(workspace, session_id, persistence))
     }
 
     async fn open_inner(
         self: &Arc<Self>,
         workspace: &std::path::Path,
         session_id: &str,
-        mut warnings: Vec<String>,
+        persistence: Persistence,
     ) -> Result<(), String> {
-        let config = (self.options.load_config)()?;
+        let store = persistence.store.clone();
+        let stored_id = persistence.stored.id;
+        let config = match (self.options.load_config)() {
+            Ok(config) => config,
+            Err(error) => {
+                let _ = store.close(stored_id).await;
+                return Err(error);
+            }
+        };
         *self
             .session_id
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = session_id.to_owned();
         let started = if self.options.mode == Mode::Guest {
-            // Startup warnings stay in the log, never in a group.
-            warnings.clear();
-            let mut started = session::start_guest(
+            session::start_guest(
                 &config,
                 &self.options.paths,
                 (self.options.model)(&config),
                 self.channel_line(),
                 self.options.clock.clone(),
+                Some(persistence),
             )
             .await
-            .map_err(|error| error.to_string())?;
-            started.warnings.clear();
-            started
+            .map(|mut started| {
+                // Startup warnings stay in the log, never in a group.
+                started.warnings.clear();
+                started
+            })
+            .map_err(|error| error.to_string())
         } else {
-            self.open_owner(&config, workspace).await?
+            self.open_owner(&config, workspace, persistence).await
         };
-        warnings.extend(started.warnings);
-        let renewal = CancellationToken::new();
+        let started = match started {
+            Ok(started) => started,
+            Err(error) => {
+                let _ = store.close(stored_id).await;
+                return Err(error);
+            }
+        };
         *self.session.lock().await = Some(Open {
             session_id: session_id.to_owned(),
             driver: started.driver,
             first_reply_sent: false,
-            warnings,
+            warnings: started.warnings,
             prompts: VecDeque::new(),
             status_counter: 0,
             compacting_status: None,
-            renewal: renewal.clone(),
         });
         let agent = self.clone();
         let mut events = started.events;
@@ -455,9 +553,6 @@ impl Agent {
                 agent.on_event(event).await;
             }
         });
-        let agent = self.clone();
-        let workspace = workspace.to_owned();
-        tokio::spawn(async move { agent.watch_renewal(workspace, renewal).await });
         Ok(())
     }
 
@@ -465,6 +560,7 @@ impl Agent {
         self: &Arc<Self>,
         config: &Config,
         workspace: &std::path::Path,
+        persistence: Persistence,
     ) -> Result<session::Started, String> {
         session::start_with_clock(
             config,
@@ -481,6 +577,7 @@ impl Agent {
                 channel_line: self.channel_line(),
                 log_file: self.options.log_file.clone(),
                 on_loading_dev_shell: None,
+                persistence: Some(persistence),
             },
             self.options.clock.clone(),
         )
@@ -489,11 +586,10 @@ impl Agent {
     }
 
     /// Ends the open session: queued prompts end cancelled, MCP servers
-    /// stop, and the session's logs are removed.
+    /// stop, the session's logs are removed, and its lock is released.
     async fn end_session(&self) {
         let open = self.session.lock().await.take();
         if let Some(mut open) = open {
-            open.renewal.cancel();
             open.driver.end().await;
             for (id, _) in open.prompts.drain(..) {
                 self.out.respond(&id, json!({"stopReason": "cancelled"}));
@@ -659,74 +755,6 @@ impl Agent {
             self.out.update(&open.session_id, chunk(&warning));
         }
     }
-
-    /// Once per local date, the first check at or after 04:00 decides: an
-    /// idle session is renewed under the same ID; a busy one waits a night.
-    async fn watch_renewal(self: Arc<Self>, workspace: PathBuf, stop: CancellationToken) {
-        // A session counts as that day's fresh session: one opened at or
-        // after 04:00, including the one a renewal opens, waits for the
-        // next 04:00. Without this, each renewal's new watcher renewed
-        // again a minute later, all day.
-        let mut decided: Option<chrono::NaiveDate> =
-            (self.options.load_config)().ok().map(|config| {
-                let now = self.options.clock.now().with_timezone(&config.timezone);
-                if now.hour() < 4 {
-                    now.date_naive() - chrono::Days::new(1)
-                } else {
-                    now.date_naive()
-                }
-            });
-        loop {
-            tokio::select! {
-                () = stop.cancelled() => return,
-                () = tokio::time::sleep(self.options.renewal_check) => {}
-            }
-            let Ok(config) = (self.options.load_config)() else {
-                tracing::warn!("the configuration failed to load; the nightly renewal waits");
-                continue;
-            };
-            let now = self.options.clock.now().with_timezone(&config.timezone);
-            let today = now.date_naive();
-            if now.hour() < 4 || decided == Some(today) {
-                continue;
-            }
-            decided = Some(today);
-            let session_id = {
-                let guard = self.session.lock().await;
-                let Some(open) = guard.as_ref() else { return };
-                let busy = !open.driver.is_idle()
-                    || !open.prompts.is_empty()
-                    || self.open_requests.load(Ordering::SeqCst) > 0;
-                if busy {
-                    tracing::info!("nightly renewal skipped: the session is busy");
-                    continue;
-                }
-                open.session_id.clone()
-            };
-            if session::resolve_workspace(&workspace).is_err() {
-                tracing::warn!("the workspace is no longer valid; the nightly renewal waits");
-                continue;
-            }
-            self.renewing.store(true, Ordering::SeqCst);
-            self.end_session().await;
-            let warnings = if self.options.mode == Mode::Guest {
-                Vec::new()
-            } else {
-                vec![FRESH_SESSION_LINE.to_owned()]
-            };
-            match self.open(&workspace, &session_id, warnings).await {
-                Ok(()) => {
-                    tracing::info!("started the nightly fresh session");
-                    self.available_commands(&session_id);
-                }
-                Err(error) => {
-                    tracing::warn!(error = %error, "the nightly fresh session failed to start")
-                }
-            }
-            self.renewing.store(false, Ordering::SeqCst);
-            return;
-        }
-    }
 }
 
 fn chunk(text: &str) -> Value {
@@ -756,6 +784,15 @@ pub fn run(mode: Mode) -> u8 {
         Mode::Group => "alyosha-acp-group",
     };
     let log_file = alyosha_config::logging::init(program, config.timezone, &paths).ok();
+    let runtime = tokio::runtime::Runtime::new().expect("a Tokio runtime starts");
+    let store = match runtime.block_on(PgStore::connect_default()) {
+        Ok(store) => store,
+        Err(error) => {
+            tracing::error!(error = %error, "could not reach the session database");
+            eprintln!("alyosha acp: {}", database_error(&error));
+            return 1;
+        }
+    };
     let config_paths = paths.clone();
     let options = ServeOptions {
         paths: paths.clone(),
@@ -769,10 +806,17 @@ pub fn run(mode: Mode) -> u8 {
         },
         clock: Arc::new(crate::clock::SystemClock),
         log_file,
-        renewal_check: Duration::from_secs(60),
+        store,
         mode,
     };
-    let runtime = tokio::runtime::Runtime::new().expect("a Tokio runtime starts");
     runtime.block_on(serve(tokio::io::stdin(), tokio::io::stdout(), options));
     0
+}
+
+/// The message for a session database that cannot be reached.
+pub fn database_error(error: &StoreError) -> String {
+    let target = std::env::var("ALYOSHA_DATABASE").unwrap_or_else(|_| "/run/postgresql".to_owned());
+    format!(
+        "Could not reach the session database at {target}. Check `systemctl status postgresql`. ({error})"
+    )
 }

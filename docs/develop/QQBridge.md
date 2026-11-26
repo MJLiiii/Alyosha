@@ -100,7 +100,7 @@ If the request cannot be delivered by any means, answer it with `cancelled` at o
 
 ## Failures and shutdown
 
-Follow the Telegram bridge: exit with a nonzero status when `alyosha acp` exits, after telling the owner if a reply is still possible. On SIGTERM, close the WebSocket, then the child's standard input, wait up to 10 seconds, and kill it. Retry network errors with backoff up to one minute. [Failures and shutdown](TelegramBridge.md#failures-and-shutdown)
+Follow the Telegram bridge: exit with a nonzero status when `alyosha acp` exits, after telling the owner if a reply is still possible. The restarted bridge loads its sessions under the keys `owner:qq`, `group:qq:<group_openid>`, and `guest:qq:<group_openid>`. [Durable sessions: bridges](SessionStore.md#bridges) On SIGTERM, close the WebSocket, then the child's standard input, wait up to 10 seconds, and kill it. Retry network errors with backoff up to one minute. [Failures and shutdown](TelegramBridge.md#failures-and-shutdown)
 
 ## Run it in the container
 

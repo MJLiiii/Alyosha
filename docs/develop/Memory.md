@@ -121,7 +121,7 @@ Run these against a temporary memory root with a fixed clock.
 - Send a sender ID of `../x` and a name containing a line break. Check that the prompt is refused and that a name with a line break is written on one line.
 - Fill the index to its budget. A new write is rejected and an update that keeps the index size succeeds. Exceed the budget by hand-editing files. Check the newest entries appear, followed by the omitted count.
 - Add a file without a header. Check it is skipped in the index, counted in the startup status, and still readable with `read`.
-- Write a memory during a session. Check the system instruction stays byte-identical for the rest of the session and that a new session shows the entry.
+- Write a memory during a session. Check the system instruction stays byte-identical until the next compaction, and that the instruction after it, and a new session's, shows the entry.
 - From an `execute_code` script, check that `tools.memory` is undefined. From `run_command`, check that the memory root is absent.
 - Fail a write before the rename. Check that the existing file keeps its content and that no temporary file remains.
 

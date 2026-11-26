@@ -182,6 +182,12 @@ async fn agent(
             Some("initialize") => {
                 out += &send(json!({"jsonrpc": "2.0", "id": id, "result": {"protocolVersion": 1}}))
             }
+            // No saved session: the bridge falls back to `session/new`.
+            Some("session/load") => {
+                out += &send(
+                    json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32002, "message": "Resource not found"}}),
+                )
+            }
             Some("session/new") => {
                 out += &send(json!({"jsonrpc": "2.0", "id": id, "result": {"sessionId": "s1"}}))
             }
@@ -497,7 +503,7 @@ async fn an_exited_agent_is_reported_and_the_bridge_fails() {
         harness
             .api
             .texts()
-            .contains(&"Alyosha stopped unexpectedly. Restarting with a new session.".to_owned())
+            .contains(&"Alyosha stopped unexpectedly. Restarting.".to_owned())
     );
 }
 

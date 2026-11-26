@@ -30,7 +30,7 @@ This is the Agent Skills layout, so a skill written for another agent usually wo
 
 ## What the model sees
 
-When a session starts, Alyosha reads the skills directory and builds an **index** with one line per skill: its name and description. The index is appended to the system instruction after the memory index, along with a short note on using skills. Like the memory index, it stays fixed for the session. A skill added during the session appears in the next one, which for a chat means after its nightly fresh start. [Default instruction](LLMClientGateway.md#default-instruction-for-normal-requests) · [Memory index](Memory.md#what-the-model-sees)
+When a session starts, Alyosha reads the skills directory and builds an **index** with one line per skill: its name and description. The index is appended to the system instruction after the memory index, along with a short note on using skills. Like the memory index, it stays fixed between compactions. A skill added during the session appears after the next compaction or restart. [Default instruction](LLMClientGateway.md#default-instruction-for-normal-requests) · [Memory index](Memory.md#what-the-model-sees)
 
 When a task matches a description, the model loads the skill with the `skill` tool. The tool returns the instructions and a list of the skill's other files. For example, you ask “publish the post about Nix flakes.” The model sees `blog-release` in the index, loads it, and follows its steps. [Built-in tool contracts](../reference/BuiltInTools.md#skill)
 

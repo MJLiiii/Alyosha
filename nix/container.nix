@@ -1,5 +1,5 @@
-# The NixOS container that runs Alyosha, GPROXY, the MCP servers, and the
-# chat bridges as the owner. It sees only the workspace folders (~/work by
+# The NixOS container that runs Alyosha, GPROXY, the session database, the
+# MCP servers, and the chat bridges as the owner. It sees only the workspace folders (~/work by
 # default) and Alyosha's own folders, and the host's localhost services are
 # unreachable. On the host, `alyosha` runs the container's alyosha in the
 # current folder, so it starts from any terminal like Codex or Claude Code.
@@ -52,15 +52,20 @@ let
         alyosha /run/current-system/sw/bin/env -C "$here" /run/current-system/sw/bin/alyosha "$@"
     '';
   };
+  # The session database's major version. Moving to another needs a dump
+  # and restore (docs/develop/SessionStore.md#container).
+  postgresql = pkgs.postgresql_17;
   bridge = name: {
     wantedBy = [ "multi-user.target" ];
     wants = [
       "network-online.target"
       "gproxy.service"
     ];
+    requires = [ "alyosha-db.service" ];
     after = [
       "network-online.target"
       "gproxy.service"
+      "alyosha-db.service"
     ];
     # Reach the commands in environment.systemPackages, such as MCP servers.
     path = [ "/run/current-system/sw" ];
@@ -190,6 +195,59 @@ in
                 RestartSec = 5;
               };
             };
+
+          # The session database: a Unix socket only, and the owner's role
+          # by peer authentication (docs/develop/SessionStore.md#container).
+          services.postgresql = {
+            enable = true;
+            package = postgresql;
+            enableTCPIP = false;
+            settings.listen_addresses = lib.mkForce "";
+          };
+          # Creates the owner's role and the `alyosha` database it owns, once.
+          systemd.services.alyosha-db = {
+            wantedBy = [ "multi-user.target" ];
+            requires = [ "postgresql.service" ];
+            after = [
+              "postgresql.service"
+              "postgresql-setup.service"
+            ];
+            path = [ postgresql ];
+            serviceConfig = {
+              Type = "oneshot";
+              RemainAfterExit = true;
+              User = "postgres";
+            };
+            script = ''
+              psql -tAc "select 1 from pg_roles where rolname = '${cfg.user}'" | grep -q 1 \
+                || psql -c 'create role "${cfg.user}" login'
+              psql -tAc "select 1 from pg_database where datname = 'alyosha'" | grep -q 1 \
+                || psql -c 'create database alyosha owner "${cfg.user}"'
+            '';
+          };
+          # A daily dump into the mounted data folder; the last 7 are kept.
+          systemd.services.alyosha-db-backup = {
+            requires = [ "alyosha-db.service" ];
+            after = [ "alyosha-db.service" ];
+            startAt = "daily";
+            path = [
+              postgresql
+              pkgs.gzip
+              pkgs.findutils
+            ];
+            serviceConfig = {
+              Type = "oneshot";
+              User = cfg.user;
+            };
+            script = ''
+              dir=${home}/.local/share/alyosha/backups
+              mkdir -p "$dir"
+              file="$dir/alyosha-$(date +%F).sql.gz"
+              pg_dump alyosha | gzip > "$file.tmp"
+              mv "$file.tmp" "$file"
+              find "$dir" -name 'alyosha-*.sql.gz' -mtime +7 -delete
+            '';
+          };
 
           systemd.services.alyosha-telegram = lib.mkIf cfg.telegram.enable (bridge "alyosha-telegram");
           systemd.services.alyosha-qq = lib.mkIf cfg.qq.enable (bridge "alyosha-qq");

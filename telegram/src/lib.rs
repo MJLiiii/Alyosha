@@ -383,8 +383,11 @@ pub async fn run(
         tracing::error!(error = %error, "initialize failed");
         return 1;
     }
-    if let Err(error) = bridge.new_session(&settings.workspace).await {
-        tracing::error!(error = %error, "session/new failed");
+    if let Err(error) = bridge
+        .open_session(&settings.workspace, "owner:telegram")
+        .await
+    {
+        tracing::error!(error = %error, "the session could not be opened");
         let _ = api
             .send(chat, &format!("Alyosha could not start: {error}"), None)
             .await;
@@ -517,7 +520,7 @@ pub async fn run(
                         match trimmed {
                             "/start" => { let _ = api.send(chat, HELP, None).await; }
                             "/new" => {
-                                match bridge.new_session(&settings.workspace).await {
+                                match bridge.new_session(&settings.workspace, "owner:telegram").await {
                                     Ok(_) => { let _ = api.send(chat, "New session started.", None).await; }
                                     Err(error) => { let _ = api.send(chat, &format!("Failed: {error}"), None).await; }
                                 }
@@ -586,7 +589,7 @@ pub async fn run(
                         next_job += 1;
                     }
                     Event::Exited => {
-                        let _ = api.send(chat, "Alyosha stopped unexpectedly. Restarting with a new session.", None).await;
+                        let _ = api.send(chat, "Alyosha stopped unexpectedly. Restarting.", None).await;
                         return 1;
                     }
                 }

@@ -29,6 +29,7 @@ use crate::{
     context_manager::{self, Mode, Preparation, PrepareError, RequestSettings, RouteLimits},
     jobs::{self, JobEnvironment, JobFinished, JobManager, JobOrigin},
     llm_client::{ModelClient, ModelError, ModelRequest},
+    session_store::{SessionId, SessionStore, StoredSession},
     tools::{Scope, SessionServices, ToolExecutor, ToolRegistry},
 };
 
@@ -74,6 +75,21 @@ pub struct SessionSetup {
     /// Background jobs' sandbox, when the session can run commands.
     pub jobs: Option<JobEnvironment>,
     pub job_delivery: JobDelivery,
+    /// Where history is saved, with the session it was created or loaded
+    /// as. Without it, history lives only in memory.
+    pub persistence: Option<Persistence>,
+    /// Builds the normal system instruction again, with fresh memory and
+    /// skills indexes, after each compaction.
+    pub rebuild_instruction: Option<Arc<dyn Fn() -> String + Send + Sync>>,
+}
+
+/// A session's store and its saved state.
+pub struct Persistence {
+    pub store: Arc<dyn SessionStore>,
+    pub stored: StoredSession,
+    /// Whether the session was loaded rather than just created. Startup then
+    /// closes a turn a restart cut off and says the session resumed.
+    pub resumed: bool,
 }
 
 impl SessionSetup {
@@ -99,6 +115,8 @@ impl SessionSetup {
             services: SessionServices::default(),
             jobs: None,
             job_delivery: JobDelivery::Queue,
+            persistence: None,
+            rebuild_instruction: None,
         }
     }
 }
@@ -181,7 +199,13 @@ struct Session {
     model: String,
     timezone: Tz,
     client: Arc<dyn ModelClient>,
-    settings: RequestSettings,
+    /// The request settings; the system instruction changes at compaction.
+    settings: Mutex<RequestSettings>,
+    rebuild_instruction: Option<Arc<dyn Fn() -> String + Send + Sync>>,
+    /// Where each entry and checkpoint is saved before it takes effect.
+    store: Option<(Arc<dyn SessionStore>, SessionId)>,
+    /// The sequence number of `history[0]`.
+    base_seq: u64,
     executor: ToolExecutor,
     services: Arc<SessionServices>,
     clock: Arc<dyn Clock>,
@@ -220,21 +244,39 @@ impl SessionDriver {
                 );
             }
             let services = Arc::new(services);
+            let mut state = AgentState::new(setup.provider.clone());
+            let mut last_message_id = 0;
+            let mut base_seq = 0;
+            let store = setup.persistence.map(|persistence| {
+                let stored = persistence.stored;
+                base_seq = stored.base_seq();
+                last_message_id = stored.next_message_id.saturating_sub(1);
+                state.history = stored.entries;
+                state.context_checkpoint =
+                    stored.checkpoint.map(|(_, summary)| ContextCheckpoint {
+                        summary,
+                        first_kept_index: 0,
+                    });
+                (persistence.store, stored.id)
+            });
             Session {
-                state: Mutex::new(AgentState::new(setup.provider.clone())),
-                last_message_id: AtomicU64::new(0),
+                state: Mutex::new(state),
+                last_message_id: AtomicU64::new(last_message_id),
                 wake: Notify::new(),
                 events,
                 model: setup.model.clone(),
                 timezone: setup.timezone,
                 client: setup.client,
-                settings: RequestSettings {
+                settings: Mutex::new(RequestSettings {
                     provider: setup.provider,
                     model: setup.model,
                     system_instruction: setup.system_instruction,
                     tools: registry.definitions().cloned().collect(),
                     limits: setup.limits,
-                },
+                }),
+                rebuild_instruction: setup.rebuild_instruction,
+                store,
+                base_seq,
                 executor: ToolExecutor::new(registry, services.clone()),
                 services,
                 clock: setup.clock,
@@ -397,6 +439,16 @@ impl SessionDriver {
         if let Some(environment) = &session.services.environment {
             environment.logs.remove_all();
         }
+        if let Some((store, id)) = &session.store
+            && let Err(error) = store.close(*id).await
+        {
+            tracing::warn!(error = %error, "could not release the session's lock");
+        }
+    }
+
+    /// The system instruction requests use now.
+    pub fn system_instruction(&self) -> String {
+        self.session.settings().system_instruction
     }
 }
 
@@ -522,11 +574,35 @@ impl Session {
         Some((message, self.model.clone(), cancel))
     }
 
+    fn settings(&self) -> RequestSettings {
+        self.settings
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
     fn settings_for(&self, model: &str) -> RequestSettings {
         RequestSettings {
             model: model.to_owned(),
-            ..self.settings.clone()
+            ..self.settings()
         }
+    }
+
+    /// Saves an entry as the next in history, then appends it. `run_turn`
+    /// is the only writer, so the position cannot change in between.
+    async fn append(&self, entry: HistoryEntry) -> Result<usize, String> {
+        let index = self.lock_state().history.len();
+        if let Some((store, id)) = &self.store {
+            store
+                .append(*id, self.base_seq + index as u64, &entry)
+                .await
+                .map_err(|error| {
+                    tracing::error!(error = %error, "could not save a history entry");
+                    format!("Could not save history: {error}")
+                })?;
+        }
+        self.lock_state().history.push(entry);
+        Ok(index)
     }
 
     /// Prepares the next request through the Context Manager and commits any
@@ -562,21 +638,62 @@ impl Session {
         .run(mode)
         .await?;
         if let Some(candidate) = prepared.candidate {
-            self.commit(candidate, cancel)?;
+            self.commit(candidate, cancel).await?;
         }
         Ok(prepared.request)
     }
 
-    fn commit(
+    /// Saves and commits a checkpoint, unless Stop came first. Then the
+    /// system instruction is rebuilt and the logs of replaced results go.
+    async fn commit(
         &self,
         checkpoint: ContextCheckpoint,
         cancel: &CancellationToken,
     ) -> Result<(), PrepareError> {
-        let mut state = self.lock_state();
         if cancel.is_cancelled() {
             return Err(PrepareError::Cancelled);
         }
-        state.context_checkpoint = Some(checkpoint);
+        if let Some((store, id)) = &self.store {
+            let first_kept_seq = self.base_seq + checkpoint.first_kept_index as u64;
+            store
+                .save_checkpoint(*id, first_kept_seq, &checkpoint.summary)
+                .await
+                .map_err(|error| PrepareError::Store(error.to_string()))?;
+        }
+        let replaced: Vec<String> = {
+            let mut state = self.lock_state();
+            let from = state
+                .context_checkpoint
+                .as_ref()
+                .map_or(0, |old| old.first_kept_index);
+            let to = checkpoint.first_kept_index.min(state.history.len());
+            let replaced = state.history[from.min(to)..to]
+                .iter()
+                .filter_map(|entry| match entry {
+                    HistoryEntry::ToolResult(result) => match &result.outcome {
+                        ToolOutcome::Success(text) | ToolOutcome::Error(text) => {
+                            context_manager::log_path(text).map(str::to_owned)
+                        }
+                        ToolOutcome::Cancelled => None,
+                    },
+                    _ => None,
+                })
+                .collect();
+            state.context_checkpoint = Some(checkpoint);
+            replaced
+        };
+        if let Some(environment) = &self.services.environment {
+            for path in replaced {
+                environment.logs.remove(&path);
+            }
+        }
+        if let Some(rebuild) = &self.rebuild_instruction {
+            let instruction = rebuild();
+            self.settings
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .system_instruction = instruction;
+        }
         Ok(())
     }
 
@@ -608,15 +725,15 @@ impl Session {
                 body
             ),
         };
-        let opening_index = {
-            let mut state = self.lock_state();
-            state.history.push(HistoryEntry::User(opening));
-            state.history.len() - 1
+        let opening_index = match self.append(HistoryEntry::User(opening)).await {
+            Ok(index) => index,
+            Err(reason) => return TurnEnd::Failed(reason),
         };
-        let settings = self.settings_for(model);
         let mut recovered = false;
 
         loop {
+            // Read each round, so a compaction's new instruction applies.
+            let settings = self.settings_for(model);
             {
                 let mut state = self.lock_state();
                 if cancel.is_cancelled() {
@@ -669,21 +786,20 @@ impl Session {
 
             let calls: Vec<ToolCall> = reply.entry.tool_calls().cloned().collect();
             let text = reply.entry.text();
-            {
-                let mut state = self.lock_state();
-                // Stop during generation discards the reply.
-                if cancel.is_cancelled() {
-                    return TurnEnd::Stopped;
-                }
-                state.history.push(HistoryEntry::Assistant(reply.entry));
-                if !calls.is_empty() {
-                    set_phase(
-                        &mut state,
-                        TurnPhase::RunningTools {
-                            active_call_id: None,
-                        },
-                    );
-                }
+            // Stop during generation discards the reply.
+            if cancel.is_cancelled() {
+                return TurnEnd::Stopped;
+            }
+            if let Err(reason) = self.append(HistoryEntry::Assistant(reply.entry)).await {
+                return TurnEnd::Failed(reason);
+            }
+            if !calls.is_empty() {
+                set_phase(
+                    &mut self.lock_state(),
+                    TurnPhase::RunningTools {
+                        active_call_id: None,
+                    },
+                );
             }
             if calls.is_empty() {
                 return TurnEnd::Completed(text);
@@ -691,8 +807,12 @@ impl Session {
             if !text.trim().is_empty() {
                 self.emit(SessionEvent::AssistantText(text));
             }
-            self.run_batch(&calls, cancel, &settings, opening_index)
-                .await;
+            if let Err(reason) = self
+                .run_batch(&calls, cancel, &settings, opening_index)
+                .await
+            {
+                return TurnEnd::Failed(reason);
+            }
         }
     }
 
@@ -710,31 +830,30 @@ impl Session {
     /// Runs the calls in model order and records one result for each under its
     /// original call ID, within the result limits. After Stop, the admitted
     /// call keeps its actual outcome and each unstarted call gets a cancelled
-    /// result.
+    /// result. A result that cannot be saved fails the turn.
     async fn run_batch(
         &self,
         calls: &[ToolCall],
         cancel: &CancellationToken,
         settings: &RequestSettings,
         opening: usize,
-    ) {
+    ) -> Result<(), String> {
         let mut batch_left = context_manager::BATCH_LIMIT;
         let mut room = self.result_room(settings, opening);
         for (index, call) in calls.iter().enumerate() {
+            if cancel.is_cancelled() {
+                for unstarted in &calls[index..] {
+                    self.append(tool_result(&unstarted.id, ToolOutcome::Cancelled))
+                        .await?;
+                    self.emit(SessionEvent::ToolFinished {
+                        call_id: unstarted.id.clone(),
+                        ok: false,
+                    });
+                }
+                return Ok(());
+            }
             {
                 let mut state = self.lock_state();
-                if cancel.is_cancelled() {
-                    for unstarted in &calls[index..] {
-                        state
-                            .history
-                            .push(tool_result(&unstarted.id, ToolOutcome::Cancelled));
-                        self.emit(SessionEvent::ToolFinished {
-                            call_id: unstarted.id.clone(),
-                            ok: false,
-                        });
-                    }
-                    return;
-                }
                 set_phase(
                     &mut state,
                     TurnPhase::RunningTools {
@@ -782,16 +901,14 @@ impl Session {
             batch_left = batch_left.saturating_sub(used);
             room = room.saturating_sub(used + 120);
             let ok = matches!(outcome, ToolOutcome::Success(_));
-            {
-                let mut state = self.lock_state();
-                state.history.push(tool_result(&call.id, outcome));
-                set_phase(
-                    &mut state,
-                    TurnPhase::RunningTools {
-                        active_call_id: None,
-                    },
-                );
-            }
+            let saved = self.append(tool_result(&call.id, outcome)).await;
+            set_phase(
+                &mut self.lock_state(),
+                TurnPhase::RunningTools {
+                    active_call_id: None,
+                },
+            );
+            saved?;
             self.emit(SessionEvent::ToolFinished {
                 call_id: call.id.clone(),
                 ok,
@@ -800,12 +917,13 @@ impl Session {
                 self.emit(SessionEvent::Notice(notice));
             }
         }
+        Ok(())
     }
 
     /// `/compact` with the slot already reserved: summarize older history
     /// even below the threshold, and release the slot on every exit.
     async fn manual_compaction(&self, cancel: &CancellationToken) -> String {
-        let settings = self.settings.clone();
+        let settings = self.settings();
         let result = self.prepare_manual(&settings, cancel).await;
         let mut state = self.lock_state();
         state.active_work = None;
@@ -840,9 +958,10 @@ impl Session {
         .await;
         match prepared {
             Ok(prepared) => match prepared.candidate {
-                Some(candidate) => match self.commit(candidate, cancel) {
+                Some(candidate) => match self.commit(candidate, cancel).await {
                     Ok(()) => "Context compacted".into(),
-                    Err(_) => "Compaction stopped".into(),
+                    Err(PrepareError::Cancelled) => "Compaction stopped".into(),
+                    Err(error) => format!("Compaction failed: {error}"),
                 },
                 None => "Context unchanged".into(),
             },

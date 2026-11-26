@@ -1,10 +1,10 @@
 # Alyosha architecture
 
-Alyosha is designed as a general-purpose Rust agent for NixOS. You give it a task and a workspace. The model can reply directly or ask to use a tool, inspect the result, and continue. The Rust code for every build step below is written and passes its offline checks under `cargo test`. The checks that need GPROXY, a provider account, the NixOS container, or a real Telegram or QQ bot still have to be run; each guide lists them.
+Alyosha is designed as a general-purpose Rust agent for NixOS. You give it a task and a workspace. The model can reply directly or ask to use a tool, inspect the result, and continue. The Rust code for every build step below is written and passes its offline checks under `cargo test`, including step 10's checks against a throwaway PostgreSQL server. The checks that need GPROXY, a provider account, the NixOS container, or a real Telegram or QQ bot still have to be run; each guide lists them.
 
 ## What v1 must do
 
-V1 is done when these seven tasks work end to end, in the NixOS container, with the GPROXY service and the configuration file as designed:
+V1 is done when these eight tasks work end to end, in the NixOS container, with the GPROXY service and the configuration file as designed:
 
 1. From Telegram, "What came in my inbox today?" returns a short summary.
 2. "Reply to Anna that Friday at 7 works" shows Approve and Decline buttons in Telegram, and the email goes out only after Approve.
@@ -13,6 +13,7 @@ V1 is done when these seven tasks work end to end, in the NixOS container, with 
 5. In the TUI, in a project folder, "Run the tests and fix the failing one" reads and edits files and runs commands in Bubblewrap.
 6. In the TUI, "List every decision in my meeting notes" finds the notes with `run_command`, then reads and filters them with one `execute_code` script. Code Mode can only read files, not list folders. [Read-only Code Mode](design/ToolExecutor.md#read-only-code-mode)
 7. From QQ, a question gets an answer, and "remind me in ten minutes to stretch" delivers the reminder in QQ, or holds it until the next message if QQ refuses to send first.
+8. After `systemctl restart alyosha-telegram`, "what did I ask you before?" is answered from the earlier conversation, and `alyosha --continue` does the same in the TUI.
 
 ## Where to start implementing
 
@@ -28,7 +29,8 @@ Build in this order. Each step builds only on finished ones and ends with a chec
 | 6 | **Email and calendar.** gogcli, signed in on the host. [Email and calendar](develop/EmailCalendar.md) | Tasks 1 and 2 work in the TUI, including the approval. |
 | 7 | **ACP mode and the Telegram bridge**, with the shared `alyosha-bridge` crate. [ACP mode](develop/Channels.md) · [Telegram bridge](develop/TelegramBridge.md) | Tasks 1 and 2 work from Telegram. |
 | 8 | **Scheduled tasks.** The schedule MCP server and the runner in the bridges. [Scheduled tasks](develop/Schedule.md) | Tasks 3 and 4 work. |
-| 9 | **The QQ bridge**, reusing the shared crate and the runner. Settle QQ's open limits with a real bot first. [QQ bridge](develop/QQBridge.md) | Task 7 works. V1 is done. |
+| 9 | **The QQ bridge**, reusing the shared crate and the runner. Settle QQ's open limits with a real bot first. [QQ bridge](develop/QQBridge.md) | Task 7 works. |
+| 10 | **Durable sessions.** PostgreSQL in the container, the session store, `session/load` in `alyosha acp` and the bridges, and `alyosha --continue`. Remove the nightly fresh session. [Durable sessions](develop/SessionStore.md) | Task 8 works. V1 is done. |
 
 The container comes at step 5, not last, because whether Bubblewrap and Chromium's sandbox work inside it is the design's biggest unknown, and because real sign-ins and tokens from step 6 on should only ever be used inside it.
 
@@ -37,7 +39,7 @@ The container comes at step 5, not last, because whether Bubblewrap and Chromium
 | Area | Current decision |
 | --- | --- |
 | Assistant and model | The normal instruction is “You are Alyosha, a personal assistant.” ChatGPT sign-in and `gpt-6.2-sol` are the defaults. The user changes the account or model in personal configuration. [Gateway design](design/LLMClientGateway.md) |
-| Sessions | One turn runs at a time. Messages wait in arrival order. History lives in memory until the session ends. A chat session starts fresh each night at 04:00 when nothing is running. [Agent State](design/AgentState.md) · [Daily fresh session](design/Channels.md#what-alyosha-acp-does) |
+| Sessions | One turn runs at a time. Messages wait in arrival order. Each history entry is saved to PostgreSQL in the container as it happens, so a restart resumes the conversation; queued messages and a turn in progress are lost. A session ends only with `/new`, or a new TUI start without `--continue`. There is no nightly fresh start. [Agent State](design/AgentState.md) · [Durable sessions](design/SessionStore.md) |
 | Tools | Nine built-ins cover workspace reads, writes, edits, shell commands, background jobs, read-only JavaScript, memory, skills, and asking the owner. A background job runs a long command while the conversation goes on and starts a turn when it ends. [Background jobs](design/Jobs.md) The shell uses Bubblewrap. JavaScript uses QuickJS-NG through `rquickjs`. [Built-in tools](reference/BuiltInTools.md) · [Code Mode](design/ToolExecutor.md#read-only-code-mode) |
 | Interface | The first interface is an inline TUI: the conversation prints into the terminal's scrollback, with a live status line and input box below. [TUI](design/TUI.md) Messaging apps such as Telegram connect through separate bridge programs that drive `alyosha acp` over the Agent Client Protocol, so the core has no code for any app. Telegram and QQ come first, each through a small Rust bridge of Alyosha's own that runs as a service in the container. QQ uses the official bot API, whose reply limits make it a channel for questions and answers. In groups, anyone who mentions Alyosha gets an answer from a session for that group: a full session with your tools in groups you list as trusted, and otherwise a guest session with web search but none of your tools. [Chat channels](design/Channels.md) · [Group chats](design/Channels.md#group-chats) |
 | Memory | Curated facts in one global store of Markdown files. The model writes them freely and each write shows in the status area. People in group chats get one notes file each, keyed by their user ID. Past-session recall is deferred. [Memory](design/Memory.md) |
@@ -51,7 +53,7 @@ The container comes at step 5, not last, because whether Bubblewrap and Chromium
 | Browser | One MCP server in the container: headless Chromium through Playwright MCP. A skill gives the model the rules for websites. Alyosha never stores passwords: Chromium loads sign-ins you save yourself on the host. [Browser](design/Browser.md) |
 | Configuration | One strict `~/.config/alyosha/config.toml`, mode 600, holds every setting and your secrets, and is read by every Alyosha program. Alyosha never writes it. Each message carries a clock line in your configured timezone. The TUI uses the current directory or a path argument as the workspace, in any folder, like Codex or Claude Code. In the container only the shared workspace folders exist. [Configuration](reference/Configuration.md) |
 
-The seven tasks above define v1. The capabilities designed beyond the core are tracked in [What Alyosha still needs](design/todo.md).
+The eight tasks above define v1. The capabilities designed beyond the core are tracked in [What Alyosha still needs](design/todo.md).
 
 ## The ten components
 
@@ -78,6 +80,7 @@ These sit around the ten components. The front ends drive the same session drive
 | --- | --- | --- |
 | [TUI](design/TUI.md) | The terminal front end: input, the queue display, the status line, and answering approvals. | [TUI](develop/TUI.md) |
 | [ACP mode and bridges](design/Channels.md) | `alyosha acp`, the second front end, and the Telegram and QQ bridges that drive it. | [ACP mode](develop/Channels.md) · [Telegram bridge](develop/TelegramBridge.md) · [QQ bridge](develop/QQBridge.md) |
+| [Durable sessions](design/SessionStore.md) | The PostgreSQL session store: saving history and checkpoints, resuming a session by key, and the database service. | [Durable sessions](develop/SessionStore.md) |
 | [Approvals](design/Approvals.md) | The approval step in the Tool Executor's dispatch, the `ask_owner` tool, and the `Approver` each front end implements. | [Approvals](develop/Approvals.md) |
 | [Configuration](reference/Configuration.md) | The one configuration file and the loader every program shares. | [Configuration](develop/Configuration.md) |
 | [Scheduled tasks](design/Schedule.md) | The schedule MCP server and the task runner inside the bridges. | [Scheduled tasks](develop/Schedule.md) |

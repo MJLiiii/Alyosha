@@ -45,7 +45,7 @@ Tomorrow you have two meetings: 10:00 thesis review with Prof. Li, and …
 | Up and Down | Recall earlier messages from this session. |
 | Esc | Stop the running turn. With an approval open, decline it and stop. |
 | Ctrl+C | Stop the running turn. When idle, clear the input. Twice on an empty input quits. |
-| Ctrl+D or `/quit` | Quit. A running turn is stopped first. The conversation ends with the session, as designed. With background jobs running, the first press warns and a second one stops them and quits. |
+| Ctrl+D or `/quit` | Quit. A running turn is stopped first. The conversation is saved, and `alyosha --continue` in the same folder picks it up. With background jobs running, the first press warns and a second one stops them and quits. |
 | `/compact` | Summarize older conversation. When busy, the TUI says to try again when idle. [Manual compaction](ContextManager.md#compact-command) |
 | `/job <command>` | Start the command as a background job, even during a turn. [Background jobs](Jobs.md#starting-a-job) |
 | `/help` | List the keys and commands. |
@@ -57,6 +57,7 @@ When Alyosha needs your approval or asks you a question, the request prints to t
 ## Starting
 
 - **Workspace.** `alyosha` uses the current folder, and `alyosha <path>` uses another. Any existing folder works, as with Codex or Claude Code; a missing one stops Alyosha with an error saying so. The workspace is writable by every shell command, so start Alyosha in a project folder, not your home folder. [Container limits](../reference/ToolPermissions.md#container-limits)
+- **Continuing.** `alyosha --continue`, or `alyosha --continue <path>`, resumes the last session in that folder instead of starting a new one, and prints your last message and the reply so you see where you left off. If that session is open in another Alyosha process, the TUI says so and stops. [Durable sessions](SessionStore.md)
 - **Header.** One line names the workspace and the model, followed by any startup warnings.
 - **Signing in.** The TUI never signs in to the model provider. If the provider is not signed in, the first turn fails with a message telling you to run `alyosha gateway login`. [Gateway login](../develop/LLMClientGateway.md#run-gproxy-as-a-service)
 

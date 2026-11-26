@@ -57,7 +57,7 @@ MODE = "stdio"
 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `timezone` | IANA name | `"Europe/Amsterdam"` | Your timezone. Used for the clock line on each message, for scheduled tasks, and for the 04:00 fresh start of chat sessions. [Clock line](../design/AgentLoop.md#user-message-turn) · [Scheduled tasks](../design/Schedule.md#what-a-task-is) |
+| `timezone` | IANA name | `"Europe/Amsterdam"` | Your timezone. Used for the clock line on each message and for scheduled tasks. [Clock line](../design/AgentLoop.md#user-message-turn) · [Scheduled tasks](../design/Schedule.md#what-a-task-is) |
 
 ### `[model]`
 

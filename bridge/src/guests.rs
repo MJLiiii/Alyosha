@@ -164,9 +164,19 @@ impl GuestPool {
                 }
             }
         });
+        // `alyosha-telegram` saves its groups' sessions as
+        // `group:telegram:<id>` or `guest:telegram:<id>`.
+        let platform = self
+            .client_name
+            .strip_prefix("alyosha-")
+            .unwrap_or(&self.client_name);
+        let key = format!(
+            "{}:{platform}:{group}",
+            if trusted { "group" } else { "guest" }
+        );
         let started = async {
             bridge.initialize(&self.client_name).await?;
-            bridge.new_session(&workspace).await
+            bridge.open_session(&workspace, &key).await
         }
         .await;
         if let Err(error) = started {

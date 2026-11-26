@@ -3,8 +3,10 @@
 //!
 //! It checks the workspace, starts the configured MCP servers, opens the
 //! memory and skills stores, loads the dev shell, registers every tool, and
-//! builds the normal system instruction once. See
-//! `docs/develop/AgentLoop.md#session-driver`.
+//! builds the normal system instruction, which each compaction rebuilds. A
+//! resumed session first closes a turn a restart cut off. See
+//! `docs/develop/AgentLoop.md#session-driver` and
+//! `docs/develop/SessionStore.md#resume`.
 
 use std::{
     os::unix::fs::DirBuilderExt,
@@ -20,7 +22,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     BoxFuture,
-    agent_loop::{DEFAULT_INSTRUCTION, JobDelivery, SessionDriver, SessionEvent, SessionSetup},
+    agent_loop::{
+        DEFAULT_INSTRUCTION, JobDelivery, Persistence, SessionDriver, SessionEvent, SessionSetup,
+    },
     approvals::{self, Approver},
     clock::{Clock, SystemClock},
     context_manager::RouteLimits,
@@ -30,6 +34,7 @@ use crate::{
     llm_client::{GatewayClient, ModelClient, ModelError, ModelReply, ModelRequest, Timeouts},
     mcp::McpManager,
     memory::{self, MemoryStore},
+    session_store::{self, INTERRUPTED_LINE, RESUMED_LINE},
     skills::{self, SkillStore},
     tools::{
         RegistrationError, SessionServices, ToolRegistry,
@@ -53,6 +58,9 @@ pub struct FrontEnd {
     pub log_file: Option<PathBuf>,
     /// Shows **Loading dev shell…** while the dev shell loads.
     pub on_loading_dev_shell: Option<Box<dyn Fn(bool) + Send + Sync>>,
+    /// Where the session's history is saved. Without it, history lives
+    /// only in memory.
+    pub persistence: Option<Persistence>,
 }
 
 /// A started session.
@@ -74,6 +82,59 @@ pub enum StartupError {
     Registry(#[from] RegistrationError),
     #[error("{0}")]
     Io(#[from] std::io::Error),
+    #[error("the session store failed: {0}")]
+    Store(String),
+}
+
+/// Prepares a saved session: a resumed one gets the turn a restart cut off
+/// closed, and the resume line goes first among its startup warnings.
+async fn prepare_persistence(
+    persistence: Option<Persistence>,
+    warnings: &mut Vec<String>,
+) -> Result<Option<Persistence>, StartupError> {
+    let Some(mut persistence) = persistence else {
+        return Ok(None);
+    };
+    if persistence.resumed {
+        let interrupted =
+            session_store::repair(persistence.store.as_ref(), &mut persistence.stored)
+                .await
+                .map_err(|error| StartupError::Store(error.to_string()))?;
+        let line = if interrupted {
+            format!("{RESUMED_LINE} {INTERRUPTED_LINE}")
+        } else {
+            RESUMED_LINE.to_owned()
+        };
+        warnings.insert(0, line);
+        tracing::info!(
+            key = %persistence.stored.key,
+            interrupted,
+            "resumed a session"
+        );
+    } else {
+        tracing::info!(key = %persistence.stored.key, "created a session");
+    }
+    Ok(Some(persistence))
+}
+
+/// The normal system instruction: the default, the memory and skills
+/// sections, and the channel line.
+fn normal_instruction(
+    memory: &MemoryStore,
+    skills: &SkillStore,
+    channel_line: Option<&str>,
+) -> String {
+    let mut instruction = format!(
+        "{DEFAULT_INSTRUCTION}\n\n{}\n{}",
+        memory::instruction_section(&memory.index()),
+        skills::instruction_section(&skills.index())
+    );
+    if let Some(line) = channel_line {
+        instruction.push('\n');
+        instruction.push_str(line);
+        instruction.push('\n');
+    }
+    instruction
 }
 
 /// Resolves a workspace: any existing folder, without symlinks.
@@ -248,16 +309,26 @@ pub async fn start_with_clock(
         ));
     }
 
-    let mut system_instruction = format!(
-        "{DEFAULT_INSTRUCTION}\n\n{}\n{}",
-        memory::instruction_section(&memory_index),
-        skills::instruction_section(&skill_index)
-    );
-    if let Some(line) = &front_end.channel_line {
-        system_instruction.push('\n');
-        system_instruction.push_str(line);
-        system_instruction.push('\n');
-    }
+    let system_instruction =
+        normal_instruction(&memory, &skills, front_end.channel_line.as_deref());
+    let rebuild_instruction: Arc<dyn Fn() -> String + Send + Sync> = {
+        let memory_dir = paths.data_dir.join("memory");
+        let skills_root = skills_root.clone();
+        let channel_line = front_end.channel_line.clone();
+        Arc::new(move || {
+            let memory = MemoryStore::open(
+                &memory_dir,
+                "owner",
+                Arc::new(move || Utc::now().with_timezone(&timezone).date_naive()),
+            );
+            normal_instruction(
+                &memory,
+                &SkillStore::open(&skills_root),
+                channel_line.as_deref(),
+            )
+        })
+    };
+    let persistence = prepare_persistence(front_end.persistence, &mut warnings).await?;
 
     let job_environment = JobEnvironment {
         sandbox,
@@ -288,6 +359,8 @@ pub async fn start_with_clock(
         services,
         jobs: Some(job_environment),
         job_delivery: front_end.job_delivery,
+        persistence,
+        rebuild_instruction: Some(rebuild_instruction),
     });
     for warning in &warnings {
         tracing::warn!(warning = %warning, "startup warning");
@@ -316,6 +389,7 @@ pub async fn start_guest(
     client: Arc<dyn ModelClient>,
     channel_line: Option<String>,
     clock: Arc<dyn Clock>,
+    persistence: Option<Persistence>,
 ) -> Result<Started, StartupError> {
     let folder = paths.data_dir.join("guest");
     std::fs::DirBuilder::new()
@@ -348,6 +422,7 @@ pub async fn start_guest(
         system_instruction.push_str(line);
         system_instruction.push('\n');
     }
+    let persistence = prepare_persistence(persistence, &mut warnings).await?;
     let timezone = config.timezone;
     let services = SessionServices {
         mcp: Some(mcp),
@@ -369,6 +444,8 @@ pub async fn start_guest(
         services,
         jobs: None,
         job_delivery: JobDelivery::Report,
+        persistence,
+        rebuild_instruction: None,
     });
     for warning in &warnings {
         tracing::warn!(warning = %warning, "guest startup warning");

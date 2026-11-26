@@ -13,7 +13,7 @@ Create one in-memory `AgentState` per session. The Agent Loop’s session driver
 | `active_work` | `Option<ActiveWork>` | Either `Turn(ActiveTurn)`, `ManualCompaction { model_id, cancel }`, or an empty slot. |
 | `outcomes` | `HashMap<MessageId, TurnOutcome>` | One final `Completed`, `Stopped`, or `Failed(reason)` per finished user turn. |
 
-Initialize the collections empty and the two optional fields to `None`. Keep the original history append-only across compactions. Gateway configuration and credentials have a separate lifetime. [LLM Client / Gateway](../design/LLMClientGateway.md)
+Initialize the collections empty and the two optional fields to `None`, or, when resuming, fill `history` and `context_checkpoint` from the session store. The store also adds `session_id` and `base_seq`, and every history append and checkpoint commit goes through it first. [Durable sessions: Agent State changes](SessionStore.md#agent-state-changes) Keep the original history append-only across compactions. Gateway configuration and credentials have a separate lifetime. [LLM Client / Gateway](../design/LLMClientGateway.md)
 
 ## Active turn fields
 

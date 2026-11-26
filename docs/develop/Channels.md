@@ -14,7 +14,7 @@ Answer `initialize` with protocol version `1` and these agent capabilities:
 
 | Capability | Value | Why |
 | --- | --- | --- |
-| `loadSession` | `false` | History lives only in memory. |
+| `loadSession` | `true` | Sessions are saved and resumed by key. [Durable sessions](SessionStore.md#acp) |
 | `promptCapabilities` `image`, `audio`, `embeddedContext` | `false` | V1 accepts text and links only. |
 | `mcpCapabilities` `http`, `sse` | `false` | Bridge-supplied servers are ignored. |
 | `authMethods` | empty | Only a program that can start Alyosha as you can connect. |
@@ -27,7 +27,7 @@ If the request carries `clientInfo`, keep its `name` for the channel line that e
 
 ```text
 AcpSession {
-    session_id: String        # issued by Alyosha, unique per process
+    session_id: String        # the session's key, such as owner:telegram
     driver: SessionDriver     # the same driver the TUI uses
     first_reply_sent: bool    # startup warnings go before the first reply
 }
@@ -37,8 +37,10 @@ On `session/new`:
 
 1. Check that `cwd` is an absolute path to an existing directory. Otherwise return a JSON-RPC invalid-params error and keep any open session.
 2. If a session is open, cancel its active work, wait for the turn to close, and end it, shutting down its MCP servers. Any prompts still waiting in its queue end with `stopReason: "cancelled"`.
-3. Start a new session with `cwd` as its workspace, using the normal startup: configured MCP servers, memory index, skills index, and the dev shell. Answer only once startup has finished, which can take up to the dev shell's 10-minute limit. Ignore the request's `mcpServers` list. [Project dev shell](EnvironmentInterface.md#project-dev-shell) [Session startup](AgentLoop.md#session-driver)
-4. Return the new `sessionId`, then send `available_commands_update` with two commands: `compact`, described as "Summarize older conversation to free context.", and `job`, as the jobs guide describes. [`/job` command](Jobs.md#job-command)
+3. Create a session in the session store under the key in `_meta.alyosha.sessionKey`, or `acp:<random>` without one, and start it with `cwd` as its workspace, using the normal startup: configured MCP servers, memory index, skills index, and the dev shell. Answer only once startup has finished, which can take up to the dev shell's 10-minute limit. Ignore the request's `mcpServers` list. [Project dev shell](EnvironmentInterface.md#project-dev-shell) [Session startup](AgentLoop.md#session-driver)
+4. Return the key as the `sessionId`, then send `available_commands_update` with two commands: `compact`, described as "Summarize older conversation to free context.", and `job`, as the jobs guide describes. [`/job` command](Jobs.md#job-command)
+
+`session/load` treats its `sessionId` as a key and resumes that key's current session, replaying the conversation first, or answers `-32002` when there is none. [Durable sessions: ACP](SessionStore.md#acp)
 
 Requests naming any other `sessionId` get a JSON-RPC error.
 
@@ -71,19 +73,6 @@ Answer the prompt from the turn outcome: [Turn outcomes](AgentState.md#state-tra
 | `Failed(reason)` | A JSON-RPC error whose message gives the reason |
 
 A prompt starting with `/job ` starts a background job without queuing and answers the same way. [`/job` command](Jobs.md#job-command) A `/compact` prompt sends the command's status text, such as **No older context to compact** or the busy message, as an `agent_message_chunk` and ends with `end_turn`.
-
-## Daily fresh session
-
-Once a minute, read the time in the configured timezone. On each local date, the first check at or after 04:00 decides, and no later check that date does:
-
-- **Busy:** active work, a queued message, an open prompt, an open permission request, or a running background job. Skip until the next date.
-- **Idle:** renew the session.
-
-A session opened at or after 04:00 counts as that date's fresh session, so its first renewal is at 04:00 the next date. This includes the session a renewal opens, whose own check must not renew it again. A session opened before 04:00 renews at 04:00 the same date.
-
-To renew, end the session as `session/new` would: shut down its MCP servers and remove its session logs. Read `config.toml` again and start a new session in the same `cwd`, with the same channel line, under the **same `sessionId`**. Send `available_commands_update` again. Set `first_reply_sent` to false and put this line first among the startup warnings: *Started a fresh session at 04:00. Earlier conversation is gone; memory keeps lasting facts.* A prompt that arrives during the renewal waits in the new session's queue. [Sessions](#sessions) · [Session startup](AgentLoop.md#session-driver)
-
-If the configuration fails to load or the workspace is no longer valid, keep the current session, log the error, and try again on the next date. [Logging](../reference/Logging.md)
 
 ## Approvals and questions
 
@@ -128,7 +117,7 @@ to someone else.
 
 These run under `cargo test` with an in-process ACP client and the scripted model from the turn fixture. [Turn fixture](AgentLoop.md#verification-with-a-scripted-model-and-fake-tools)
 
-- Send `initialize`. Check protocol version `1`, `loadSession: false`, and no image, audio, or embedded-context support.
+- Send `initialize`. Check protocol version `1`, `loadSession: true`, and no image, audio, or embedded-context support.
 - Send `session/new` with a relative `cwd`, then one that does not exist. Check that both fail and no session starts.
 - Send `session/new` with a valid `cwd` and an `mcpServers` entry. Check that only configured servers start and that `available_commands_update` lists `compact` and `job`.
 - Script a turn that crosses the compaction threshold. Check for a `tool_call` titled **Compacting context…** with kind `think` and an `alyosha-status-` ID, then its `completed` update, before the next tool call or the reply.
@@ -142,11 +131,7 @@ These run under `cargo test` with an in-process ACP client and the scripted mode
 - Script a model failure. Check that the prompt gets a JSON-RPC error and the next prompt still runs.
 - Send `session/new` while a session is open with a waiting prompt. Check that the waiting prompt ends `cancelled` and the old session's MCP servers exit.
 - Parse every line written to standard output during these cases. Check that each is a valid JSON-RPC message.
-- With a fake clock, reach 04:00 while idle. Check that the `sessionId` is unchanged, that history and the checkpoint are empty, that the old MCP server processes exited and new ones started, that the session logs were removed, and that the next prompt's first `agent_message_chunk` is the fresh-session line.
-- Open a session at 10:00 and keep it idle past several checks. Check that it does not renew. After it renews at 04:00 the next date, keep it idle for hours. Check that it does not renew again that date.
-- Reach 04:00 with a background job running. Check that nothing changes at 04:00 or later that date, and that the session renews at 04:00 the next date once idle.
-- Send a prompt during the renewal. Check that it is answered in the new session.
-- Break `config.toml` before 04:00. Check that the old session stays usable and the error is logged.
+- Resume a session with `session/load`. The cases are in the durable sessions guide. [Verification](SessionStore.md#verification)
 - Close standard input. Check that the process exits and no MCP server process remains.
 
 With a messaging-app bridge, which needs a bot account and network access:

@@ -194,6 +194,8 @@ pub enum PrepareError {
     Cancelled,
     /// The summary request failed or returned an unusable reply.
     Summary(String),
+    /// The checkpoint could not be saved in the session store.
+    Store(String),
 }
 
 impl std::fmt::Display for PrepareError {
@@ -202,6 +204,7 @@ impl std::fmt::Display for PrepareError {
             PrepareError::ContextWindow(reason) => write!(f, "context window exceeded: {reason}"),
             PrepareError::Cancelled => f.write_str("cancelled"),
             PrepareError::Summary(reason) => write!(f, "summary failed: {reason}"),
+            PrepareError::Store(reason) => write!(f, "could not save the checkpoint: {reason}"),
         }
     }
 }
@@ -525,6 +528,14 @@ pub fn split_metadata(recorded: &str) -> (&str, &str) {
     (recorded, "")
 }
 
+/// The `log_path` a recorded result's metadata names, if any.
+pub fn log_path(recorded: &str) -> Option<&str> {
+    split_metadata(recorded)
+        .1
+        .lines()
+        .find_map(|line| line.strip_prefix("[log_path: ")?.strip_suffix(']'))
+}
+
 /// Records one top-level result within `allowance` bytes of text. Returns the
 /// outcome, the text bytes used, and the output's notice.
 pub fn record(
@@ -600,6 +611,19 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn the_log_path_comes_from_the_metadata() {
+        assert_eq!(
+            log_path("output\n\n[status: 0]\n[log_path: /session-logs/cmd-1.log]"),
+            Some("/session-logs/cmd-1.log")
+        );
+        assert_eq!(
+            log_path("[log_path: /session-logs/x] in the text\nmore"),
+            None
+        );
+        assert_eq!(log_path("no metadata"), None);
+    }
     use crate::{
         agent_state::{AssistantEntry, CallId, ToolCall, ToolResultEntry},
         environment::{LogCapture, SessionLogs},

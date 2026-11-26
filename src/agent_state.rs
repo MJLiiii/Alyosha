@@ -1,8 +1,9 @@
 //! Agent State: the in-memory record of one session.
 //!
 //! The session driver owns the queue, the active work, and the turn outcomes.
-//! `run_turn` alone appends conversation history. A restart creates a fresh
-//! session.
+//! `run_turn` alone appends conversation history. Each history entry and
+//! checkpoint is saved to the session store first, so a restarted process
+//! can resume the session (`docs/design/SessionStore.md`).
 //!
 //! Design: `docs/design/AgentState.md`. Fields and transitions:
 //! `docs/develop/AgentState.md`.
@@ -10,17 +11,20 @@
 use std::collections::{HashMap, VecDeque};
 
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 /// A submitted message's session-unique ID. It becomes the turn ID when the
 /// message's turn starts, even if two submissions have identical text.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct MessageId(pub u64);
 
 /// A tool call's ID as the model gave it. Its result is recorded under the same
 /// ID.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct CallId(pub String);
 
 impl From<&str> for CallId {
@@ -30,7 +34,8 @@ impl From<&str> for CallId {
 }
 
 /// Who submitted a message.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum MessageOrigin {
     /// The owner, through a front end.
     Owner,
@@ -61,7 +66,8 @@ pub struct UserMessage {
 }
 
 /// One entry of conversation history.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum HistoryEntry {
     User(UserEntry),
     Assistant(AssistantEntry),
@@ -69,7 +75,7 @@ pub enum HistoryEntry {
 }
 
 /// The message that opened a turn, as the model sees it.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UserEntry {
     pub message_id: MessageId,
     pub origin: MessageOrigin,
@@ -78,14 +84,15 @@ pub struct UserEntry {
 }
 
 /// One complete assistant response.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct AssistantEntry {
     /// The response's text and tool calls in their original order.
     pub parts: Vec<AssistantPart>,
 }
 
 /// One part of an assistant response.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "value", rename_all = "snake_case")]
 pub enum AssistantPart {
     Text(String),
     ToolCall(ToolCall),
@@ -96,7 +103,7 @@ pub enum AssistantPart {
 }
 
 /// Native data kept for replay on its originating route.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Replay {
     /// The route that produced it, such as `responses` or `gemini`.
     pub route: String,
@@ -104,7 +111,7 @@ pub struct Replay {
 }
 
 /// A tool call requested by the model.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolCall {
     pub id: CallId,
     pub name: String,
@@ -133,7 +140,7 @@ impl AssistantEntry {
 }
 
 /// The recorded result of one tool call.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolResultEntry {
     /// The model's original call ID.
     pub call_id: CallId,
@@ -141,7 +148,8 @@ pub struct ToolResultEntry {
 }
 
 /// How a tool call ended, as recorded in history.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "value", rename_all = "snake_case")]
 pub enum ToolOutcome {
     /// The tool's output.
     Success(String),
