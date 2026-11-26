@@ -53,12 +53,30 @@ pub(crate) async fn ask(
     let Some(approver) = context.session.approver.clone() else {
         return OwnerAnswer::Undeliverable;
     };
-    tokio::select! {
+    // The question and the arguments stay out of the log.
+    tracing::info!(
+        timeout_s = timeout.as_secs(),
+        "waiting for the owner's answer"
+    );
+    let started = std::time::Instant::now();
+    let answer = tokio::select! {
         biased;
         () = context.cancel.cancelled() => OwnerAnswer::Cancelled,
         answer = approver.ask(request, context.cancel.clone()) => answer,
         () = tokio::time::sleep(timeout) => OwnerAnswer::NoAnswer,
-    }
+    };
+    let outcome = match answer {
+        OwnerAnswer::Chosen(_) => "answered",
+        OwnerAnswer::NoAnswer => "expired",
+        OwnerAnswer::Undeliverable => "undeliverable",
+        OwnerAnswer::Cancelled => "cancelled",
+    };
+    tracing::info!(
+        outcome,
+        duration_ms = started.elapsed().as_millis() as u64,
+        "the owner's answer"
+    );
+    answer
 }
 
 /// The session's approval time limit, carried by its approver setup.

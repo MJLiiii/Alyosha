@@ -749,6 +749,9 @@ impl Session {
                 title: title.clone(),
             });
             self.emit(SessionEvent::Status(Status::Running(title)));
+            // Name and ID only: arguments and output stay out of the log.
+            tracing::info!(tool = %call.name, call_id = %call.id.0, "tool call started");
+            let started = std::time::Instant::now();
             let result = self
                 .executor
                 .dispatch(
@@ -765,6 +768,17 @@ impl Session {
                 .min(batch_left)
                 .min(room.saturating_sub(reserve));
             let (outcome, used, notice) = context_manager::record(result, allowance);
+            tracing::info!(
+                tool = %call.name,
+                call_id = %call.id.0,
+                duration_ms = started.elapsed().as_millis() as u64,
+                outcome = match &outcome {
+                    ToolOutcome::Success(_) => "success",
+                    ToolOutcome::Error(_) => "error",
+                    ToolOutcome::Cancelled => "cancelled",
+                },
+                "tool call finished"
+            );
             batch_left = batch_left.saturating_sub(used);
             room = room.saturating_sub(used + 120);
             let ok = matches!(outcome, ToolOutcome::Success(_));

@@ -176,11 +176,37 @@ impl ModelClient for GatewayClient {
         cancel: CancellationToken,
     ) -> BoxFuture<'_, Result<ModelReply, ModelError>> {
         Box::pin(async move {
-            tokio::select! {
+            let model = request.model.clone();
+            let started = std::time::Instant::now();
+            let result = tokio::select! {
                 biased;
                 () = cancel.cancelled() => Err(ModelError::Cancelled),
                 result = self.send(request) => result,
+            };
+            let duration_ms = started.elapsed().as_millis() as u64;
+            match &result {
+                Ok(reply) => tracing::info!(
+                    api = ?self.api,
+                    model = %model,
+                    duration_ms,
+                    input_tokens = reply.usage.map(|usage| usage.input_tokens),
+                    output_tokens = reply.usage.map(|usage| usage.output_tokens),
+                    tool_calls = reply.entry.tool_calls().count(),
+                    request_id = reply.request_id.as_deref().unwrap_or("-"),
+                    "model request"
+                ),
+                Err(ModelError::Cancelled) => {
+                    tracing::info!(api = ?self.api, model = %model, duration_ms, "model request cancelled")
+                }
+                Err(error) => tracing::warn!(
+                    api = ?self.api,
+                    model = %model,
+                    duration_ms,
+                    error = %error,
+                    "model request failed"
+                ),
             }
+            result
         })
     }
 }

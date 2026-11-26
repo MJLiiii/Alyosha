@@ -32,7 +32,8 @@ The date is the local date in the configured timezone. Each line starts with the
 | --- | --- |
 | Startup: configuration path, workspace, model, MCP servers started, tools registered, and every startup warning in full | Your messages, the model's replies, and summaries |
 | Model requests: route, model, duration, token usage, GPROXY's request ID, and errors | Tool arguments and tool output |
-| Tool calls: name, call ID, duration, and outcome kind | Approval request bodies and `ask_owner` questions |
+| Tool calls: name and call ID when each starts, then its duration and outcome kind | Approval request bodies and `ask_owner` questions |
+| Waiting for the owner: when an approval or `ask_owner` question is sent, and how it ended (answered, expired, undeliverable, or cancelled) with how long it took | |
 | Jobs, compaction, approvals answered or expired, the nightly fresh session, and bridge delivery failures with their error codes | Secrets: tokens, keys, passwords, and the configuration's secret fields |
 | MCP servers' standard error, each line prefixed with the server's name and cut to 1 KiB | |
 
