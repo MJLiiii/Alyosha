@@ -217,7 +217,10 @@ pub async fn listen(api: Arc<QqApi>, messages: mpsc::UnboundedSender<QqMessage>)
         match connect_once(&api, &messages, &mut session).await {
             Ok(()) => backoff = Duration::from_secs(1),
             Err(Stop::Fatal(error)) => return error,
-            Err(Stop::Reidentify) => session = None,
+            Err(Stop::Reidentify) => {
+                tracing::info!("the QQ gateway session ended; identifying again");
+                session = None;
+            }
             Err(Stop::Wait) => tokio::time::sleep(Duration::from_secs(10)).await,
             Err(Stop::Retry(reason)) => {
                 tracing::warn!(reason = %reason, "the QQ gateway connection failed; retrying");
@@ -295,7 +298,9 @@ async fn connect_once(
                         Some("READY") => {
                             let id = payload["d"]["session_id"].as_str().unwrap_or_default().to_owned();
                             *session = Some((id, last_seq));
+                            tracing::info!(bot = payload["d"]["user"]["username"].as_str().unwrap_or_default(), "connected to the QQ gateway");
                         }
+                        Some("RESUMED") => tracing::info!("resumed the QQ gateway session"),
                         Some("C2C_MESSAGE_CREATE") => {
                             let d = &payload["d"];
                             let _ = messages.send(QqMessage::C2c(C2cMessage {
@@ -308,7 +313,9 @@ async fn connect_once(
                         Some("GROUP_AT_MESSAGE_CREATE") => {
                             let _ = messages.send(QqMessage::Group(group_message(&payload["d"])));
                         }
-                        _ => {}
+                        // Only the type: events QQ sends that the bridge does
+                        // not handle, such as a group turning the bot off.
+                        other => tracing::info!(event = other.unwrap_or("none"), group = payload["d"]["group_openid"].as_str().unwrap_or("-"), "an unhandled QQ event"),
                     },
                     Some(7) => return Err(Stop::Retry("asked to reconnect".into())),
                     Some(9) => return Err(Stop::Reidentify),

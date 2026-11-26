@@ -44,6 +44,7 @@ Send `Authorization: QQBot <access_token>` on every API call to `https://api.bot
 3. Send op `2` (Identify) with `token` set to `QQBot <access_token>`, `intents` set to `GROUP_AND_C2C_EVENT` (`1 << 25`), and `shard` set to `[0, 1]`. Wait for the `READY` dispatch and keep its `session_id`.
 4. Send op `1` (Heartbeat) every interval, carrying the last sequence number `s` received, or `null` before the first. Expect op `11` in reply.
 5. On a dropped connection or op `7` (Reconnect), reconnect and send op `6` (Resume) with the token, `session_id`, and last sequence. On op `9` or close codes `4006` and `4007`, identify again. On `4008`, wait before reconnecting. Close codes `4013`, `4014`, `4914`, and `4915` mean the intent, permission, or bot itself is not allowed. Log them and exit with an error.
+6. Log `READY` and `RESUMED` at info level, each new identify after a lost session, and the type of every dispatch the bridge does not handle, with its `group_openid` if it has one. These show whether QQ is sending anything when a mention gets no reply. Never log message content.
 
 [WebSocket events](https://bot.q.qq.com/wiki/develop/api-v2/dev-prepare/event-emit/websocket.html) · [Payload and intents](https://bot.q.qq.com/wiki/develop/api-v2/dev-prepare/event-emit/payload.html)
 
