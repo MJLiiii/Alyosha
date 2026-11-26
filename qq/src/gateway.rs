@@ -313,6 +313,16 @@ async fn connect_once(
                         Some("GROUP_AT_MESSAGE_CREATE") => {
                             let _ = messages.send(QqMessage::Group(group_message(&payload["d"])));
                         }
+                        // A group with "receive all messages" on sends every
+                        // message this way; only those that @ the bot count.
+                        Some("GROUP_MESSAGE_CREATE") => match full_mode_mention(&payload["d"]) {
+                            Some(message) => { let _ = messages.send(QqMessage::Group(message)); }
+                            None => tracing::info!(
+                                group = payload["d"]["group_openid"].as_str().unwrap_or("-"),
+                                mentions = payload["d"]["mentions"].as_array().map_or(0, Vec::len),
+                                "a group message not addressed to the bot"
+                            ),
+                        },
                         // Only the type: events QQ sends that the bridge does
                         // not handle, such as a group turning the bot off.
                         other => tracing::info!(event = other.unwrap_or("none"), group = payload["d"]["group_openid"].as_str().unwrap_or("-"), "an unhandled QQ event"),
@@ -328,6 +338,24 @@ async fn connect_once(
             }
         }
     }
+}
+
+/// Reads a `GROUP_MESSAGE_CREATE` dispatch's `d`: a group message in
+/// "receive all messages" mode. It is a mention only when `mentions` has an
+/// entry with `is_you`; that entry's `<@id>` tokens are removed from the
+/// text, which `GROUP_AT_MESSAGE_CREATE` does by itself.
+pub fn full_mode_mention(d: &Value) -> Option<GroupMessage> {
+    let mentions = d["mentions"].as_array()?;
+    let bot = mentions.iter().find(|mention| mention["is_you"] == true)?;
+    let mut message = group_message(d);
+    for key in ["member_openid", "id"] {
+        if let Some(id) = bot[key].as_str().filter(|id| !id.is_empty()) {
+            message.content = message.content.replace(&format!("<@{id}>"), "");
+            message.content = message.content.replace(&format!("<@!{id}>"), "");
+        }
+    }
+    message.content = message.content.trim().to_owned();
+    Some(message)
 }
 
 /// Reads a `GROUP_AT_MESSAGE_CREATE` dispatch's `d`.
@@ -691,5 +719,27 @@ mod tests {
         );
         assert_eq!(unnamed.name, "QQ user");
         assert!(unnamed.content.is_empty() && unnamed.has_attachments);
+    }
+
+    #[test]
+    fn full_mode_messages_count_only_when_they_mention_the_bot() {
+        let message = |content: &str, mentions: Value| json!({"id": "m3", "group_openid": "G2", "content": content, "author": {"member_openid": "M7", "member_nickname": "Bob"}, "mentions": mentions});
+        let plain = message("大家早上好", Value::Null);
+        assert!(full_mode_mention(&plain).is_none());
+        let other = message(
+            "<@M9> 你好",
+            json!([{"member_openid": "M9", "is_you": false}]),
+        );
+        assert!(full_mode_mention(&other).is_none());
+        let ours = message(
+            "<@B1> 你好 <@M9>",
+            json!([{"member_openid": "B1", "id": "B1", "is_you": true, "bot": true}, {"member_openid": "M9", "is_you": false}]),
+        );
+        let found = full_mode_mention(&ours).unwrap();
+        assert_eq!(found.content, "你好 <@M9>");
+        assert_eq!(
+            (found.group_openid.as_str(), found.name.as_str()),
+            ("G2", "Bob")
+        );
     }
 }
