@@ -130,7 +130,18 @@ impl BotApi {
                 );
             }
         }
+        // Like Telegram on bad entities: refuse HTML that holds "REFUSE".
+        let refuse = body["parse_mode"] == "HTML"
+            && body["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("REFUSE"));
         self.calls.lock().unwrap().push((method.to_owned(), body));
+        if refuse {
+            return (
+                400,
+                json!({"ok": false, "error_code": 400, "description": "Bad Request: can't parse entities"}),
+            );
+        }
         if method == "getMe" {
             return (
                 200,
@@ -186,6 +197,8 @@ async fn agent(
                     .map_or(text.clone(), str::to_owned);
                 match text.as_str() {
                     "hello" => out += &send(chunk("Hi there.")),
+                    "markdown" => out += &send(chunk("**Bold** and `code`:\n\n- one\n- two")),
+                    "refuse" => out += &send(chunk("**REFUSE** this")),
                     "tools" => {
                         for value in [
                             update(
@@ -354,7 +367,7 @@ async fn owner_messages_reach_alyosha_and_strangers_are_dropped() {
         .into_iter()
         .find(|body| body["text"] == "Hi there.")
         .unwrap();
-    assert!(reply.get("parse_mode").is_none(), "plain text");
+    assert_eq!(reply["parse_mode"], "HTML", "replies are rendered");
     assert_eq!(
         harness.api.calls("setMyCommands")[0]["commands"]
             .as_array()
@@ -640,4 +653,23 @@ async fn trusted_groups_get_a_full_session_that_asks_the_owner() {
         prompts(&harness.log).is_empty(),
         "the owner's session hears nothing"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn replies_render_markdown_and_fall_back_to_plain_text() {
+    let harness = start().await;
+    harness.api.push(message(1, OWNER, "markdown"));
+    let api = harness.api.clone();
+    let html = "<b>Bold</b> and <code>code</code>:\n\n• one\n• two";
+    wait_for(|| api.texts().contains(&html.to_owned())).await;
+    // Telegram refuses this one's HTML: the same part goes again as plain text.
+    harness.api.push(message(2, OWNER, "refuse"));
+    wait_for(|| api.texts().contains(&"REFUSE this".to_owned())).await;
+    let plain = harness
+        .api
+        .calls("sendMessage")
+        .into_iter()
+        .find(|body| body["text"] == "REFUSE this")
+        .unwrap();
+    assert!(plain.get("parse_mode").is_none());
 }

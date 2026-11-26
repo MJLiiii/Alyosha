@@ -77,7 +77,9 @@ Collect the prompt's `agent_message_chunk` text in order. When the prompt's resp
 | Any other stop reason | Any collected text, then the stop reason. |
 | JSON-RPC error | **Failed:** and the error message. |
 
-Send replies without a parse mode, so Telegram shows them as plain text. Split text longer than 4000 characters at the last line break before the limit, or at the limit if a line is longer, and send the parts in order.
+The model writes Markdown. Split the reply into parts of at most 4000 characters at the last line break before the limit, or at the limit if a line is longer. When a cut falls inside a fenced code block, close the fence at the end of the part and open it again, with its language, at the start of the next. Convert each part to Telegram's HTML subset and send it with `parse_mode: "HTML"` and link previews off: `<b>` for bold and headings, `<i>`, `<s>`, `<code>`, `<pre><code class="language-…">` for code blocks, `<a href>`, and `<blockquote>` for the outermost quote. Lists become `• ` or `1. ` lines, and table rows become cells joined by ` | `. Escape `&`, `<`, and `>` in text. If Telegram refuses a part, for example because it cannot parse the entities, log it and send the same part again without a parse mode, with the Markdown markers removed. The conversion lives in the shared crate's `markdown` module. [Formatting options](https://core.telegram.org/bots/api#formatting-options)
+
+The **Working…** message, approvals, and the bridge's own notices stay plain text.
 
 ## Approvals and questions
 
@@ -102,7 +104,7 @@ For a mention in a group whose chat ID is in `trusted_groups`, see [Trusted grou
 1. Take the group's guest session from the pool, starting `alyosha acp --guest` for it if none runs: `initialize` with `alyosha-telegram`, then `session/new` with the configured workspace, which guest mode ignores.
 2. Send the text as a prompt with the sender `telegram-<from.id>` and the display name, the first and last name, or the username if there is none. A mention with no text and a photo, file, or voice message gets **Only text messages work for now.** and no prompt.
 3. While the group's prompt is open, send `typing` to the group every 5 seconds.
-4. When the response arrives, send the reply to the group as plain text, split like a private reply, with `reply_parameters` naming the mention and `allow_sending_without_reply`. A failed send is logged and dropped. Guest sessions send no tool calls worth showing, so there is no **Working…** message.
+4. When the response arrives, send the reply to the group rendered and split like a private reply, with `reply_parameters` naming the mention and `allow_sending_without_reply`. A failed send is logged and dropped. Guest sessions send no tool calls worth showing, so there is no **Working…** message.
 
 The pool keeps one guest child per group ID. Stop a child, closing its input as at shutdown, when its group has had no open prompt for 60 minutes. If a child exits, log it and remove it from the pool; the next mention starts a new one. A guest child never stops the bridge. Log the chat ID of every mention at info level, so the owner can copy it into `trusted_groups`.
 
@@ -156,7 +158,8 @@ These run under `cargo test` with a fake Bot API server, set through `teloxide`'
 - Mention the bot in two groups. Check that each group gets its own guest agent.
 - List one group in `trusted_groups` and mention the bot there. Check that a group-mode agent starts in `<workspace>/groups/<chat ID>`, receives `<name>: <text>` without `_meta`, and that its reply goes to the group. Script an approval from it. Check that the question reaches the owner's private chat marked with the group, that the owner's button press answers the group's agent, and that the owner's agent receives nothing.
 - Let the trusted group's agent sit idle past the guest limit. Check that it keeps running.
-- Send an owner message. Check that the agent receives one `session/prompt` with the text and that the reply arrives as plain text.
+- Send an owner message. Check that the agent receives one `session/prompt` with the text and that the reply is sent with `parse_mode: "HTML"`.
+- Script a reply with bold, code, and a list. Check the HTML that is sent. Make the fake Bot API refuse a reply's HTML. Check that the same part is sent again without a parse mode and without the Markdown markers.
 - Script two tool calls, the second failing, then a reply. Check that one **Working…** message is created and edited, shows **(failed)** on the second line, and is edited no more than once every 3 seconds.
 - Script a 9,000-character reply. Check that three messages arrive in order and each is under 4,000 characters.
 - Send two messages without waiting. Check that both prompts are sent at once and that each reply goes out when its own response arrives.

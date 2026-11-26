@@ -79,6 +79,8 @@ QQ allows four replies per message within 60 minutes:
 3. Split it into parts of at most `reply_chunk` characters at line breaks. If more than four parts result, keep three and make the fourth the start of the remaining text, cut to fit, followed by **(cut off — ask me to continue)**.
 4. Send the parts in order as passive replies.
 
+The model writes Markdown. For a passive reply, first send each part as QQ's native Markdown: `msg_type: 2` with `markdown: {"content": ...}` instead of `content`, split as the Telegram bridge splits Markdown, so code blocks stay closed in each part. If QQ refuses a part for any reason other than the reply window, log the code, send that part and the rest as plain text, and send every later reply as plain text until the bridge restarts. Most bots need QQ's permission for native Markdown, so the first reply after a restart may be refused. Plain text is the reply with the Markdown markers removed, as the shared crate's `markdown` module makes it. Scheduled replies, active messages, approvals, and the bridge's notices are always plain text. [Markdown messages](https://bot.q.qq.com/wiki/develop/api-v2/server-inter/message/type/markdown.html)
+
 If a send fails with `40034128` (reply limit or window exceeded), `40034005`, or `304103` (message ID expired), send the remaining parts as active messages: the same request without `msg_id`. If that fails too, for example with `40034100` (rate limit) or `40034105` (no permission), keep the unsent text. When the owner's next message arrives, send the kept text first, as that message's replies, before relaying the new message. Log every failed send with its error code.
 
 On `40054007` (message too long), halve the part and retry once, and log it so `reply_chunk` can be lowered.
@@ -118,6 +120,7 @@ These run under `cargo test` with a fake QQ API, serving both HTTP and the WebSo
 - Send two messages without waiting. Check that each reply uses its own message's `msg_id`.
 - Deliver a `GROUP_AT_MESSAGE_CREATE`. Check that the group's guest agent gets a prompt with a `qq-<member_openid>` sender and that the reply goes to the group endpoint with the mention's `msg_id`.
 - Deliver a `GROUP_MESSAGE_CREATE` without mentions, one that mentions someone else, and one whose `mentions` has `is_you`. Check that only the last reaches a group agent, with the `<@…>` token of the bot removed.
+- Send a reply to a fake QQ that accepts Markdown. Check one `msg_type: 2` message. Make it refuse Markdown. Check that the same reply follows as plain text with the next `msg_seq`, that the next reply skips Markdown, and that a scheduled reply is plain text.
 - List a group in `trusted_groups` and deliver a mention from it. Check that a group-mode agent gets `<nickname>: <text>`, that its approval reaches the owner marked with the group, and that the owner's `/yes` answers the group's agent, not the owner's.
 
 With a real bot, which needs a registered bot, real-name QQ account, and network access, check what the documentation leaves unclear:

@@ -20,8 +20,8 @@ use tokio::sync::{Mutex, mpsc};
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::{
-    ReplyTo, Seen, SendError, Sender, TEXT_ONLY, deliver, parse_answer, parse_token,
-    permission_text, reply_parts,
+    MarkdownRefused, ReplyTo, Seen, SendError, Sender, TEXT_ONLY, deliver, deliver_reply,
+    parse_answer, parse_token, permission_text, reply_parts,
 };
 
 /// `GROUP_AND_C2C_EVENT`.
@@ -454,6 +454,7 @@ pub async fn run(
         ));
     }
     let seen = Seen::default();
+    let markdown = MarkdownRefused::default();
     let (mut pool, mut guest_events) = GuestPool::new(
         settings.groups.clone(),
         "alyosha-qq",
@@ -581,8 +582,7 @@ pub async fn run(
                     Event::Tools { .. } => {}
                     Event::Finished(finished) => {
                         let mut reply = replies.lock().await.remove(&finished.key).unwrap_or_else(ReplyTo::scheduled);
-                        let parts = reply_parts(&finished.reply(), chunk);
-                        if let Some(rest) = deliver(&owner, &parts, &mut reply).await {
+                        if let Some(rest) = deliver_reply(&owner, &finished.reply(), chunk, &mut reply, &markdown).await {
                             kept.lock().await.push(rest);
                         }
                     }
@@ -630,8 +630,7 @@ pub async fn run(
                         pool.touch(&group);
                         if let Some((group_openid, mut reply)) = group_replies.remove(&finished.key) {
                             let to = ToGroup { api: api.clone(), group_openid };
-                            let parts = reply_parts(&finished.reply(), chunk);
-                            if deliver(&to, &parts, &mut reply).await.is_some() {
+                            if deliver_reply(&to, &finished.reply(), chunk, &mut reply, &markdown).await.is_some() {
                                 tracing::warn!(group = %group, "a group reply failed; dropped");
                             }
                         }

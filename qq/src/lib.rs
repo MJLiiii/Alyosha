@@ -10,7 +10,10 @@ pub mod gateway;
 
 use std::{
     collections::HashMap,
-    sync::Mutex,
+    sync::{
+        Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -45,7 +48,10 @@ pub trait Sender: Send + Sync {
 /// Splits a reply into at most four parts of `chunk` characters. Beyond
 /// that, the fourth part is the start of the rest with the cut-off note.
 pub fn reply_parts(text: &str, chunk: usize) -> Vec<String> {
-    let mut parts = alyosha_bridge::split(text, chunk);
+    cap_parts(alyosha_bridge::split(text, chunk), chunk)
+}
+
+fn cap_parts(mut parts: Vec<String>, chunk: usize) -> Vec<String> {
     if parts.len() > REPLY_LIMIT {
         let rest = parts[REPLY_LIMIT - 1..].join("\n");
         parts.truncate(REPLY_LIMIT - 1);
@@ -137,6 +143,52 @@ pub async fn deliver(sender: &dyn Sender, parts: &[String], reply: &mut ReplyTo)
         }
     }
     None
+}
+
+/// Whether QQ has refused native Markdown. Set at the first refusal and
+/// kept until the bridge restarts, so later replies skip the attempt.
+#[derive(Default)]
+pub struct MarkdownRefused(AtomicBool);
+
+/// Sends a model reply. As a passive reply, it first tries QQ's native
+/// Markdown (`msg_type: 2`). If QQ refuses that, or the reply is not
+/// passive, the reply goes as plain text with the Markdown markers removed,
+/// by `deliver`'s rules. Returns what could not be sent, as `deliver` does.
+pub async fn deliver_reply(
+    sender: &dyn Sender,
+    text: &str,
+    chunk: usize,
+    reply: &mut ReplyTo,
+    refused: &MarkdownRefused,
+) -> Option<String> {
+    if let Some(msg_id) = reply.msg_id.clone().filter(|_| !reply.passive_closed)
+        && !refused.0.load(Ordering::Relaxed)
+    {
+        let parts = cap_parts(alyosha_bridge::markdown::split_markdown(text, chunk), chunk);
+        for (index, part) in parts.iter().enumerate() {
+            let body = json!({"msg_type": 2, "markdown": {"content": part}, "msg_id": msg_id, "msg_seq": reply.seq});
+            reply.seq += 1;
+            match sender.send(body).await {
+                Ok(()) => continue,
+                Err(error) if PASSIVE_CLOSED.contains(&error.code) => reply.passive_closed = true,
+                Err(error) if error.code == TOO_LONG => {}
+                Err(error) => {
+                    tracing::warn!(
+                        code = error.code,
+                        "QQ refused a Markdown reply; sending plain text until the bridge restarts"
+                    );
+                    refused.0.store(true, Ordering::Relaxed);
+                }
+            }
+            // The rest goes as plain text.
+            let rest = parts[index..].join("\n");
+            let plain = alyosha_bridge::markdown::to_plain(&rest);
+            return deliver(sender, &reply_parts(&plain, chunk), reply).await;
+        }
+        return None;
+    }
+    let plain = alyosha_bridge::markdown::to_plain(text);
+    deliver(sender, &reply_parts(&plain, chunk), reply).await
 }
 
 async fn send_passive(
@@ -402,5 +454,105 @@ mod tests {
             parse_token(&json!({"access_token": "t", "expires_in": "7200"})).unwrap();
         assert_eq!((token.as_str(), life), ("t", Duration::from_secs(7200)));
         assert!(parse_token(&json!({"code": 100016, "message": "invalid appid"})).is_err());
+    }
+}
+
+#[cfg(test)]
+mod markdown_tests {
+    use std::sync::Mutex;
+
+    use super::*;
+
+    struct Refuse {
+        markdown: Option<i64>,
+        sent: Mutex<Vec<Value>>,
+    }
+
+    impl Sender for Refuse {
+        fn send(&self, body: Value) -> futures_util::future::BoxFuture<'_, Result<(), SendError>> {
+            let result = match (body["msg_type"].as_i64(), self.markdown) {
+                (Some(2), Some(code)) => Err(SendError {
+                    code,
+                    message: String::new(),
+                }),
+                _ => Ok(()),
+            };
+            self.sent.lock().unwrap().push(body);
+            Box::pin(async move { result })
+        }
+    }
+
+    #[tokio::test]
+    async fn replies_go_as_markdown_when_qq_allows_it() {
+        let qq = Refuse {
+            markdown: None,
+            sent: Mutex::default(),
+        };
+        let refused = MarkdownRefused::default();
+        let mut reply = ReplyTo::message("m1");
+        assert_eq!(
+            deliver_reply(&qq, "**hi** `x`", 1500, &mut reply, &refused).await,
+            None
+        );
+        let sent = qq.sent.lock().unwrap();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0]["msg_type"], 2);
+        assert_eq!(sent[0]["markdown"]["content"], "**hi** `x`");
+        assert_eq!(sent[0]["msg_id"], "m1");
+    }
+
+    #[tokio::test]
+    async fn a_refusal_sends_clean_text_and_stops_later_attempts() {
+        let qq = Refuse {
+            markdown: Some(304003),
+            sent: Mutex::default(),
+        };
+        let refused = MarkdownRefused::default();
+        let mut reply = ReplyTo::message("m1");
+        assert_eq!(
+            deliver_reply(&qq, "**hi** `x`", 1500, &mut reply, &refused).await,
+            None
+        );
+        let mut next = ReplyTo::message("m2");
+        assert_eq!(
+            deliver_reply(&qq, "- a", 1500, &mut next, &refused).await,
+            None
+        );
+        let sent = qq.sent.lock().unwrap();
+        let kinds: Vec<(i64, String)> = sent
+            .iter()
+            .map(|body| {
+                (
+                    body["msg_type"].as_i64().unwrap(),
+                    body["msg_seq"].to_string(),
+                )
+            })
+            .collect();
+        // Markdown once (seq 1), its plain resend (seq 2), then plain only.
+        assert_eq!(kinds, [(2, "1".into()), (0, "2".into()), (0, "1".into())]);
+        assert_eq!(sent[1]["content"], "hi x");
+        assert_eq!(sent[2]["content"], "• a");
+    }
+
+    #[tokio::test]
+    async fn scheduled_replies_are_plain_text() {
+        let qq = Refuse {
+            markdown: None,
+            sent: Mutex::default(),
+        };
+        let mut reply = ReplyTo::scheduled();
+        deliver_reply(
+            &qq,
+            "**done**",
+            1500,
+            &mut reply,
+            &MarkdownRefused::default(),
+        )
+        .await;
+        let sent = qq.sent.lock().unwrap();
+        assert_eq!(
+            (sent[0]["msg_type"].as_i64(), sent[0]["content"].as_str()),
+            (Some(0), Some("done"))
+        );
     }
 }

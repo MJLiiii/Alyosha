@@ -8,6 +8,7 @@
 //! `docs/develop/TelegramBridge.md` and `docs/develop/Schedule.md#the-runner`.
 
 pub mod guests;
+pub mod markdown;
 pub mod runner;
 
 use std::{

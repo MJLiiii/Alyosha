@@ -148,6 +148,45 @@ impl Api {
         }
     }
 
+    /// Sends a model reply with its Markdown rendered: each part as
+    /// Telegram HTML, or as plain text if Telegram refuses the HTML. In a
+    /// group, each part answers `reply_to`. Returns the sent message IDs.
+    pub async fn send_rendered(&self, chat: i64, text: &str, reply_to: Option<i64>) -> Vec<i64> {
+        let mut ids = Vec::new();
+        for part in alyosha_bridge::markdown::split_markdown(text, PART_LIMIT) {
+            let mut body = json!({
+                "chat_id": chat,
+                "text": alyosha_bridge::markdown::to_telegram_html(&part),
+                "parse_mode": "HTML",
+                "link_preview_options": {"is_disabled": true},
+            });
+            if let Some(message) = reply_to {
+                body["reply_parameters"] =
+                    json!({"message_id": message, "allow_sending_without_reply": true});
+            }
+            let sent = match self.call("sendMessage", body.clone()).await {
+                Ok(sent) => Ok(sent),
+                Err(error) => {
+                    tracing::warn!(chat, error = %error, "Telegram refused the formatted reply; sending plain text");
+                    body["text"] = json!(alyosha_bridge::markdown::to_plain(&part));
+                    if let Some(map) = body.as_object_mut() {
+                        map.remove("parse_mode");
+                    }
+                    self.call("sendMessage", body).await
+                }
+            };
+            match sent {
+                Ok(message) => ids.push(message["message_id"].as_i64().unwrap_or_default()),
+                Err(_) if reply_to.is_some() => {
+                    tracing::warn!(chat, "a group reply failed; dropped");
+                    break;
+                }
+                Err(_) => {}
+            }
+        }
+        ids
+    }
+
     pub async fn edit(&self, chat: i64, message: i64, text: &str) {
         let _ = self
             .call(
@@ -526,7 +565,7 @@ pub async fn run(
                         {
                             api.edit(chat, message, &text).await;
                         }
-                        api.send_long(chat, &finished.reply(), None).await;
+                        api.send_rendered(chat, &finished.reply(), None).await;
                     }
                     Event::Permission(permission) => {
                         let number = next_request;
@@ -558,10 +597,7 @@ pub async fn run(
                     Event::Finished(finished) => {
                         pool.touch(&group);
                         if let Some((group_chat, message_id)) = group_replies.remove(&finished.key) {
-                            match message_id {
-                                Some(message_id) => api.send_reply(group_chat, &finished.reply(), message_id).await,
-                                None => { api.send_long(group_chat, &finished.reply(), None).await; }
-                            }
+                            api.send_rendered(group_chat, &finished.reply(), message_id).await;
                         }
                     }
                     Event::Exited => pool.exited(&group, guest),
