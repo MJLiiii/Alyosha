@@ -1,6 +1,6 @@
 //! Build step 1: whole turns through the session driver with a scripted model
 //! and a fake `read_file`. The cases come from the verification sections of
-//! `docs/develop/AgentLoop.md` and `docs/develop/AgentState.md`.
+//! `docs/AgentLoop.md#implementation` and `docs/AgentState.md#implementation`.
 
 mod support;
 

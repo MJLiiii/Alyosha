@@ -1,6 +1,6 @@
 //! The model client against a local HTTP fixture that records requests and
 //! serves scripted provider streams. See
-//! `docs/develop/LLMClientGateway.md#verify-with-the-upstream-binary-and-mock-providers`.
+//! `docs/LLMClientGateway.md#verify-with-the-upstream-binary-and-mock-providers`.
 
 mod support;
 

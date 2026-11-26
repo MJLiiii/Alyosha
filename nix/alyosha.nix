@@ -2,7 +2,7 @@
 # gateway commands), alyosha-schedule, alyosha-telegram, and alyosha-qq.
 #
 # `alyosha` is wrapped so the shell sandbox finds Bubblewrap, pasta, Bash,
-# and the default tools as Nix store paths (docs/develop/EnvironmentInterface.md).
+# and the default tools as Nix store paths (docs/EnvironmentInterface.md#implementation).
 {
   lib,
   rustPlatform,

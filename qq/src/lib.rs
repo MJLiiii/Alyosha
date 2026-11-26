@@ -4,7 +4,7 @@
 //! QQ allows four replies per message within 60 minutes and no editing, so
 //! the bridge sends no progress messages, keeps replies it cannot deliver,
 //! and sends them first when the owner next writes. Group @-mentions from
-//! anyone go to the group's guest session. See `docs/develop/QQBridge.md`.
+//! anyone go to the group's guest session. See `docs/QQBridge.md`.
 
 pub mod gateway;
 

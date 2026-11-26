@@ -3,7 +3,7 @@
 //! All settings live in one strict file, `$XDG_CONFIG_HOME/alyosha/config.toml`,
 //! which the owner writes and Alyosha never changes. Reference:
 //! `docs/reference/Configuration.md`. Implementation guide:
-//! `docs/develop/Configuration.md`.
+//! `docs/reference/Configuration.md#implementation`.
 
 use std::{
     collections::BTreeMap,

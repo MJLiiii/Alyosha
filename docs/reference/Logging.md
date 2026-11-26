@@ -1,13 +1,13 @@
 # Logging
 
-Every Alyosha program writes a debug log, a plain text file you can read on the host while Alyosha runs in the container. It records what happened, not what was said: events, names, IDs, durations, and errors, never the conversation. The conversation is kept only in the session database. [Durable sessions](../design/SessionStore.md) [Architecture overview](../README.md) · [Configuration](Configuration.md)
+Every Alyosha program writes a debug log, a plain text file you can read on the host while Alyosha runs in the container. It records what happened, not what was said: events, names, IDs, durations, and errors, never the conversation. The conversation is kept only in the session database. [Durable sessions](../SessionStore.md) [Architecture overview](../README.md) · [Configuration](Configuration.md)
 
 ## Where the logs are
 
-The logs live in `${XDG_DATA_HOME:-$HOME/.local/share}/alyosha/logs/`. The container mounts that folder from the host, so on the host you can follow a log with:
+The logs live in `~/alyosha/state/logs/`. The container mounts that folder from the host, so on the host you can follow a log with:
 
 ```bash
-tail -f ~/.local/share/alyosha/logs/alyosha-acp.2026-11-25.log
+tail -f ~/alyosha/state/logs/alyosha-acp.2026-11-25.log
 ```
 
 The folder has mode `0700` and each file `0600`. It is outside every workspace and is not mounted in the shell sandbox, so the file tools and shell commands cannot read it. MCP servers, which are trusted and run as your user, can. [Container limits](ToolPermissions.md#container-limits)
@@ -38,7 +38,7 @@ The date is the local date in the configured timezone. Each line starts with the
 
 MCP servers' standard error is their own diagnostics, which Alyosha cannot check. A server that prints content there puts it in the log.
 
-The bridges also log what they need for setup: the sender ID of every message they drop, which is how you find your Telegram user ID or QQ `openid`. [Telegram configuration](../develop/TelegramBridge.md#configuration) · [QQ configuration](../develop/QQBridge.md#configuration)
+The bridges also log what they need for setup: the sender ID of every message they drop, which is how you find your Telegram user ID or QQ `openid`. [Telegram configuration](../TelegramBridge.md#configuration) · [QQ configuration](../QQBridge.md#configuration)
 
 ## Level
 
@@ -50,13 +50,13 @@ Every program deletes log files older than 14 days when it starts. Each file is 
 
 ## Before logging starts
 
-An error that stops a program before its log is open, such as a configuration error, goes to standard error. A bridge's standard error, and that of its `alyosha acp` child, goes to the systemd journal. GPROXY logs to the journal as its own service. [Loading](../develop/Configuration.md#loading) · [Run GPROXY as a service](../develop/LLMClientGateway.md#run-gproxy-as-a-service)
+An error that stops a program before its log is open, such as a configuration error, goes to standard error. A bridge's standard error, and that of its `alyosha acp` child, goes to the systemd journal. GPROXY logs to the journal as its own service. [Loading](Configuration.md#loading) · [Run GPROXY as a service](../LLMClientGateway.md#run-gproxy-as-a-service)
 
-Startup warnings name the file that holds their details, for example *details in ~/.local/share/alyosha/logs/alyosha-acp.2026-11-25.log*.
+Startup warnings name the file that holds their details, for example *details in ~/alyosha/state/logs/alyosha-acp.2026-11-25.log*.
 
 ## Implementation
 
-Use [`tracing`](https://docs.rs/tracing) with a small writer of Alyosha's own for the daily file, the `O_APPEND` whole-line writes, and the size cap. Put it in `alyosha-config`, which every program already uses, so each program opens its log the same way right after loading the configuration. Format secrets through the configuration's secret wrapper, which prints `"<secret>"`. [Configuration crate](../develop/Configuration.md#crate)
+Use [`tracing`](https://docs.rs/tracing) with a small writer of Alyosha's own for the daily file, the `O_APPEND` whole-line writes, and the size cap. Put it in `alyosha-config`, which every program already uses, so each program opens its log the same way right after loading the configuration. Format secrets through the configuration's secret wrapper, which prints `"<secret>"`. [Configuration crate](Configuration.md#crate)
 
 ## Verification
 

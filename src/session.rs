@@ -5,8 +5,8 @@
 //! memory and skills stores, loads the dev shell, registers every tool, and
 //! builds the normal system instruction, which each compaction rebuilds. A
 //! resumed session first closes a turn a restart cut off. See
-//! `docs/develop/AgentLoop.md#session-driver` and
-//! `docs/develop/SessionStore.md#resume`.
+//! `docs/AgentLoop.md#session-driver` and
+//! `docs/SessionStore.md#resume`.
 
 use std::{
     os::unix::fs::DirBuilderExt,
@@ -380,7 +380,7 @@ pub async fn start_with_clock(
 /// Opens a guest session for a group chat: only `user_memory` and the MCP
 /// servers `[guest]` lists, no workspace, sandbox, memory index, skills,
 /// jobs, or approver. Its MCP servers run in `<data>/guest`.
-/// See `docs/develop/Channels.md#guest-mode`.
+/// See `docs/Channels.md#guest-mode`.
 pub async fn start_guest(
     config: &Config,
     paths: &Paths,

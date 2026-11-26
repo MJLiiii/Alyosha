@@ -4,7 +4,7 @@
 //! file permissions, and the shell sandbox. Every rule is enforced at the
 //! point of access: files open beneath the workspace with `openat2`'s
 //! `RESOLVE_BENEATH`, so no path or symlink can lead out of it. See
-//! `docs/develop/EnvironmentInterface.md` and
+//! `docs/EnvironmentInterface.md#implementation` and
 //! `docs/reference/ToolPermissions.md`.
 
 pub mod logs;

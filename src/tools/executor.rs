@@ -2,7 +2,7 @@
 //!
 //! The Agent Loop calls it for each tool the model requests, and build step 3
 //! adds Code Mode's reads as a second caller. Both go through the same
-//! dispatch checks. See `docs/develop/ToolExecutor.md#dispatch-one-call`.
+//! dispatch checks. See `docs/ToolExecutor.md#dispatch-one-call`.
 
 use std::sync::Arc;
 

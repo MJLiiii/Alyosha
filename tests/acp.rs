@@ -1,5 +1,5 @@
 //! `alyosha acp` with an in-process ACP client and the scripted model. See
-//! `docs/develop/Channels.md#verification`.
+//! `docs/Channels.md#verification`.
 
 mod support;
 

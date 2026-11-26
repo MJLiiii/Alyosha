@@ -3,7 +3,7 @@
 //!
 //! A job uses the normal sandbox launch under its own Stop signal, which lives
 //! for the session, so Stop on a turn never reaches it. Its output streams to
-//! a session log from the start. See `docs/develop/Jobs.md`.
+//! a session log from the start. See `docs/Jobs.md#implementation`.
 
 use std::{
     collections::VecDeque,

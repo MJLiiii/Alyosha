@@ -1,5 +1,5 @@
 # gogcli with its MCP server, which the nixpkgs version predates
-# (docs/develop/EmailCalendar.md).
+# (docs/EmailCalendar.md#implementation).
 { buildGoModule, fetchFromGitHub }:
 buildGoModule rec {
   pname = "gogcli";

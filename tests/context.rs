@@ -1,7 +1,7 @@
 //! Context Manager checks through the session driver, with the guide's
 //! budget fixture: a 20,000-token window, a 4,000-token reply allowance, and
 //! a 12,000-token input ceiling, so usable input is 10,000 tokens. See
-//! `docs/develop/ContextManager.md#verify-the-contracts`.
+//! `docs/ContextManager.md#verify-the-contracts`.
 
 mod support;
 

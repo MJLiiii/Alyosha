@@ -2,8 +2,8 @@
 //! group's first mention. A trusted group gets `alyosha acp --group` in its
 //! own folder and keeps it until the bridge stops; any other group gets
 //! `alyosha acp --guest`, stopped after an idle hour. See
-//! `docs/design/Channels.md#group-chats` and
-//! `docs/develop/TelegramBridge.md#group-chats`.
+//! `docs/Channels.md#group-chats` and
+//! `docs/TelegramBridge.md#group-chats`.
 
 use std::{
     collections::{HashMap, HashSet},

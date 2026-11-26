@@ -1,6 +1,6 @@
 # GPROXY Headless at a pinned release: the official static musl build,
 # installed unchanged. To upgrade, change `version` and `hash`, taking the
-# hash from the release's manifest.json (docs/develop/LLMClientGateway.md).
+# hash from the release's manifest.json (docs/LLMClientGateway.md#implementation).
 { stdenvNoCC, fetchurl, unzip }:
 stdenvNoCC.mkDerivation rec {
   pname = "gproxy";

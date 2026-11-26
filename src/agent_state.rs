@@ -3,10 +3,10 @@
 //! The session driver owns the queue, the active work, and the turn outcomes.
 //! `run_turn` alone appends conversation history. Each history entry and
 //! checkpoint is saved to the session store first, so a restarted process
-//! can resume the session (`docs/design/SessionStore.md`).
+//! can resume the session (`docs/SessionStore.md`).
 //!
-//! Design: `docs/design/AgentState.md`. Fields and transitions:
-//! `docs/develop/AgentState.md`.
+//! Design: `docs/AgentState.md`. Fields and transitions:
+//! `docs/AgentState.md#implementation`.
 
 use std::collections::{HashMap, VecDeque};
 

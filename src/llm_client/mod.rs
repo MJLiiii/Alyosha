@@ -3,7 +3,7 @@
 //!
 //! The client encodes each request for the provider's native API, streams the
 //! response, and returns it only once the provider signals that the whole
-//! response completed. See `docs/develop/LLMClientGateway.md`.
+//! response completed. See `docs/LLMClientGateway.md#implementation`.
 
 mod chat;
 mod claude;

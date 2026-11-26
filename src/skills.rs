@@ -2,7 +2,7 @@
 //! global directory that Alyosha only reads.
 //!
 //! The index goes into the system instruction once per session. The `skill`
-//! tool loads one skill at call time. See `docs/develop/Skills.md`.
+//! tool loads one skill at call time. See `docs/Skills.md#implementation`.
 
 use std::{
     fs,

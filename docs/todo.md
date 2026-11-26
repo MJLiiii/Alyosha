@@ -1,6 +1,6 @@
 # What Alyosha still needs
 
-This page lists the capabilities Alyosha needs beyond the browser to work like a personal assistant. Each one gets its own design page once discussed. Designed items stay here, marked, while later items depend on them. [Architecture overview](../README.md#v1-decisions-and-open-work) · [Browser](Browser.md)
+This page lists the capabilities Alyosha needs beyond the browser to work like a personal assistant. Each one gets its own page once discussed. Designed items stay here, marked, while later items depend on them. [Architecture overview](README.md#v1-decisions-and-open-work) · [Browser](Browser.md)
 
 The biggest gap was that Alyosha worked only while you sat at a terminal. You now reach it only through chat apps. A human assistant keeps working while you are away and can reach you. The order below follows that gap, and later items depend on earlier ones.
 
@@ -44,4 +44,4 @@ These are already deferred on their components' pages and are less urgent:
 - Downloads from the browser.
 - Full desktop control. [Browser deferred work](Browser.md#deferred)
 
-[Architecture overview](../README.md)
+[Architecture overview](README.md)

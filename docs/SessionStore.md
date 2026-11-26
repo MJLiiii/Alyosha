@@ -1,16 +1,80 @@
-# Implement durable sessions
+# Durable sessions
 
-Write each history entry and checkpoint to PostgreSQL as the session driver commits it, and resume a session by its key. Build this at step 10 of the build order, after the bridges work, because it changes how `alyosha acp` and both bridges open sessions. [Durable sessions design](../design/SessionStore.md) · [Agent State](AgentState.md) · [Architecture overview](../README.md)
+A session's conversation survives a restart. Alyosha writes every history entry to a PostgreSQL database as it happens. When a bridge or its `alyosha acp` restarts, after a crash, a configuration change, or a container reboot, the conversation picks up where it stopped. A session ends only when you start a new one. There is no nightly fresh start. [Agent State](AgentState.md) · [Chat channels](Channels.md) · [Architecture overview](README.md)
 
-## Placement and libraries
+## What is saved
+
+| Saved | Lost on restart |
+| --- | --- |
+| Which session each chat is using | Messages waiting in the queue |
+| Every history entry: your messages, the model's replies and tool calls with provider replay data, and tool results | A turn in progress, which ends as stopped |
+| Each compaction's summary and where verbatim history resumes | Open approvals and `ask_owner` questions |
+| | Background jobs, MCP servers and their state, such as browser tabs, and the dev shell |
+| | Saved full outputs of shortened results (`log_path`) |
+
+The same database holds your memory and the notes on people in group chats. Skills, `schedule.toml`, and `config.toml` stay files. [Memory](Memory.md) · [Scheduled tasks](Schedule.md)
+
+## How it works
+
+**An append-only log.** History is already append-only, and only `run_turn` appends to it. Each entry is written to the database at that point, before it joins the in-memory history. If the write fails, the turn fails, so what the model saw and what is saved never disagree. A crash loses nothing that was committed, including tool calls that already ran in an unfinished turn. Saving a snapshot of the whole session at the end of each turn would be simpler, but a crash mid-turn would forget tool calls that had already acted on the world.
+
+**A key per conversation.** Each place a conversation happens has a stable key, and its current session is the newest session with that key:
+
+| Where | Key |
+| --- | --- |
+| Your private chat | `owner:telegram`, `owner:qq` |
+| A trusted group | `group:telegram:<chat ID>`, `group:qq:<group_openid>` |
+| A guest group | `guest:telegram:<chat ID>`, `guest:qq:<group_openid>` |
+
+A bridge that starts asks to load its key's current session and starts a new one only if there is none. `/new` starts a new session under the same key. The old one stays in the database. A guest session stopped after an hour of quiet resumes on the next mention instead of starting blank.
+
+**One process per session.** A process holds a database lock on the session it runs. A second process that tries to open the same session, such as a second bridge started by hand while the service runs, stops with **This session is open in another Alyosha process.** The lock goes away with the process, so a crash never leaves it held.
+
+**Resuming.** Alyosha loads the latest summary and the entries after it. Older entries stay in the database but not in memory. If the last reply asked for tool calls that have no results, Alyosha records each as an error: *Alyosha restarted before this call finished. It may or may not have run; check before repeating it.* The first reply after a resume starts with *Resumed after a restart.*, adding *The turn in progress was stopped, and messages sent while Alyosha was down may need resending.* when a turn was interrupted.
+
+## Without the nightly fresh start
+
+The 04:00 fresh start was how a chat session got rid of what it should not carry for weeks. Each of those now has its own answer:
+
+| Before, renewed nightly | Now |
+| --- | --- |
+| History | Compaction bounds what the model sees. After a restart, only the entries since the last summary are loaded. [Context Manager](ContextManager.md) |
+| Memory and skills indexes | Rebuilt at each compaction and each resume. A compaction already changes the start of the conversation, so the instruction changing at the same moment costs little prompt caching. [Memory](Memory.md#what-the-model-sees) |
+| Saved full outputs | Removed at each compaction for results the summary replaced, and at restart. Reading a removed `log_path` gives a tool error saying the output is gone. |
+| Configuration, MCP servers, and the dev shell | Picked up when the bridge restarts, which no longer loses the conversation: `systemctl restart alyosha-telegram`. |
+
+## The database
+
+PostgreSQL runs as a service inside the NixOS container. It listens only on a Unix socket, not on any network address, and accepts your user by peer authentication, so there is no password to keep. Its data lives in the container's own state, and a daily dump goes to `~/alyosha/state/backups/`, which is mounted from the host. [Deployment](Deployment.md)
+
+The model's shell runs in Bubblewrap, which does not mount the socket, so the model cannot read or change its history or memory with `psql`. MCP servers run outside the sandbox as you and could connect, like everything else they can reach. [Tool permissions](reference/ToolPermissions.md#container-limits)
+
+The database holds what was said, which the logs never do. [Logging](reference/Logging.md)
+
+If the database cannot be reached, `alyosha acp` stops with an error instead of running without saving.
+
+## Deferred
+
+- Saving the message queue, so messages sent during a crash are answered after it.
+- Searching or recalling past sessions. [Memory deferred work](Memory.md#deferred)
+- An archive of chat messages as the apps show them, including group messages that do not mention Alyosha.
+- Deleting old sessions. V1 keeps them all.
+- Resuming background jobs, open approvals, or saved full outputs after a restart.
+- Listing or choosing among a key's earlier sessions.
+
+## Implementation
+
+Write each history entry and checkpoint to PostgreSQL as the session driver commits it, and resume a session by its key. Build this at step 10 of the build order, after the bridges work, because it changes how `alyosha acp` and both bridges open sessions. [Agent State](AgentState.md#implementation) · [Architecture overview](README.md)
+
+### Placement and libraries
 
 Put the store in `src/session_store.rs` in the root `alyosha` crate. The bridges never connect to the database: they pass a key to `alyosha acp`. Move the store into its own crate only when a second package needs it.
 
 Use [`tokio-postgres`](https://docs.rs/tokio-postgres) with the `with-serde_json-1` and `with-chrono-0_4` features, which fits the existing tokio runtime. Each process opens one connection when its first session opens and keeps it, because the session lock lives on that connection. `sqlx` was not chosen: its compile-time query checks need a database during the Nix build.
 
-Connect to `host=/run/postgresql dbname=alyosha` as the user in `USER`, which peer authentication maps to the role of the same name. The environment variable `ALYOSHA_DATABASE`, a libpq connection string, replaces this for tests and for development outside the container, as `ALYOSHA_LOG` does for logging. If the connection fails, stop with **Could not reach the session database at /run/postgresql. Check `systemctl status postgresql`.** and the driver's error. `alyosha acp` writes it to standard error and exits. [Before logging starts](../reference/Logging.md#before-logging-starts)
+Connect to `host=/run/postgresql dbname=alyosha` as the user in `USER`, which peer authentication maps to the role of the same name. The environment variable `ALYOSHA_DATABASE`, a libpq connection string, replaces this for tests and for development outside the container, as `ALYOSHA_LOG` does for logging. If the connection fails, stop with **Could not reach the session database at /run/postgresql. Check `systemctl status postgresql`.** and the driver's error. `alyosha acp` writes it to standard error and exits. [Before logging starts](reference/Logging.md#before-logging-starts)
 
-## Schema
+### Schema
 
 Embed the migrations in the binary as numbered SQL files, `migrations/001_sessions.sql` and so on. On connecting, take `pg_advisory_lock(0)`, apply every file newer than `schema_version` in one transaction, then release the lock, so two processes starting together migrate once. A database newer than the binary is an error.
 
@@ -45,13 +109,15 @@ create table checkpoints (
 );
 ```
 
+`002_memory.sql` adds the `memories` and `user_notes` tables. [Memory store](Memory.md#v1-store-contract)
+
 A key's current session is its row with the highest `id`. `entry` is `json` rather than `jsonb` because `jsonb` reorders object keys, and provider replay data goes back to the provider as it came.
 
-## Entries
+### Entries
 
 Derive `serde::Serialize` and `Deserialize` for `HistoryEntry` and the types under it, with `#[serde(tag = "type")]` on the enums. Store each entry as `{"v": 1, ...}`. Reading an entry with an unknown `v` fails the load with an error naming the session, rather than guessing. `Replay.data` is already JSON and is stored as it is.
 
-## The store
+### The store
 
 ```rust
 // Each method returns a BoxFuture, like the other traits in the crate.
@@ -79,7 +145,7 @@ struct StoredSession {
 
 `PgStore` implements it on the connection. `MemoryStore` implements it in memory for the scripted tests, so `cargo test` needs no database. Locking is `pg_try_advisory_lock(id)` on the process's connection. If it returns false, fail with `StoreError::Busy`, which front ends show as **This session is open in another Alyosha process.** Both `append` and `save_checkpoint` also set `sessions.updated_at`.
 
-## Agent State changes
+### Agent State changes
 
 `SessionSetup` takes an optional `Persistence`: the store, the `StoredSession`, and whether it was resumed. The driver keeps the store, the session ID, and `base_seq: u64`. Without it, as in most scripted tests, history lives only in memory. In-memory `history[i]` is the entry with `seq = base_seq + i`. `ContextCheckpoint.first_kept_index` stays an index into the in-memory history. The store holds `first_kept_seq = base_seq + first_kept_index`. Start the session's `MessageId` counter at `next_message_id`, so a resumed session never reuses an ID. [Agent State fields](AgentState.md#session-fields)
 
@@ -87,7 +153,7 @@ struct StoredSession {
 - **Checkpoints.** Where the driver commits a checkpoint, for a turn or `/compact`, call `save_checkpoint` first. On failure keep the previous checkpoint and treat it as a failed compaction. [Manual compaction state](AgentState.md#manual-compaction-state)
 - **Loading.** Set `base_seq` to the checkpoint's `first_kept_seq`, or 0 without one. Fill history from the loaded entries and set the checkpoint's `first_kept_index` to 0.
 
-## After each compaction
+### After each compaction
 
 When a checkpoint commits, also:
 
@@ -96,21 +162,21 @@ When a checkpoint commits, also:
 
 A `read_file` of a removed or unknown `log_path` returns the tool error **<path> is gone. Saved output is removed when older conversation is summarized or Alyosha restarts.**
 
-## Resume
+### Resume
 
 Loading a session runs the normal session startup, with the loaded state in place of empty state. Before the first turn:
 
 1. If the last entry is an `Assistant` entry whose tool calls lack results, append a `ToolResult` for each missing call, in order, through the store: `ToolOutcome::Error("Alyosha restarted before this call finished. It may or may not have run; check before repeating it.")`.
 2. Put a startup warning first: *Resumed after a restart.* If step 1 appended anything, or the last entry is a `User` entry, add *The turn in progress was stopped, and messages sent while Alyosha was down may need resending.*
 
-## ACP
+### ACP
 
 Change `initialize` to `loadSession: true`. [ACP mode](Channels.md#initialization)
 
 - **`session/new`** reads the key from `_meta.alyosha.sessionKey`. Without one, use `acp:<random>`, a session nothing will resume. After ending any open session, `create` a session under the key and use the key as the `sessionId`.
 - **`session/load`** with `sessionId`, `cwd`, and `mcpServers` treats `sessionId` as the key. End any open session first, as `session/new` does. Call `load_current`. With no session, answer the JSON-RPC error `-32002` "Resource not found" and open nothing. Otherwise start it in `cwd` with the normal startup, ignoring `mcpServers`. ACP requires the conversation to be replayed before the response, so send a `user_message_chunk` for each `User` entry's text without its clock line and an `agent_message_chunk` for each assistant text part, in order, then answer with an empty result. `StoreError::Busy` is a JSON-RPC error with that message. [ACP session setup](https://agentclientprotocol.com/protocol/session-setup)
 
-## Bridges
+### Bridges
 
 The shared `alyosha-bridge` crate opens a session in one call, `open_session(workspace, key)`: send `session/load`, and on `-32002` send `session/new` with the key in `_meta`. Drop every `session/update` that arrives before the `session/load` response, so the replay never reaches a chat. `new_session(workspace, key)` is the `/new` command. The guest pool builds a group's key from its client name: `alyosha-telegram` gives `guest:telegram:<chat ID>`. `/new` sends `session/new` with the same key. [Package layout](TelegramBridge.md#package-layout)
 
@@ -120,7 +186,7 @@ The shared `alyosha-bridge` crate opens a session in one call, `open_session(wor
 | Trusted group | `group:telegram:<chat ID>`, `group:qq:<group_openid>` |
 | Guest group | `guest:telegram:<chat ID>`, `guest:qq:<group_openid>` |
 
-## Container
+### Container
 
 `nix/container.nix` adds the database to the container. Pin the major version: moving between majors needs a dump and restore. [Host module](Deployment.md#host-module)
 
@@ -134,14 +200,14 @@ services.postgresql = {
 ```
 
 - **`alyosha-db.service`**, a oneshot that runs as `postgres` after PostgreSQL starts, creates the owner's login role and the `alyosha` database owned by it, each only if missing. NixOS's `ensureDBOwnership` only covers a database named after its user, so it does not fit.
-- **`alyosha-db-backup.service`** runs daily as the owner: `pg_dump alyosha | gzip` into `~/.local/share/alyosha/backups/alyosha-<date>.sql.gz`, written to a temporary name and renamed, keeping 7 days.
+- **`alyosha-db-backup.service`** runs daily as the owner: `pg_dump alyosha | gzip` into `~/alyosha/state/backups/alyosha-<date>.sql.gz`, written to a temporary name and renamed, keeping 7 days.
 - **The bridge services** require and start after `alyosha-db.service`.
 
 NixOS's default `local` rule authenticates by peer, so the owner connects as their own role without a password. The data stays in the container's state under `/var/lib/nixos-containers/alyosha` on the host, which survives restarts and rebuilds. `nixos-container destroy` removes it, and the dumps are the copy that survives that. Restore with `gunzip -c <dump> | psql alyosha` into an empty database.
 
 Bubblewrap must not mount `/run/postgresql`. The launch contract mounts no host service sockets already. [Bubblewrap launch contract](EnvironmentInterface.md#bubblewrap-launch-contract)
 
-## Verification
+### Verification
 
 These run under `cargo test` with `MemoryStore` and the scripted model. [Turn fixture](AgentLoop.md#verification-with-a-scripted-model-and-fake-tools)
 
@@ -167,6 +233,6 @@ In the container:
 - Kill `alyosha acp` under the Telegram bridge during a tool call. Check that the bridge restarts, the next reply starts with the resume line, and a follow-up question about the earlier conversation is answered.
 - Restart the container. Check that both bridges resume their sessions and a guest group keeps its conversation.
 - From `run_command`, run `ls /run/postgresql` and `psql alyosha`. Check that both fail.
-- Run the backup service. Check that a dump appears in `~/.local/share/alyosha/backups/`, owned by you on the host, and restores into an empty database.
+- Run the backup service. Check that a dump appears in `~/alyosha/state/backups/`, owned by you on the host, and restores into an empty database.
 
-[Architecture overview](../README.md)
+[Architecture overview](README.md)

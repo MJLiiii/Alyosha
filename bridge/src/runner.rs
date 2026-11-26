@@ -2,7 +2,7 @@
 //!
 //! Once a minute, just after the minute turns, it takes the lock, reads the
 //! task file, and starts this channel's due tasks as prompts in the bridge's
-//! session. See `docs/develop/Schedule.md#the-runner`.
+//! session. See `docs/Schedule.md#the-runner`.
 
 use std::{collections::HashSet, sync::Arc, time::Duration};
 

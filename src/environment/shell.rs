@@ -5,7 +5,7 @@
 //! loopback, where GPROXY listens. It closes inherited descriptors, so a small
 //! trusted wrapper inside its namespace opens Bubblewrap's status file before
 //! starting `bwrap`. See
-//! `docs/develop/EnvironmentInterface.md#bubblewrap-launch-contract`.
+//! `docs/EnvironmentInterface.md#bubblewrap-launch-contract`.
 
 use std::{
     collections::BTreeMap,

@@ -1,6 +1,6 @@
 # Implement the QQ bridge
 
-`alyosha-qq` relays private (C2C) messages between your QQ account and one `alyosha acp` child process, using QQ's official bot API v2. Build it after the Telegram bridge, reusing the shared bridge crate. [Chat channels design](../design/Channels.md#the-qq-bridge) · [Telegram bridge](TelegramBridge.md) · [ACP mode](Channels.md) · [Architecture overview](../README.md)
+`alyosha-qq` relays private (C2C) messages between your QQ account and one `alyosha acp` child process, using QQ's official bot API v2. Build it after the Telegram bridge, reusing the shared bridge crate. [Chat channels design](Channels.md#the-qq-bridge) · [Telegram bridge](TelegramBridge.md) · [ACP mode](Channels.md#implementation) · [Architecture overview](README.md)
 
 Facts below come from the [QQ bot documentation](https://bot.q.qq.com/wiki) as read in November 2026. The platform changes its limits often, so check the linked pages again when building.
 
@@ -21,13 +21,14 @@ Facts below come from the [QQ bot documentation](https://bot.q.qq.com/wiki) as r
 [qq]
 app_id = "102000000"
 owner_openid = ""                             # fill in from the log, see below
-workspace = "/home/mjli/work/alyosha-qq"      # absolute, not the Telegram bridge's
 reply_chunk = 1500                            # characters per message
 secret = "..."                                # the AppSecret
-trusted_groups = []                           # optional: group_openids with your powers
+
+[qq.trusted_groups]                           # optional: groups with your powers
+friends = "<group_openid>"                    # folder name = group_openid
 ```
 
-Load it with `alyosha-config`, which refuses a file that others can read and checks every value. Refuse to start, with a clear error, if the `[qq]` section is missing. Never log the secret or an access token. [Configuration](../reference/Configuration.md#qq)
+Load it with `alyosha-config`, which refuses a file that others can read and checks every value. Refuse to start, with a clear error, if the `[qq]` section is missing. Never log the secret or an access token. [Configuration](reference/Configuration.md#qq)
 
 QQ identifies you by a `user_openid` specific to this bot, not your QQ number. While `owner_openid` is empty, the bridge starts, answers nobody, and logs the `user_openid` of every message. Send the bot a message, copy your ID from the log, and restart.
 
@@ -54,15 +55,15 @@ Handle only `C2C_MESSAGE_CREATE` dispatches. In each, `d.id` is the message ID, 
 
 Drop a message, logging the sender's `user_openid`, unless it equals `owner_openid`. Send nothing back.
 
-For a message from the owner, trim the text, then act as the Telegram bridge does: `/new`, `/cancel`, `/compact`, `/job`, and `/tasks` behave the same, and other text becomes a `session/prompt`. Send `initialize` with `clientInfo.name` set to `alyosha-qq`, and start the task runner for the `qq` channel. Handle `_alyosha/job_finished` as the Telegram bridge does. Scheduled and job replies have no message to answer and follow their own delivery rules. [Delivering on QQ](Schedule.md#delivering-on-qq) A message with attachments and no text gets the reply **Only text messages work for now.** [Incoming messages](TelegramBridge.md#incoming-messages)
+For a message from the owner, trim the text, then act as the Telegram bridge does: `/new`, `/cancel`, `/compact`, `/job`, and `/tasks` behave the same, and other text becomes a `session/prompt`. Send `initialize` with `clientInfo.name` set to `alyosha-qq`, and start the task runner for the `qq` channel. Handle `_alyosha/job_finished` as the Telegram bridge does. Scheduled and job replies have no message to answer and follow their own delivery rules. [Delivering on QQ](Schedule.md#deliver-on-qq) A message with attachments and no text gets the reply **Only text messages work for now.** [Incoming messages](TelegramBridge.md#incoming-messages)
 
 ## Group chats
 
 Handle `GROUP_AT_MESSAGE_CREATE` dispatches too, which use the intent the bridge already asks for. QQ sends them only for messages that @ the bot and removes the @ from `content`. In each, `d.id` is the message ID, `d.group_openid` the group, `d.author.member_openid` the sender, `d.author.member_nickname` the display name when present, and `d.content` the text. Skip duplicate message IDs as for private messages.
 
-A group where the bot has QQ's "receive all messages" mode on sends every message as `GROUP_MESSAGE_CREATE`, @s included, with the same fields. Treat one as a mention only when `d.mentions` has an entry with `is_you` true, and remove that entry's `<@member_openid>` (and `<@id>`) tokens from `content`, which QQ removes by itself in `GROUP_AT_MESSAGE_CREATE`. Ignore the rest, logging only the group and the number of mentions. If QQ sends both events for one @, the duplicate check on the message ID drops the second. [Group message event, all messages](https://bot.q.qq.com/wiki/develop/api-v2/autogen/event/group_message_create.html) · [Group @ message event](https://bot.q.qq.com/wiki/develop/api-v2/autogen/event/group_at_message_create.html) · [Group chats design](../design/Channels.md#group-chats)
+A group where the bot has QQ's "receive all messages" mode on sends every message as `GROUP_MESSAGE_CREATE`, @s included, with the same fields. Treat one as a mention only when `d.mentions` has an entry with `is_you` true, and remove that entry's `<@member_openid>` (and `<@id>`) tokens from `content`, which QQ removes by itself in `GROUP_AT_MESSAGE_CREATE`. Ignore the rest, logging only the group and the number of mentions. If QQ sends both events for one @, the duplicate check on the message ID drops the second. [Group message event, all messages](https://bot.q.qq.com/wiki/develop/api-v2/autogen/event/group_message_create.html) · [Group @ message event](https://bot.q.qq.com/wiki/develop/api-v2/autogen/event/group_at_message_create.html) · [Group chats design](Channels.md#group-chats)
 
-A mention in a group whose `group_openid` is in `trusted_groups` goes to the group's full session, as in the Telegram bridge: `alyosha acp --group` in `<workspace>/groups/<group_openid>`, with `<nickname>: <text>` as the prompt, approvals sent to the owner's private chat after **In group <group_openid>:**, and finished jobs given to the group's session with the reply sent to the group as a reply to its latest mention, which falls back to an active message once that window has closed. The pool never stops it for being idle. A `/yes`, `/no`, or number from the owner answers the oldest open request, whichever session it came from; `/cancel` cancels only the private session and its requests. [Trusted groups](TelegramBridge.md#trusted-groups)
+A mention in a group whose `group_openid` is in `trusted_groups` goes to the group's full session, as in the Telegram bridge: `alyosha acp --group` in `~/work/groups/<name>`, with `<nickname>: <text>` as the prompt, approvals sent to the owner's private chat after **In group <name>:**, and finished jobs given to the group's session with the reply sent to the group as a reply to its latest mention, which falls back to an active message once that window has closed. The pool never stops it for being idle. A `/yes`, `/no`, or number from the owner answers the oldest open request, whichever session it came from; `/cancel` cancels only the private session and its requests. [Trusted groups](TelegramBridge.md#trusted-groups)
 
 Every other group message goes to the group's guest session from the shared pool, the owner's included, as the Telegram bridge does: `initialize` with `alyosha-qq`, the sender `qq-<member_openid>`, and the nickname, or `QQ user` without one. A message with attachments and no text gets **Only text messages work for now.** [Telegram group chats](TelegramBridge.md#group-chats)
 
@@ -92,7 +93,7 @@ On `session/request_permission`, send the request's `title`, a blank line, the `
 - For two options: **Reply /yes for <first option> or /no for <second option>.**
 - For more: a numbered list of the options, then **Reply with a number.**
 
-Send it as a reply to the prompt's message, by the usual rules, or by the scheduled-reply rules for a scheduled prompt. Splitting counts against the four replies, so cut the body to fit and end it with **(cut off)**. The model formats nothing here: the title and body come from Alyosha. [Sending replies](#sending-replies) · [Delivering on QQ](Schedule.md#delivering-on-qq)
+Send it as a reply to the prompt's message, by the usual rules, or by the scheduled-reply rules for a scheduled prompt. Splitting counts against the four replies, so cut the body to fit and end it with **(cut off)**. The model formats nothing here: the title and body come from Alyosha. [Sending replies](#sending-replies) · [Delivering on QQ](Schedule.md#deliver-on-qq)
 
 While a request is open, an owner message of exactly `/yes`, `/no`, or a valid number answers it with `selected` and the matching `optionId`. The bridge replies **Answered: <option name>** to that message, and later replies for the same prompt use that message's ID, which starts a fresh count of four. Any other message is a normal prompt. `/cancel` sends `session/cancel` first, then answers open requests with `cancelled`, as the Telegram bridge does. A `failed` update for the call means Alyosha stopped waiting. Reply **Expired — not approved.** to the next owner message.
 
@@ -132,4 +133,4 @@ With a real bot, which needs a registered bot, real-name QQ account, and network
 - Whether active messages work for this bot, and their limits.
 - Ask a question in QQ. Check that the reply arrives, and that messages from a second QQ account get nothing.
 
-[Architecture overview](../README.md)
+[Architecture overview](README.md)

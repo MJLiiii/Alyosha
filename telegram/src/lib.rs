@@ -4,7 +4,7 @@
 //! It long-polls the Bot API, so it opens no ports. In private chats it
 //! answers only the owner. In groups it answers anyone who mentions the bot,
 //! through that group's session: a full one in a trusted group, a guest one
-//! elsewhere. See `docs/develop/TelegramBridge.md`.
+//! elsewhere. See `docs/TelegramBridge.md`.
 
 use std::{
     collections::HashMap,

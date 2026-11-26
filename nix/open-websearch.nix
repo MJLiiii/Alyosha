@@ -1,5 +1,5 @@
 # open-webSearch's MCP server, which is not in nixpkgs
-# (docs/develop/WebSearch.md). v2.1.7 or later fixes a server-side request
+# (docs/WebSearch.md#implementation). v2.1.7 or later fixes a server-side request
 # forgery bug in its page reader.
 { buildNpmPackage, fetchFromGitHub }:
 buildNpmPackage rec {

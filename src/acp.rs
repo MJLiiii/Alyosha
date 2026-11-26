@@ -4,7 +4,7 @@
 //! Standard output carries only protocol messages: newline-delimited
 //! JSON-RPC 2.0, protocol version 1. Sessions are saved in the session store
 //! under the key the client names, and `session/load` resumes them. See
-//! `docs/develop/Channels.md` and `docs/develop/SessionStore.md#acp`.
+//! `docs/Channels.md#implementation` and `docs/SessionStore.md#acp`.
 
 use std::{
     collections::{HashMap, VecDeque},
@@ -64,10 +64,10 @@ pub enum Mode {
     /// `alyosha acp`: the owner's session.
     Owner,
     /// `alyosha acp --guest`: an untrusted group chat's guest session.
-    /// See `docs/develop/Channels.md#guest-mode`.
+    /// See `docs/Channels.md#guest-mode`.
     Guest,
     /// `alyosha acp --group`: a trusted group chat's full session.
-    /// See `docs/develop/Channels.md#group-mode`.
+    /// See `docs/Channels.md#group-mode`.
     Group,
 }
 

@@ -1,6 +1,6 @@
 //! Background jobs and `run_command` in a real session with the real sandbox.
 //! They need `bwrap`, `pasta`, and `bash` on `PATH`; without them each check
-//! is skipped. See `docs/develop/Jobs.md#verification`.
+//! is skipped. See `docs/Jobs.md#verification`.
 
 mod support;
 

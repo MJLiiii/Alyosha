@@ -3,7 +3,7 @@
 //! Each message enters history with a clock line in front, such as
 //! `[Wed 2026-11-25 10:02, Europe/Amsterdam]`, giving the time it was submitted
 //! in the owner's timezone. The system instruction stays fixed for the session,
-//! so the time cannot go there. See `docs/design/AgentLoop.md`.
+//! so the time cannot go there. See `docs/AgentLoop.md`.
 
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz;

@@ -4,7 +4,7 @@
 //! Logs are private files outside every workspace and sandbox. Only a direct
 //! `read_file` from the owning session opens them, and the store removes them
 //! when the session ends. See
-//! `docs/develop/EnvironmentInterface.md#session-logs`.
+//! `docs/EnvironmentInterface.md#session-logs`.
 
 use std::{
     fs::{self, DirBuilder, File, OpenOptions},

@@ -3,7 +3,7 @@
 //!
 //! The model writes them freely through the `memory` tool and each write shows
 //! in the status area. The index goes into the system instruction once per
-//! session. See `docs/develop/Memory.md`.
+//! session. See `docs/Memory.md#implementation`.
 
 use std::{
     fs::{self, DirBuilder, File},

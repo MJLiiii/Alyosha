@@ -5,8 +5,8 @@
 //! takes one message through as many model requests and tool batches as it
 //! needs and is the sole writer of conversation history.
 //!
-//! Design: `docs/design/AgentLoop.md`. Implementation guide:
-//! `docs/develop/AgentLoop.md`.
+//! Design: `docs/AgentLoop.md`. Implementation guide:
+//! `docs/AgentLoop.md#implementation`.
 
 use std::sync::{
     Arc, Mutex, MutexGuard, PoisonError, Weak,
@@ -34,7 +34,7 @@ use crate::{
 };
 
 /// The normal system instruction before the session adds to it. See
-/// `docs/design/LLMClientGateway.md#default-instruction-for-normal-requests`.
+/// `docs/LLMClientGateway.md#default-instruction-for-normal-requests`.
 pub const DEFAULT_INSTRUCTION: &str = "You are Alyosha, a personal assistant.";
 
 /// The status a busy session gives `/compact`.
@@ -270,7 +270,7 @@ impl SessionDriver {
         tokio::spawn(consume(session.clone()));
         let weak = Arc::downgrade(&session);
         // A finished job is reported, not queued: the bridge sends its text
-        // back as a prompt (docs/develop/Jobs.md#when-a-job-finishes).
+        // back as a prompt (docs/Jobs.md#when-a-job-finishes).
         tokio::spawn(async move {
             while let Some(finished) = job_inbox.recv().await {
                 let Some(session) = weak.upgrade() else {

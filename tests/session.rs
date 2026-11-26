@@ -1,6 +1,6 @@
 //! Whole sessions started like `alyosha acp` starts them, in a temporary home, with
 //! a scripted model: the file tools, Code Mode, memory, skills, MCP, and
-//! approvals. See the verification sections of `docs/develop/`.
+//! approvals. See the verification sections of the pages in `docs/`.
 
 mod support;
 

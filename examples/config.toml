@@ -1,4 +1,4 @@
-# ~/.config/alyosha/config.toml — copy, fill in, and `chmod 600` it.
+# ~/alyosha/config/config.toml — copy, fill in, and `chmod 600` it.
 # Every setting: docs/reference/Configuration.md. Alyosha never writes this file.
 
 timezone = "Europe/Amsterdam"
@@ -15,26 +15,29 @@ url = "http://127.0.0.1:18787"
 [approvals]
 timeout_minutes = 60
 
-# The Telegram bridge (docs/develop/TelegramBridge.md).
+# The Telegram bridge (docs/TelegramBridge.md).
 # [telegram]
 # owner_id = 123456789
-# workspace = "/home/you/work/alyosha-home"
 # token = "..."
-# trusted_groups = [-1001234567890]   # groups whose members get your full powers
+#
+# Groups whose members get your full powers, each working in ~/work/groups/<name>.
+# [telegram.trusted_groups]
+# family = -1001234567890
 
-# The QQ bridge (docs/develop/QQBridge.md).
+# The QQ bridge (docs/QQBridge.md).
 # [qq]
 # app_id = "102000000"
 # owner_openid = ""
-# workspace = "/home/you/work/alyosha-qq"
 # secret = "..."
-# trusted_groups = ["<group_openid>"]  # groups whose members get your full powers
+#
+# [qq.trusted_groups]
+# friends = "<group_openid>"
 
-# Scheduled tasks (docs/develop/Schedule.md).
+# Scheduled tasks (docs/Schedule.md#implementation).
 [mcp.servers.schedule]
 command = "alyosha-schedule"
 
-# Web search (docs/develop/WebSearch.md).
+# Web search (docs/WebSearch.md#implementation).
 [mcp.servers.search]
 command = "open-websearch"
 tools = ["search"]
@@ -50,12 +53,12 @@ MCP_TOOL_FETCH_CSDN_NAME = "<disabled>"
 MCP_TOOL_FETCH_JUEJIN_NAME = "<disabled>"
 MCP_TOOL_FETCH_LINUXDO_NAME = "<disabled>"
 
-# What guest sessions in group chats may use (docs/design/Channels.md#group-chats).
+# What guest sessions in group chats may use (docs/Channels.md#group-chats).
 # Only servers that reach no account of yours.
 [guest]
 mcp_servers = ["search"]
 
-# The browser (docs/develop/Browser.md). Public pages work with a temporary profile.
+# The browser (docs/Browser.md#implementation). Public pages work with a temporary profile.
 [mcp.servers.chromium]
 command = "playwright-mcp"
 args = [
@@ -68,7 +71,7 @@ tools = [
   "browser_select_option", "browser_wait_for",
 ]
 
-# Email and calendar (docs/develop/EmailCalendar.md). Sign in on the host first.
+# Email and calendar (docs/EmailCalendar.md#implementation). Sign in on the host first.
 # [mcp.servers.google]
 # command = "gog"
 # args = [
@@ -87,7 +90,7 @@ tools = [
 # ask = ["gmail_send_message"]
 #
 # [mcp.servers.google.env]
-# GOG_HOME = "/home/you/.config/alyosha/gog"
+# GOG_HOME = "/home/you/alyosha/state/gog"
 # GOG_KEYRING_BACKEND = "file"
 # GOG_KEYRING_PASSWORD = "..."
 # DBUS_SESSION_BUS_ADDRESS = "disabled:"

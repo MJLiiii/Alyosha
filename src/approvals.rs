@@ -3,7 +3,7 @@
 //!
 //! Tools the configuration marks `ask` wait for the owner before they run.
 //! Alyosha formats the arguments itself, so a misled model cannot describe a
-//! harmful call in harmless words. See `docs/develop/Approvals.md`.
+//! harmful call in harmless words. See `docs/Approvals.md#implementation`.
 
 use std::{sync::Arc, time::Duration};
 

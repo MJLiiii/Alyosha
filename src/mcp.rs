@@ -5,7 +5,7 @@
 //! workspace as their working directory and a cleared environment. This is a
 //! small JSON-RPC 2.0 client of Alyosha's own over newline-delimited stdio: it
 //! needs only the handshake, `tools/list`, `tools/call`, cancellation, and
-//! `ping`. See `docs/develop/MCP.md`.
+//! `ping`. See `docs/MCP.md#implementation`.
 
 use std::{
     collections::{BTreeMap, HashMap, HashSet},

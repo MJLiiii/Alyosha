@@ -6,7 +6,7 @@
 //!
 //! No bridge depends on Alyosha's library; this crate speaks ACP's
 //! newline-delimited JSON-RPC to the child directly. See
-//! `docs/develop/TelegramBridge.md` and `docs/develop/Schedule.md#the-runner`.
+//! `docs/TelegramBridge.md` and `docs/Schedule.md#the-runner`.
 
 pub mod guests;
 pub mod markdown;
@@ -301,7 +301,7 @@ impl Bridge {
     /// Resumes the key's current session with `session/load`, or starts one
     /// with `session/new` if the key has none. The conversation `session/load`
     /// replays is dropped. Returns whether a session was resumed.
-    /// See `docs/develop/SessionStore.md#bridges`.
+    /// See `docs/SessionStore.md#bridges`.
     pub async fn open_session(&self, workspace: &Path, key: &str) -> Result<bool, String> {
         self.lock().loading = true;
         let loaded = self
@@ -330,7 +330,7 @@ impl Bridge {
     }
 
     /// Sends a group member's prompt to a guest session, with its sender in
-    /// `_meta`. See `docs/develop/Channels.md#guest-mode`.
+    /// `_meta`. See `docs/Channels.md#guest-mode`.
     pub fn prompt_from(&self, key: &str, text: &str, sender_id: &str, sender_name: &str) {
         let meta = json!({"alyosha": {"sender": {"id": sender_id, "name": sender_name}}});
         self.send_prompt(key, text, Some(meta));

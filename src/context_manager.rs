@@ -4,7 +4,7 @@
 //!
 //! Agent State keeps the full history. A checkpoint pairs a summary of older
 //! entries with the index where verbatim history resumes. See
-//! `docs/develop/ContextManager.md`.
+//! `docs/ContextManager.md#implementation`.
 
 use tokio_util::sync::CancellationToken;
 

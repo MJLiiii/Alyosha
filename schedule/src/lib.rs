@@ -4,7 +4,7 @@
 //! Every reader and writer takes an exclusive `flock` on `schedule.lock`.
 //! Writers replace the file atomically and refuse to touch a file that does
 //! not parse, so a hand edit with a mistake loses no tasks. See
-//! `docs/develop/Schedule.md`.
+//! `docs/Schedule.md#implementation`.
 
 use std::{
     collections::HashSet,

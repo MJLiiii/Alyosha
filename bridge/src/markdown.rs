@@ -1,8 +1,8 @@
 //! Renders the model's Markdown replies for chat apps: Telegram's HTML
 //! subset, or tidy plain text for apps that show no formatting. Splitting
 //! keeps code blocks whole across parts. See
-//! `docs/develop/TelegramBridge.md#showing-progress-and-replies` and
-//! `docs/develop/QQBridge.md#sending-replies`.
+//! `docs/TelegramBridge.md#showing-progress-and-replies` and
+//! `docs/QQBridge.md#sending-replies`.
 
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 

@@ -2,7 +2,7 @@
 //!
 //! It finds `config.toml` and the task file through `HOME` and the XDG
 //! variables, like every Alyosha program. See
-//! `docs/develop/Schedule.md#the-mcp-server`.
+//! `docs/Schedule.md#the-mcp-server`.
 
 use std::io::{BufRead, Write};
 

@@ -2,7 +2,7 @@
 //!
 //! Each entry pairs the definition the model sees with the handler Alyosha
 //! runs. The catalog is built at startup and stays fixed while turns run.
-//! Interface: `docs/develop/ToolRegistry.md`.
+//! Interface: `docs/ToolRegistry.md#implementation`.
 
 use std::{collections::HashMap, fmt};
 

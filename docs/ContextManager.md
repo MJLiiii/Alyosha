@@ -1,14 +1,44 @@
-# Implement the Context Manager
+# Context Manager
 
-Given a snapshot of session history, the current checkpoint, and request settings, produce the conversation for the next model request. Request settings include system instructions, tool definitions, the pinned route, its model limits, and the reply allowance. The Agent Loop supplies those settings and sends the prepared request. When compaction is needed, the Context Manager calls `generate` for a summary and returns a candidate checkpoint to the session driver. [Architecture overview](../README.md) · [Context Manager design](../design/ContextManager.md) · [LLM Client contract](LLMClientGateway.md#v1-caller-contract)
+The Context Manager decides which parts of the session history to send to the model. It works with the model's limits, the tool definitions for this request, and any saved checkpoint. A checkpoint pairs a summary of older entries with the position where recent history begins. The Context Manager returns a conversation that fits the input budget or reports why it cannot build one. Agent State retains the full recorded history for the session. [Architecture overview](README.md) · [Agent State](AgentState.md)
 
-## V1 state and request contract
+## What the model sees
 
-`AgentState.context_checkpoint` starts as `None`. A `ContextCheckpoint` holds `summary: String` and `first_kept_index: usize`, the index of the first retained entry in the append-only `history`. Only the session driver commits a replacement for active work. The summary is session metadata and adds zero entries to conversation history. [Agent State contract](AgentState.md)
+Before the first compaction, the Agent Loop sends every recorded entry if the request fits. After compaction the request carries a model-written summary of older entries followed by recent entries in their original order. The opening user message of the active turn always appears verbatim, once. A retained assistant message with tool calls travels with all its results so the model can match each result to its call.
+
+For example, a single user request may take five tool batches. If the latest batch fits and the earlier four need summarizing, the next request can carry the summary, the original user message, and the fifth exchange verbatim. A later turn can still find the original exchanges in session history.
+
+## When to compact
+
+| Trigger | What happens |
+| --- | --- |
+| Before the first model request in a turn and after a completed tool batch | Estimate the whole request, including tool definitions. Reserve space for the reply and estimation error. Compact if the request exceeds the usable input budget. |
+| The provider reports a context-window error | The Agent Loop can request forced compaction once in the turn. It retries on the same route only if the new request fits and is smaller than the one the provider rejected. |
+| The user runs `/compact` | An idle session can compact older history before the next task, even below the usual threshold. |
+
+The Context Manager prefers a boundary between user turns. Within a long turn it can cut before an assistant response, keeping recent exchanges intact. The target for recent history is one quarter of the usable input budget, capped at 20,000 tokens. The current user message and latest completed batch take priority over that target.
+
+To summarize, the Context Manager calls the LLM Client on the pinned provider and model with an empty tool list. It gives the model the previous summary and the newly omitted entries. The summary preserves the goal, user corrections and constraints, decisions, observed outcomes, open work, and references such as paths and errors. The session driver commits a checkpoint only after a complete summary and a successful budget check. Stop or a failed summary leaves the previous checkpoint available. [LLM Client / Gateway](LLMClientGateway.md) · [Agent Loop](AgentLoop.md)
+
+## Large tool results
+
+Tool output is bounded when it enters history. The Context Manager sets the text budget, up to 8 KiB per result and 16 KiB per batch. The loop records each call ID, outcome, and continuation reference even if space for text runs out. A partial file read carries the next byte offset. For shortened command output or a shortened MCP result, the Environment Interface can keep the full text in a session file accessible through a bounded read. [MCP Client](MCP.md#one-call) If the required entries still cannot fit, the Context Manager reports a context-window error. [Built-in tools](reference/BuiltInTools.md) · [Environment Interface](EnvironmentInterface.md)
+
+## `/compact` command
+
+Run bare `/compact` between turns with an empty message queue. A busy session asks you to try again when idle. During automatic or manual summarization the status area shows **Compacting context…**. Stop cancels active work. Messages that arrive meanwhile wait in order. A manual command reports its result in the status area, including **No older context to compact** if everything is already recent. The next turn uses the latest committed checkpoint. [Implementation and verification](#implementation)
+
+## Implementation
+
+Given a snapshot of session history, the current checkpoint, and request settings, produce the conversation for the next model request. Request settings include system instructions, tool definitions, the pinned route, its model limits, and the reply allowance. The Agent Loop supplies those settings and sends the prepared request. When compaction is needed, the Context Manager calls `generate` for a summary and returns a candidate checkpoint to the session driver. [Architecture overview](README.md) · [LLM Client contract](LLMClientGateway.md#v1-caller-contract)
+
+### V1 state and request contract
+
+`AgentState.context_checkpoint` starts as `None`. A `ContextCheckpoint` holds `summary: String` and `first_kept_index: usize`, the index of the first retained entry in the append-only `history`. Only the session driver commits a replacement for active work. The summary is session metadata and adds zero entries to conversation history. [Agent State contract](AgentState.md#implementation)
 
 With no checkpoint, select the full history. Otherwise supply the summary separately as conversation data and select `history[first_kept_index..]`. If the active turn's opening `User` entry precedes the slice, insert the original entry ahead of the slice. Send it once in its user role. Preserve the order, call IDs, and provider replay fields of retained entries. The LLM Client encodes the summary separately from system instructions.
 
-## V1 token budgets
+### V1 token budgets
 
 Use one text estimator across native routes. Round up model-visible UTF-8 bytes divided by three and include native message framing. Count system instructions, summary, user and assistant content, tool schemas, call arguments and results, and replay fields that use context. Calibrate the estimate against provider-reported input usage.
 
@@ -22,13 +52,13 @@ Use one text estimator across native routes. Round up model-visible UTF-8 bytes 
 
 Route limits come from the model ID's family until GPROXY or the configuration supplies them: `gpt-` 400,000 tokens with a 128,000 reply reservation, `claude-` 200,000 with 32,000, `gemini-` 1,048,576 with 65,536, `deepseek-` 128,000 with 8,192, and anything else 128,000 with 16,000. They live in `RouteLimits::for_model`.
 
-## V1 tool result limits
+### V1 tool result limits
 
 Apply these limits as the Agent Loop records each top-level `ToolResult`. The text allowance is at most 8 KiB per result and 16 KiB across the batch. Reduce the allowance if less room remains after accounting for the active user message, request overhead, and the batch's required call and result metadata. Count UTF-8 bytes and cut on character boundaries. Keep the call ID, outcome, and any continuation reference even when the text allowance is zero. A retained recent batch uses these recorded results verbatim. [Agent Loop tool contract](AgentLoop.md#v1-tool-contract)
 
-For a shortened file read, compute the next offset from the bytes actually recorded. For command output and MCP results, the host keeps the full text in a private session file when the preview omits text, returns a reference readable in bounded chunks, and cleans up on session exit. If saving fails, preserve the tool's actual outcome and record that the omitted output is unavailable. [Built-in tool contracts](../reference/BuiltInTools.md) · [Environment Interface](EnvironmentInterface.md)
+For a shortened file read, compute the next offset from the bytes actually recorded. For command output and MCP results, the host keeps the full text in a private session file when the preview omits text, returns a reference readable in bounded chunks, and cleans up on session exit. If saving fails, preserve the tool's actual outcome and record that the omitted output is unavailable. [Built-in tool contracts](reference/BuiltInTools.md) · [Environment Interface](EnvironmentInterface.md#implementation)
 
-## Prepare the next model request
+### Prepare the next model request
 
 1. After the opening `User` entry or a complete tool batch has been recorded, build the conversation and estimate the full request, including the registry's definitions. If it fits, return it.
 2. Otherwise reserve space for a summary. Walk backward to keep a recent slice within the remaining budget and the recent-history target. Prefer a cut at a `User` entry. Within a long turn a cut immediately before an `Assistant` entry is also valid. A tool-calling assistant entry and all its results form one unit. Keep the active user message and latest completed batch, even if they exceed the recent-history target. If required entries exceed the input budget or no valid cut advances the boundary, return a context-window error.
@@ -37,7 +67,7 @@ For a shortened file read, compute the next offset from the bytes actually recor
 
 Each preparation makes at most one summary request. During a turn, keep the phase at `Generating` while waiting for it. Expose **Compacting context…** only while processing a summary request, including a recovery or manual summary. Clear that status on every exit. On cancellation end the active turn as `Stopped`. Other preparation failures use the normal turn failure path. [State transitions](AgentState.md#state-transitions)
 
-### Summary prompt
+#### Summary prompt
 
 Request one concise Markdown handoff with five sections.
 
@@ -49,13 +79,13 @@ Request one concise Markdown handoff with five sections.
 
 On later compactions, carry forward facts that still apply and use newly omitted entries to update them. Apply explicit user corrections when they supersede an earlier requirement.
 
-## Recover from provider context overflow
+### Recover from provider context overflow
 
 The loop owns the retry count. An explicit provider context-window error on a normal model request qualifies for one recovery attempt per user turn. Set the flag in `run_turn` before recovery. Local budget failures, summary errors, and output truncation follow their normal error paths. [LLM Client errors](LLMClientGateway.md#v1-caller-contract)
 
 Force compaction even if the rejected request passed the local estimate. Use the same safe cuts and summary rules over committed history. Return a candidate for commit and retry only if its boundary advances and the rebuilt request fits *and* is smaller than the rejected request. If no candidate qualifies, return the context-window error. The loop resends the prepared conversation with the same provider, model, definitions, and cancellation token. Existing tool results stay in history. If the retry fails, report the failure. A valid checkpoint committed before a failed retry remains available.
 
-## `/compact` command
+### Run `/compact`
 
 The session driver accepts bare `/compact` only when idle with an empty queue, reserves the work slot atomically, pins the route, and creates a fresh cancellation token. New user messages wait in the usual FIFO queue. [Session driver](AgentLoop.md#session-driver) · [Manual compaction state](AgentState.md#manual-compaction-state)
 
@@ -63,7 +93,7 @@ Use the normal compaction algorithm with the threshold check disabled. If the bo
 
 The driver checks for Stop before committing. On cancellation keep the previous checkpoint and report **Compaction stopped**. Release the work slot on every exit. Return the command status outside history and turn outcomes. An accepted command makes at most one summary request.
 
-## Verify the contracts
+### Verify the contracts
 
 For a local budget fixture, give a synthetic route a 20,000-token context window, a 4,000-token default reply allowance, and a 12,000-token input ceiling. The ordinary input budget is 10,000 tokens after the 2,000-token margin, and its recent-history target is 2,500. Inject a scripted `generate` so the test can inspect the summary request and supply a fixed reply. [Model client contract](LLMClientGateway.md#v1-caller-contract)
 

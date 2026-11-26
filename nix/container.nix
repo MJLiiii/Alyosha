@@ -3,7 +3,7 @@
 # default) and Alyosha's own folders, and the host's localhost services are
 # unreachable. On the host, `alyosha` runs the container's alyosha for the
 # gateway commands.
-# See docs/design/Deployment.md and docs/develop/Deployment.md.
+# See docs/Deployment.md and docs/Deployment.md#implementation.
 #
 # In the host configuration:
 #
@@ -43,7 +43,7 @@ let
     '';
   };
   # The session database's major version. Moving to another needs a dump
-  # and restore (docs/develop/SessionStore.md#container).
+  # and restore (docs/SessionStore.md#container).
   postgresql = pkgs.postgresql_17;
   bridge = name: {
     wantedBy = [ "multi-user.target" ];
@@ -163,7 +163,7 @@ in
           ++ cfg.extraPackages;
 
           # GPROXY, always on; skipped until `alyosha gateway init` wrote its
-          # secrets (docs/develop/LLMClientGateway.md).
+          # secrets (docs/LLMClientGateway.md#implementation).
           systemd.services.gproxy =
             let
               data = "${home}/.local/share/alyosha/gproxy";
@@ -187,7 +187,7 @@ in
             };
 
           # The session database: a Unix socket only, and the owner's role
-          # by peer authentication (docs/develop/SessionStore.md#container).
+          # by peer authentication (docs/SessionStore.md#container).
           services.postgresql = {
             enable = true;
             package = postgresql;

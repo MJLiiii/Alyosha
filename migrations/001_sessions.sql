@@ -1,4 +1,4 @@
--- Durable sessions: docs/develop/SessionStore.md#schema
+-- Durable sessions: docs/SessionStore.md#schema
 create table sessions (
     id          bigserial primary key,
     key         text not null,

@@ -4,7 +4,7 @@
 //! Only guest sessions open this store. Each message reaches the model with
 //! its sender's notes in front of it, and the `user_memory` tool rewrites the
 //! notes of the person whose message the turn answers, never anyone else's.
-//! See `docs/develop/Memory.md#peoples-notes`.
+//! See `docs/Memory.md#peoples-notes`.
 
 use std::path::Path;
 

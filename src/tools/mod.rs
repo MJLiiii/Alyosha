@@ -1,7 +1,7 @@
 //! Tools: the types shared by the Tool Registry, the Tool Executor, and the
 //! tool handlers.
 //!
-//! Designs: `docs/design/ToolRegistry.md` and `docs/design/ToolExecutor.md`.
+//! Designs: `docs/ToolRegistry.md` and `docs/ToolExecutor.md`.
 //! Built-in tool contracts: `docs/reference/BuiltInTools.md`.
 
 pub mod builtin;

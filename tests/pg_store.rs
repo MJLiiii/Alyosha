@@ -1,7 +1,7 @@
 //! `PgStore` against a throwaway PostgreSQL cluster, started with `initdb`
 //! and `pg_ctl` in a temporary folder. Without them on `PATH`, the test
 //! prints a skip notice and passes. See
-//! `docs/develop/SessionStore.md#verification`.
+//! `docs/SessionStore.md#verification`.
 
 use std::{
     path::{Path, PathBuf},

@@ -1,8 +1,73 @@
-# Implement background jobs
+# Background jobs
 
-Add a per-session `JobManager`, a `background` input on `run_command`, the `job` tool, and a way for a finished job to start a turn through the bridge. Build the job manager with the shell at step 3 and the ACP side with the bridges at step 7. [Background jobs design](../design/Jobs.md) · [Architecture overview](../README.md)
+A background job is a shell command that keeps running while the conversation goes on: a full test suite, a long build, or a data job that takes hours. When it ends, Alyosha starts a turn by itself, so the model can look at the result and carry on without you. [Environment Interface](EnvironmentInterface.md) · [Built-in tool contracts](reference/BuiltInTools.md) · [Architecture overview](README.md)
 
-## Job manager
+An ordinary `run_command` call is limited to 30 minutes and holds the turn until it ends, so your other messages wait. A job returns at once and frees the session.
+
+## Starting a job
+
+You ask in your own words, and the model decides to use a job:
+
+```text
+› run the whole test suite in the background and fix what fails when it's done
+  · Job j1 started: cargo test --workspace
+Started the test suite as job j1. I'll look at the results when it finishes.
+
+  (an hour later)
+  · Job j1 finished: status 101 after 58m
+› [Job j1 finished: status 101 after 58m · cargo test --workspace]
+Two tests failed in parser.rs. …
+```
+
+The model calls `run_command` with `background: true`. The command runs in its own Bubblewrap sandbox under the same rules as any command: the workspace, the project's dev shell, the network, and the shell cache. The call returns a job ID such as `j1` straight away, and the turn goes on or ends as usual. [Shell commands](EnvironmentInterface.md#shell-commands)
+
+You can also start a job yourself, without the model, by sending `/job` and the command in a chat:
+
+```text
+› /job cargo test --workspace
+  · Job j1 started: cargo test --workspace
+```
+
+`/job` works even while a turn is running, because it does not wait for the session. It adds nothing to the conversation, so the model first hears of the job when it finishes. Its message then says you started it, and the model reports the result to you.
+
+## Watching and stopping
+
+The model uses the `job` tool to list jobs, check one's status and latest output, or stop it. It can read a job's full output with `read_file` through the job's `log_path`.
+
+Stop and `/cancel` end the current turn, not jobs. To end a job, ask the model, for example "stop the test run," or end the session.
+
+## When a job ends
+
+When a job's command exits or reaches its time limit, Alyosha tells the bridge, and the bridge sends a message back as a prompt, so it joins the session's queue like one of yours. ACP lets only the bridge start a turn. [Chat channels](Channels.md#what-alyosha-acp-does) The message names the job, its status, its run time, and its command, followed by the last lines of output. When its turn comes, the model sees it and decides what to do next. A job you or the model stopped sends no message.
+
+- **Telegram and QQ.** The chat shows **⚙ Job finished:**, then the reply, as for a scheduled task. In QQ the reply follows the delivery rules for scheduled results, because it answers no message of yours. [Delivering on QQ](Schedule.md#delivering-on-qq)
+
+## Limits
+
+- **Two jobs at once** per session. Starting a third returns a tool error.
+- **Four hours by default**, set per job up to 24 hours. A job that reaches its limit is killed and reported as timed out.
+- **Output** goes to the session logs and counts against their 64 MiB budget. Once the budget is used up, Alyosha keeps only the last 64 KiB of that job's output. [Large tool results](ContextManager.md#large-tool-results)
+
+## Lifetime
+
+Jobs belong to the process running their session and end with it. `/new` in a chat and a bridge restart or crash all kill the session's jobs. A resumed session does not bring them back. [Durable sessions](SessionStore.md#what-is-saved)
+
+## Trust
+
+A job runs in the same sandbox as any command, so it reaches nothing a command cannot. Its turn meets approvals like any other. The "job finished" line comes from Alyosha, but the output lines after it come from the command and are untrusted text, like a web page.
+
+## Deferred
+
+- Listing or stopping jobs from a chat without the model, such as `/jobs`.
+- Choosing a job's time limit with `/job`. It always uses the four-hour default.
+- Jobs that outlive their session.
+- More than two jobs at once, or limits set in the configuration.
+
+## Implementation
+
+Add a per-session `JobManager`, a `background` input on `run_command`, the `job` tool, and a way for a finished job to start a turn through the bridge. Build the job manager with the shell at step 3 and the ACP side with the bridges at step 7. [Architecture overview](README.md)
+
+### Job manager
 
 ```text
 JobManager                      # one per session, carried in ToolContext
@@ -28,16 +93,16 @@ JobInfo {
 
 Stream the job's output to a file in the session log store from the start, and issue its `log_path` at once. Reserve log budget before each write, as for a command capture. When a reservation fails, stop writing to the file, keep the last 64 KiB in memory, and set `output_dropped`. `read_file` on the `log_path` then returns the saved start of the output, and `status` returns the latest tail. [Session logs](EnvironmentInterface.md#session-logs)
 
-## `run_command` with `background`
+### `run_command` with `background`
 
 | Input | Without `background` | With `background: true` |
 | --- | --- | --- |
 | `timeout_seconds` | 1 to 1800, default 120 | 1 to 86400, default 14400 |
 | Result | `status`, `output`, `log_path?` when the command ends | `job_id`, `log_path`, and `status: "Started"` at once |
 
-The schema allows `timeout_seconds` up to 86400. The handler returns a tool error for a value above 1800 without `background`. Emit the notice **Job j1 started: <command>** on start, cutting the command to 80 characters. [Built-in tool contracts](../reference/BuiltInTools.md#run_command)
+The schema allows `timeout_seconds` up to 86400. The handler returns a tool error for a value above 1800 without `background`. Emit the notice **Job j1 started: <command>** on start, cutting the command to 80 characters. [Built-in tool contracts](reference/BuiltInTools.md#run_command)
 
-## `job` tool
+### `job` tool
 
 | `command` | Other inputs | Successful output |
 | --- | --- | --- |
@@ -45,9 +110,9 @@ The schema allows `timeout_seconds` up to 86400. The handler returns a tool erro
 | `status` | `id` | Every `JobInfo` field, with the tail last |
 | `stop` | `id` | The final `JobInfo`. Stopping a finished job returns its info unchanged. |
 
-An unknown ID returns a tool error. The tool is available to direct model calls only, and the Code Mode host never exposes it. [Tool permissions](../reference/ToolPermissions.md)
+An unknown ID returns a tool error. The tool is available to direct model calls only, and the Code Mode host never exposes it. [Tool permissions](reference/ToolPermissions.md)
 
-## `/job` command
+### `/job` command
 
 The front ends recognize a message that starts with `/job` followed by a space and a nonempty command. The rest of the trimmed message, line breaks included, is the command. A bare `/job` shows its usage: `/job <command>` starts a background job.
 
@@ -56,7 +121,7 @@ The session driver handles it at once, without the work slot or the queue, so it
 - **ACP mode.** A prompt whose text starts with `/job ` runs the command and answers with the status as an `agent_message_chunk` and `end_turn`, without queuing. List `job` in `available_commands_update`, described as "Run a shell command as a background job", with the input hint `command`. [Prompts](Channels.md#prompts)
 - **Bridges.** Telegram and QQ pass `/job …` through as prompt text, like `/compact`. Telegram adds `job` to its command menu.
 
-## When a job finishes
+### When a job finishes
 
 When a job ends by exiting or by its deadline, the manager sends `JobFinished { id, text }` to the session driver. A job ended by `stop` or `shutdown` sends nothing. The text is:
 
@@ -69,10 +134,10 @@ Last output:
 Use `TimedOut` in place of the status for a job that reached its deadline, and add `Earlier output was dropped.` when `output_dropped` is set. For a job the owner started with `/job`, the first line ends with ` · started by the owner with /job`.
 
 - **Session driver.** The driver never queues it. It emits `SessionEvent::JobFinished { job_id, text }`, and nothing joins the queue until the bridge sends the text back.
-- **ACP mode.** `alyosha acp` sends the extension notification `_alyosha/job_finished` with `sessionId`, `jobId`, and `text`. ACP reserves method names beginning with `_` for extensions, and a client that does not know one ignores it. [ACP extensibility](https://agentclientprotocol.com/protocol/extensibility) · [ACP mode](Channels.md)
-- **Bridges.** `alyosha-bridge` turns the notification into an event. The bridge shows **⚙ Job finished:** in the chat, then sends the text as a `session/prompt`, like a scheduled task. QQ sends the reply under its scheduled-reply rules. [The runner](Schedule.md#the-runner) · [Delivering on QQ](Schedule.md#delivering-on-qq)
+- **ACP mode.** `alyosha acp` sends the extension notification `_alyosha/job_finished` with `sessionId`, `jobId`, and `text`. ACP reserves method names beginning with `_` for extensions, and a client that does not know one ignores it. [ACP extensibility](https://agentclientprotocol.com/protocol/extensibility) · [ACP mode](Channels.md#implementation)
+- **Bridges.** `alyosha-bridge` turns the notification into an event. The bridge shows **⚙ Job finished:** in the chat, then sends the text as a `session/prompt`, like a scheduled task. QQ sends the reply under its scheduled-reply rules. [The runner](Schedule.md#the-runner) · [Delivering on QQ](Schedule.md#deliver-on-qq)
 
-## Verification
+### Verification
 
 These run under `cargo test` with the scripted model, except those that start a real sandbox, which run with the shell integration checks on NixOS. [Verify on the host](EnvironmentInterface.md#verify-on-the-host)
 
@@ -87,4 +152,4 @@ These run under `cargo test` with the scripted model, except those that start a 
 - Type `/job sleep 1; echo hi` during a scripted turn. Check that the job starts at once, that nothing enters history or the queue until it finishes, and that the finished message says the owner started it. Type a bare `/job`. Check for the usage text and no job.
 - In ACP mode, send `/job true` as a prompt. Check for the started status and `end_turn` without a turn, and that `available_commands_update` lists `job`.
 
-[Architecture overview](../README.md)
+[Architecture overview](README.md)

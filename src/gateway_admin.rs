@@ -2,7 +2,7 @@
 //! the provider through its admin API.
 //!
 //! Sessions never sign in. These two commands are the only code that uses the
-//! admin key. See `docs/develop/LLMClientGateway.md#run-gproxy-as-a-service`.
+//! admin key. See `docs/LLMClientGateway.md#run-gproxy-as-a-service`.
 
 use std::{
     fs::{self, DirBuilder, OpenOptions},

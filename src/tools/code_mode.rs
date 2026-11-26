@@ -3,7 +3,7 @@
 //!
 //! Each read goes through shared dispatch with the Code Mode scope, which
 //! permits regular workspace files only. Stop interrupts the script even
-//! while it computes. See `docs/develop/ToolExecutor.md#read-only-code-mode`.
+//! while it computes. See `docs/ToolExecutor.md#run-read-only-code-mode`.
 
 use std::sync::{
     Arc,

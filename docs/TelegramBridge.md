@@ -1,6 +1,6 @@
 # Implement the Telegram bridge
 
-`alyosha-telegram` relays one Telegram private chat to one `alyosha acp` child process. Build it after the ACP mode passes its checks. [Chat channels design](../design/Channels.md#the-telegram-bridge) · [ACP mode](Channels.md) · [Architecture overview](../README.md)
+`alyosha-telegram` relays one Telegram private chat to one `alyosha acp` child process. Build it after the ACP mode passes its checks. [Chat channels design](Channels.md#the-telegram-bridge) · [ACP mode](Channels.md#implementation) · [Architecture overview](README.md)
 
 ## Package layout
 
@@ -12,8 +12,8 @@ Turn the repository root into a Cargo workspace with these packages:
 | `bridge/` | `alyosha-bridge` | A library shared by the bridges: starting `alyosha acp`, `initialize`, opening a session by key with `session/load` or `session/new`, sending prompts, attributing updates to the oldest open prompt, collecting each prompt's tool calls, text, and outcome, and the pool of guest sessions for group chats |
 | `telegram/` | `alyosha-telegram` | The Telegram side |
 | `qq/` | `alyosha-qq` | The QQ side. [QQ bridge](QQBridge.md) |
-| `config/` | `alyosha-config` | The configuration schema and loader, used by every program. [Configuration](Configuration.md) |
-| `schedule/` | `alyosha-schedule` | The scheduled-task file, used by the bridges' task runner, and the schedule MCP server. [Scheduled tasks](Schedule.md) |
+| `config/` | `alyosha-config` | The configuration schema and loader, used by every program. [Configuration](reference/Configuration.md#implementation) |
+| `schedule/` | `alyosha-schedule` | The scheduled-task file, used by the bridges' task runner, and the schedule MCP server. [Scheduled tasks](Schedule.md#implementation) |
 
 No bridge depends on Alyosha's library. `alyosha-bridge` depends on the same pinned `agent-client-protocol` version as Alyosha, in its client role. `alyosha-telegram` calls the Bot API directly with `reqwest`: it needs only `getUpdates`, `sendMessage`, `editMessageText`, `answerCallbackQuery`, `sendChatAction`, and `setMyCommands`, and handles `429` and network retries itself. `ALYOSHA_TELEGRAM_API` points it at a fake server in tests. [`teloxide`](https://docs.rs/teloxide) was the first choice and adds nothing these calls need. The flake builds every binary into the `alyosha` package. Build the Telegram bridge first and move its ACP side into `alyosha-bridge` when starting the QQ bridge.
 
@@ -22,20 +22,21 @@ No bridge depends on Alyosha's library. `alyosha-bridge` depends on the same pin
 ```toml
 [telegram]
 owner_id = 123456789                            # your numeric Telegram user ID
-workspace = "/home/mjli/work/alyosha-home"      # absolute
 token = "..."                                   # from @BotFather
-trusted_groups = [-1001234567890]              # optional: groups with your powers
+
+[telegram.trusted_groups]                       # optional: groups with your powers
+family = -1001234567890                         # folder name = chat ID
 ```
 
-Load it with `alyosha-config`, which refuses a file that others can read and checks every value. Refuse to start, with a clear error, if the `[telegram]` section is missing. Never log the token. [Configuration](../reference/Configuration.md#telegram)
+Load it with `alyosha-config`, which refuses a file that others can read and checks every value. Refuse to start, with a clear error, if the `[telegram]` section is missing. Never log the token. [Configuration](reference/Configuration.md#telegram)
 
 Create the bot with Telegram's @BotFather, which issues the token. Get your user ID from the bridge's own log: it logs the sender ID of every message it drops.
 
 ## Startup
 
 1. Read the configuration and token.
-2. Start `alyosha acp` from `PATH` with piped standard input and output. Send its standard error to the bridge's own standard error, which the journal keeps, for failures before its log file opens. Both programs write their own log files. [Logging](../reference/Logging.md)
-3. Send `initialize` with protocol version `1`, `clientInfo.name` set to `alyosha-telegram`, and no client capabilities, then open the session `owner:telegram` in the configured workspace with an empty `mcpServers` list: `session/load`, or `session/new` if there is none. [Durable sessions: bridges](SessionStore.md#bridges)
+2. Start `alyosha acp` from `PATH` with piped standard input and output. Send its standard error to the bridge's own standard error, which the journal keeps, for failures before its log file opens. Both programs write their own log files. [Logging](reference/Logging.md)
+3. Send `initialize` with protocol version `1`, `clientInfo.name` set to `alyosha-telegram`, and no client capabilities, then open the session `owner:telegram` in `~/work/owner`, creating it if missing, with an empty `mcpServers` list: `session/load`, or `session/new` if there is none. [Durable sessions: bridges](SessionStore.md#bridges)
 4. Call `getMe` and keep the bot's user ID and username, which group mentions name. Network errors are retried as for every call; if Telegram refuses it, as for a wrong token, exit with an error.
 5. Call `setMyCommands` with `new`, `cancel`, `compact`, `job`, and `tasks`, each with a one-line description.
 6. Start long polling with `getUpdates`, asking only for `message` and `callback_query` updates.
@@ -53,7 +54,7 @@ For a message from the owner:
 | Message | Action |
 | --- | --- |
 | `/start` | Reply with a short help text listing the commands. |
-| `/new` | Send `session/new` with the configured workspace and the key `owner:telegram`. Reply **New session started.** once it returns, which can take minutes while a project's dev shell builds. [Sessions](Channels.md#sessions) |
+| `/new` | Send `session/new` in `~/work/owner` with the key `owner:telegram`. Reply **New session started.** once it returns, which can take minutes while a project's dev shell builds. [Sessions](Channels.md#sessions) |
 | `/cancel` | Send `session/cancel` for the current session. |
 | `/compact`, `/job …` | Send it as the text of a `session/prompt`. [`/job` command](Jobs.md#job-command) |
 | `/tasks` | List scheduled tasks from the file, without the model. [`/tasks`](Schedule.md#tasks) |
@@ -83,7 +84,7 @@ The **Working…** message, approvals, and the bridge's own notices stay plain t
 
 ## Approvals and questions
 
-On `session/request_permission`, send a message with the request's `title`, a blank line, and the `content` text, split like a reply. Attach an inline keyboard to the last part with one button per option, in order, each on its own row, with the option's `name` as its label and its `optionId` as callback data prefixed by a short request number, such as `r7:0`. [Approvals design](../design/Approvals.md) · [The ACP mode](Approvals.md#the-acp-mode)
+On `session/request_permission`, send a message with the request's `title`, a blank line, and the `content` text, split like a reply. Attach an inline keyboard to the last part with one button per option, in order, each on its own row, with the option's `name` as its label and its `optionId` as callback data prefixed by a short request number, such as `r7:0`. [Approvals design](Approvals.md) · [The ACP mode](Approvals.md#the-acp-mode)
 
 - **A button press from the owner** answers the request with `selected` and that `optionId`. Call `answerCallbackQuery`, then edit the message to remove the keyboard and add **Answered: <option name>**.
 - **A button press from anyone else**, or on a request already answered or expired, gets only `answerCallbackQuery` with no change.
@@ -95,13 +96,13 @@ If the message cannot be sent after retries, answer the request with `cancelled`
 
 ## Group chats
 
-Keep the bot's privacy mode on, as @BotFather sets it, so Telegram passes the bot only group messages that mention it, reply to it, or are commands. Leave **Allow groups** on. [Group chats design](../design/Channels.md#group-chats)
+Keep the bot's privacy mode on, as @BotFather sets it, so Telegram passes the bot only group messages that mention it, reply to it, or are commands. Leave **Allow groups** on. [Group chats design](Channels.md#group-chats)
 
 A group message is a **mention** when its `entities` hold a `mention` whose text is `@` and the bot's username, ignoring case, or a `text_mention` of the bot's user ID, or when it replies to a message from the bot. Drop every other group message without a log line, including commands, which privacy mode also passes. Remove the mention text and trim. If the message replies to someone else's message that has text, put `(Replying to <name>: "<first 500 characters>")` and a line break in front.
 
 For a mention in a group whose chat ID is in `trusted_groups`, see [Trusted groups](#trusted-groups). For any other mention:
 
-1. Take the group's guest session from the pool, starting `alyosha acp --guest` for it if none runs: `initialize` with `alyosha-telegram`, then open the session `guest:telegram:<chat ID>` with the configured workspace, which guest mode ignores.
+1. Take the group's guest session from the pool, starting `alyosha acp --guest` for it if none runs: `initialize` with `alyosha-telegram`, then open the session `guest:telegram:<chat ID>` with `~/work/guest` as `cwd`, which guest mode ignores.
 2. Send the text as a prompt with the sender `telegram-<from.id>` and the display name, the first and last name, or the username if there is none. A mention with no text and a photo, file, or voice message gets **Only text messages work for now.** and no prompt.
 3. While the group's prompt is open, send `typing` to the group every 5 seconds.
 4. When the response arrives, send the reply to the group rendered and split like a private reply, with `reply_parameters` naming the mention and `allow_sending_without_reply`. A failed send is logged and dropped. Guest sessions send no tool calls worth showing, so there is no **Working…** message.
@@ -110,11 +111,11 @@ The pool keeps one guest child per group ID. Stop a child, closing its input as 
 
 ### Trusted groups
 
-For a mention in a trusted group: [Trusted groups design](../design/Channels.md#trusted-groups)
+For a mention in a trusted group: [Trusted groups design](Channels.md#trusted-groups)
 
-1. Take the group's session from the pool, starting `alyosha acp --group` for it if none runs: create `<workspace>/groups/<chat ID>` if missing, `initialize` with `alyosha-telegram`, then open the session `group:telegram:<chat ID>` in that folder.
+1. Take the group's session from the pool, starting `alyosha acp --group` for it if none runs: create `~/work/groups/<name>` if missing, where `<name>` is the group's entry in `trusted_groups`, `initialize` with `alyosha-telegram`, then open the session `group:telegram:<chat ID>` in that folder.
 2. Send `<display name>: <text>` as a plain prompt, without `_meta`. Typing and the reply work as for a guest group.
-3. **Approvals.** Send the request to the owner's private chat as usual, with **In group <chat ID>:** and a blank line in front of the title. Give it a request number of its own, so a button press answers the right child. `/cancel` in the private chat cancels only the private session and its requests; a group's requests stay open until answered or expired.
+3. **Approvals.** Send the request to the owner's private chat as usual, with **In group <name>:** and a blank line in front of the title. Give it a request number of its own, so a button press answers the right child. `/cancel` in the private chat cancels only the private session and its requests; a group's requests stay open until answered or expired.
 4. **Jobs.** On a finished job, send **⚙ Job finished:** to the group, prompt the group's session with the result, and send its reply to the group without `reply_parameters`.
 5. The pool never stops a trusted group's child for being idle. If it exits, log it and remove it; the next mention starts a new one.
 
@@ -144,7 +145,7 @@ systemd.services.alyosha-telegram = {
 };
 ```
 
-systemd sets `HOME` for `User=`, so Alyosha finds its folders as in a shell. Follow the bridge's startup and crashes with `journalctl -M alyosha -u alyosha-telegram -f` on the host, and its log files in `~/.local/share/alyosha/logs/`. [Logging](../reference/Logging.md)
+systemd sets `HOME` for `User=`, so Alyosha finds its folders as in a shell. Follow the bridge's startup and crashes with `journalctl -M alyosha -u alyosha-telegram -f` on the host, and its log files in `~/alyosha/state/logs/`. [Logging](reference/Logging.md)
 
 The bridge's `alyosha acp` uses the same GPROXY service as the QQ bridge's, so both can run at once. [Run GPROXY as a service](LLMClientGateway.md#run-gproxy-as-a-service)
 
@@ -156,7 +157,7 @@ These run under `cargo test` with a fake Bot API server, set through `teloxide`'
 - Send a private message from another user. Check that the agent receives nothing, nothing is sent back, and the sender ID is logged.
 - In a group, send a message without a mention, then one from a stranger that mentions the bot, then one that replies to the bot's message. Check that the first is dropped, that a second, guest agent receives the other two as prompts with the mention removed and `telegram-<id>` senders, that the owner's agent receives nothing, and that each reply goes to the group with `reply_parameters`.
 - Mention the bot in two groups. Check that each group gets its own guest agent.
-- List one group in `trusted_groups` and mention the bot there. Check that a group-mode agent starts in `<workspace>/groups/<chat ID>`, receives `<name>: <text>` without `_meta`, and that its reply goes to the group. Script an approval from it. Check that the question reaches the owner's private chat marked with the group, that the owner's button press answers the group's agent, and that the owner's agent receives nothing.
+- List one group in `trusted_groups` and mention the bot there. Check that a group-mode agent starts in `~/work/groups/<name>`, receives `<name>: <text>` without `_meta`, and that its reply goes to the group. Script an approval from it. Check that the question reaches the owner's private chat marked with the group, that the owner's button press answers the group's agent, and that the owner's agent receives nothing.
 - Let the trusted group's agent sit idle past the guest limit. Check that it keeps running.
 - Send an owner message. Check that the agent receives one `session/prompt` with the text and that the reply is sent with `parse_mode: "HTML"`.
 - Script a reply with bold, code, and a list. Check the HTML that is sent. Make the fake Bot API refuse a reply's HTML. Check that the same part is sent again without a parse mode and without the Markdown markers.
@@ -170,10 +171,10 @@ These run under `cargo test` with a fake Bot API server, set through `teloxide`'
 
 With a real bot, which needs a token and network access:
 
-- Run the bridge in the container with the real `alyosha acp`. Ask it to read a file in the workspace. Check that the tool call and the reply appear in Telegram.
+- Run the bridge in the container with the real `alyosha acp`. Ask it to write a file and read it back. Check that the tool call and the reply appear in Telegram, and that the file is in `~/work/owner` in the container.
 - Message the bot from a second account. Check that nothing comes back.
-- Add the bot to a group. From the second account, mention it, tell it your favorite color, and later ask for it. Check the answer and the file in `memory/users/`.
-- Add the group's chat ID from the log to `trusted_groups` and restart. From the second account, ask it to run `ls` in its workspace. Check that it answers from `groups/<chat ID>` and that a command in `ask` asks you in your private chat.
+- Add the bot to a group. From the second account, mention it, tell it your favorite color, and later ask for it. Check the answer and the person's row in `user_notes`.
+- Add the group's chat ID from the log to `trusted_groups` under a name and restart. From the second account, ask it to run `pwd`. Check that it answers `~/work/groups/<name>` and that a command in `ask` asks you in your private chat.
 - Restart the container. Check that the service comes back on its own.
 
-[Architecture overview](../README.md)
+[Architecture overview](README.md)

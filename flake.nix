@@ -1,7 +1,7 @@
 {
   description = "Alyosha, a general-purpose personal assistant for NixOS";
 
-  # Unstable, for playwright-mcp 0.0.83 (docs/develop/Browser.md).
+  # Unstable, for playwright-mcp 0.0.83 (docs/Browser.md#implementation).
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
   outputs =
@@ -21,7 +21,7 @@
         default = self.packages.${system}.alyosha;
       };
 
-      # The container around everything (docs/develop/Deployment.md).
+      # The container around everything (docs/Deployment.md#implementation).
       nixosModules.container = import ./nix/container.nix self;
 
       devShells.${system}.default = pkgs.mkShell {

@@ -1,5 +1,5 @@
 //! The Telegram bridge against a fake Bot API server and a scripted fake ACP
-//! agent. See `docs/develop/TelegramBridge.md#verification`.
+//! agent. See `docs/TelegramBridge.md#verification`.
 
 use std::{
     collections::VecDeque,

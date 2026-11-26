@@ -1,5 +1,5 @@
 //! Durable sessions through the session driver, with `MemoryStore` and the
-//! scripted model. See `docs/develop/SessionStore.md#verification`.
+//! scripted model. See `docs/SessionStore.md#verification`.
 
 mod support;
 

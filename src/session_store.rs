@@ -4,8 +4,8 @@
 //! `PgStore` keeps them in PostgreSQL. `MemoryStore` keeps them in memory
 //! for the scripted tests.
 //!
-//! Design: `docs/design/SessionStore.md`. Implementation guide:
-//! `docs/develop/SessionStore.md`.
+//! Design: `docs/SessionStore.md`. Implementation guide:
+//! `docs/SessionStore.md#implementation`.
 
 use std::{
     collections::{HashMap, HashSet},

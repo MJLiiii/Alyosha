@@ -1,7 +1,7 @@
 //! Shell sandbox checks that start the real Bubblewrap and pasta. They need
 //! `bwrap`, `pasta`, `bash`, and the default tools on `PATH`, unprivileged user
 //! namespaces, and the Nix store; without them each check is skipped with a
-//! message. See `docs/develop/EnvironmentInterface.md#verify-on-the-host`.
+//! message. See `docs/EnvironmentInterface.md#verify-on-the-host`.
 
 use std::{fs, path::Path, time::Duration};
 
