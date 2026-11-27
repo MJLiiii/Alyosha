@@ -189,6 +189,49 @@ impl UserEntry {
 /// How an image shows where only text goes: summaries and replays.
 pub const IMAGE_PLACEHOLDER: &str = "[image]";
 
+impl HistoryEntry {
+    /// The text recall searches: a message's text parts without the clock
+    /// line, a reply's text and one line per tool call, a result's output.
+    /// See `docs/Recall.md#schema-and-text`.
+    pub fn search_text(&self) -> String {
+        match self {
+            HistoryEntry::User(user) => {
+                let mut texts = user.parts.iter().filter_map(|part| match part {
+                    UserPart::Text(text) => Some(text.as_str()),
+                    UserPart::Image(_) => None,
+                });
+                let mut lines = Vec::new();
+                if let Some(first) = texts.next() {
+                    let (head, rest) = first.split_once('\n').unwrap_or((first, ""));
+                    if head.starts_with('[') && head.ends_with(']') {
+                        lines.push(rest);
+                    } else {
+                        lines.push(first);
+                    }
+                }
+                lines.extend(texts);
+                lines.retain(|line| !line.is_empty());
+                lines.join("\n")
+            }
+            HistoryEntry::Assistant(reply) => {
+                let mut lines = Vec::new();
+                let text = reply.text();
+                if !text.is_empty() {
+                    lines.push(text);
+                }
+                for call in reply.tool_calls() {
+                    lines.push(format!("{} {}", call.name, call.arguments));
+                }
+                lines.join("\n")
+            }
+            HistoryEntry::ToolResult(result) => match &result.outcome {
+                ToolOutcome::Success(text) | ToolOutcome::Error(text) => text.clone(),
+                ToolOutcome::Cancelled => String::new(),
+            },
+        }
+    }
+}
+
 /// One complete assistant response.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct AssistantEntry {

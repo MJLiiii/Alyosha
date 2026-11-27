@@ -382,9 +382,13 @@ async fn guest_sessions_keep_notes_for_each_sender_only() {
         .iter()
         .map(|tool| tool.name.as_str())
         .collect();
-    assert_eq!(tools, ["user_memory"]);
+    assert_eq!(tools, ["user_memory", "recall"]);
     let instruction = &requests[0].system_instruction;
     assert!(!instruction.contains("## Memory"), "{instruction}");
+    assert!(
+        instruction.contains(alyosha::recall::INSTRUCTION_LINE),
+        "{instruction}"
+    );
     assert!(
         instruction
             .trim_end()
@@ -479,9 +483,10 @@ async fn prompts_sent_together_are_answered_in_order() {
     assert!(updates(&messages).contains(&"chunk first reply".to_owned()));
     assert!(updates(&messages).contains(&"chunk second reply".to_owned()));
     assert!(
-        model.requests()[0]
-            .system_instruction
-            .ends_with("No skills installed.\n"),
+        model.requests()[0].system_instruction.ends_with(&format!(
+            "No skills installed.\n\n{}\n",
+            alyosha::recall::INSTRUCTION_LINE
+        )),
         "no channel line without clientInfo"
     );
 }
@@ -794,7 +799,7 @@ async fn owner_and_guest_sessions_each_see_only_their_store() {
         .await;
     guest.until_response(id).await;
     let requests = model.requests();
-    assert_eq!(tool_names(&requests[0]), ["user_memory"]);
+    assert_eq!(tool_names(&requests[0]), ["user_memory", "recall"]);
     assert!(!requests[0].system_instruction.contains("## Memory"));
     assert!(
         last_user_text(&requests[0]).contains("GUEST-2c9d"),

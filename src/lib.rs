@@ -20,6 +20,7 @@ pub mod mcp;
 pub mod media;
 pub mod memory;
 pub mod memory_import;
+pub mod recall;
 pub mod session;
 pub mod session_store;
 pub mod skills;

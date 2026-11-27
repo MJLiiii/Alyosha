@@ -505,6 +505,8 @@ in
           services.postgresql = {
             enable = true;
             package = pkgs.postgresql_17;
+            # Recall's vectors (docs/Recall.md#schema-and-text).
+            extensions = ps: [ ps.pgvector ];
             enableTCPIP = false;
             settings.listen_addresses = lib.mkForce "";
           };
@@ -551,6 +553,9 @@ in
                     || psql -c 'create role alyosha login'
                   psql -tAc "select 1 from pg_database where datname = 'alyosha'" | grep -q 1 \
                     || psql -c 'create database alyosha owner alyosha'
+                  # pgvector is not a trusted extension, so the role alyosha
+                  # cannot create it in its migration.
+                  psql -d alyosha -c 'create extension if not exists vector'
                 '';
               };
 

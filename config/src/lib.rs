@@ -28,6 +28,7 @@ pub struct Config {
     pub gateway: GatewayConfig,
     pub approvals: ApprovalsConfig,
     pub media: MediaConfig,
+    pub recall: RecallConfig,
     /// Present only when the file has a `[telegram]` section.
     pub telegram: Option<TelegramConfig>,
     /// Present only when the file has a `[qq]` section.
@@ -44,6 +45,7 @@ impl Default for Config {
             gateway: GatewayConfig::default(),
             approvals: ApprovalsConfig::default(),
             media: MediaConfig::default(),
+            recall: RecallConfig::default(),
             telegram: None,
             qq: None,
             guest: GuestConfig::default(),
@@ -97,6 +99,27 @@ impl Default for MediaConfig {
         Self {
             transcribe_provider: None,
             transcribe_model: "gpt-transcribe".to_owned(),
+        }
+    }
+}
+
+/// `[recall]`: how past sessions are searched by meaning.
+/// See `docs/Recall.md#configuration`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RecallConfig {
+    /// The GPROXY provider, on the `openai` channel, that computes vectors.
+    /// Without it, recall searches only by the words.
+    pub embed_provider: Option<String>,
+    /// The embedding model, whose vectors have 1,536 dimensions.
+    pub embed_model: String,
+}
+
+impl Default for RecallConfig {
+    fn default() -> Self {
+        Self {
+            embed_provider: None,
+            embed_model: "text-embedding-3-small".to_owned(),
         }
     }
 }
@@ -505,6 +528,8 @@ struct ConfigFile {
     approvals: ApprovalsConfig,
     #[serde(default)]
     media: MediaConfig,
+    #[serde(default)]
+    recall: RecallConfig,
     telegram: Option<TelegramConfig>,
     qq: Option<QqConfig>,
     #[serde(default)]
@@ -548,6 +573,17 @@ fn parse(text: &str) -> Result<Config, Problem> {
     }
     if file.media.transcribe_model.trim().is_empty() {
         problems.push("media.transcribe_model: must not be empty".to_owned());
+    }
+    if file
+        .recall
+        .embed_provider
+        .as_deref()
+        .is_some_and(|provider| provider.trim().is_empty())
+    {
+        problems.push("recall.embed_provider: must not be empty".to_owned());
+    }
+    if file.recall.embed_model.trim().is_empty() {
+        problems.push("recall.embed_model: must not be empty".to_owned());
     }
     if file.approvals.timeout_minutes < 1 {
         problems.push("approvals.timeout_minutes: must be at least 1".to_owned());
@@ -624,6 +660,7 @@ fn parse(text: &str) -> Result<Config, Problem> {
         gateway: file.gateway,
         approvals: file.approvals,
         media: file.media,
+        recall: file.recall,
         telegram: file.telegram,
         qq: file.qq,
         guest: file.guest,
@@ -685,6 +722,9 @@ url = "http://127.0.0.1:18787"
 
 [media]
 transcribe_provider = "openai"
+
+[recall]
+embed_provider = "openai"
 
 [approvals]
 timeout_minutes = 60
@@ -766,6 +806,25 @@ API_TOKEN = "search-token"
         assert_eq!(search.secret_env["API_TOKEN"], "search-token");
         assert_eq!(config.approvals.timeout_minutes, 60);
         assert_eq!(config.media.transcribe_provider.as_deref(), Some("openai"));
+        assert_eq!(config.recall.embed_provider.as_deref(), Some("openai"));
+        assert_eq!(config.recall.embed_model, "text-embedding-3-small");
+    }
+
+    #[test]
+    fn recall_settings_are_checked() {
+        let config = load_text("").unwrap();
+        assert_eq!(config.recall.embed_provider, None);
+        for (text, key) in [
+            (
+                "[recall]\nembed_provider = \" \"\n",
+                "recall.embed_provider",
+            ),
+            ("[recall]\nembed_model = \"\"\n", "recall.embed_model"),
+        ] {
+            let error = load_text(text).unwrap_err().to_string();
+            assert!(error.contains(key), "{error}");
+        }
+        assert!(load_text("[recall]\nembed = \"x\"\n").is_err());
     }
 
     #[test]

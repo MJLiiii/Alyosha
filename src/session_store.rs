@@ -22,6 +22,7 @@ use crate::{
     BoxFuture,
     agent_state::{CallId, HistoryEntry, ToolOutcome, ToolResultEntry},
     memory::{MemoryRow, MemoryTables, NotesRow},
+    recall::{EntryRef, Hit, RecallScope, cosine_distance, like_pattern, matches_all, vector_text},
 };
 
 /// The format version every stored entry carries. Version 1 entries, whose
@@ -43,9 +44,12 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/001_sessions.sql"),
     include_str!("../migrations/002_memory.sql"),
     include_str!("../migrations/003_media.sql"),
+    include_str!("../migrations/004_recall.sql"),
 ];
 /// The migration that also imports the old memory files.
 const MEMORY_MIGRATION: i32 = 2;
+/// The migration that also fills each entry's searchable text.
+const RECALL_MIGRATION: i32 = 4;
 
 /// A stored session's database ID.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -124,6 +128,48 @@ pub trait SessionStore: Send + Sync {
     ) -> BoxFuture<'a, Result<(), StoreError>>;
     /// Releases the lock.
     fn close(&self, session: SessionId) -> BoxFuture<'_, Result<(), StoreError>>;
+
+    // Recall: docs/Recall.md#search. `current` is the searching session,
+    // whose entries from its latest checkpoint on are left out.
+
+    /// The newest entries in scope holding every term, ignoring case.
+    fn recall_words<'a>(
+        &'a self,
+        scope: &'a RecallScope,
+        current: SessionId,
+        terms: &'a [String],
+        limit: usize,
+    ) -> BoxFuture<'a, Result<Vec<Hit>, String>>;
+    /// The oldest entries in scope with text and no vector for `model`.
+    fn recall_missing<'a>(
+        &'a self,
+        scope: &'a RecallScope,
+        model: &'a str,
+        limit: usize,
+    ) -> BoxFuture<'a, Result<Vec<(EntryRef, String)>, String>>;
+    fn recall_put<'a>(
+        &'a self,
+        model: &'a str,
+        vectors: &'a [(EntryRef, Vec<f32>)],
+    ) -> BoxFuture<'a, Result<(), String>>;
+    /// The entries in scope nearest `vector` by cosine distance.
+    fn recall_nearest<'a>(
+        &'a self,
+        scope: &'a RecallScope,
+        current: SessionId,
+        model: &'a str,
+        vector: &'a [f32],
+        limit: usize,
+    ) -> BoxFuture<'a, Result<Vec<Hit>, String>>;
+    /// The entry and up to `before` and `after` around it in its session,
+    /// or `None` if it does not exist or is out of scope.
+    fn recall_around<'a>(
+        &'a self,
+        scope: &'a RecallScope,
+        entry: EntryRef,
+        before: u64,
+        after: u64,
+    ) -> BoxFuture<'a, Result<Option<Vec<Hit>>, String>>;
 }
 
 /// An entry as stored: the entry's JSON with `"v": 2`.
@@ -224,14 +270,73 @@ struct MemoryInner {
     locked: HashSet<i64>,
     /// Makes the next appends fail, by remaining count.
     fail_appends_after: Option<usize>,
+    /// Recall's vectors by session, seq, and model.
+    vectors: HashMap<(i64, i64, String), Vec<f32>>,
 }
 
 struct MemorySession {
     id: i64,
     key: String,
     entries: HashMap<u64, Value>,
+    /// When each entry was appended.
+    times: HashMap<u64, DateTime<Utc>>,
     checkpoints: Vec<(u64, String)>,
+    created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
+}
+
+impl MemorySession {
+    /// The first seq the session's model still sees.
+    fn visible_from(&self) -> u64 {
+        self.checkpoints
+            .iter()
+            .map(|(seq, _)| *seq)
+            .max()
+            .unwrap_or(0)
+    }
+
+    fn hit(&self, seq: u64) -> Option<Hit> {
+        let entry = decode(self.entries.get(&seq)?.clone()).ok()?;
+        Some(Hit {
+            entry: EntryRef {
+                session_id: self.id,
+                seq: seq as i64,
+            },
+            key: self.key.clone(),
+            session_started: self.created_at,
+            at: self.times[&seq],
+            kind: kind(&entry).to_owned(),
+            text: entry.search_text(),
+        })
+    }
+}
+
+impl MemoryInner {
+    /// Every entry in scope, newest first, without the current session's
+    /// visible ones.
+    fn in_scope(&self, scope: &RecallScope, current: Option<SessionId>) -> Vec<Hit> {
+        let mut hits: Vec<Hit> = self
+            .sessions
+            .iter()
+            .filter(|session| scope.includes(&session.key))
+            .flat_map(|session| {
+                let hide_from =
+                    (Some(SessionId(session.id)) == current).then(|| session.visible_from());
+                session
+                    .entries
+                    .keys()
+                    .filter(move |seq| hide_from.is_none_or(|from| **seq < from))
+                    .filter_map(|seq| session.hit(*seq))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        hits.sort_by(|a, b| {
+            b.at.cmp(&a.at)
+                .then(b.entry.session_id.cmp(&a.entry.session_id))
+                .then(b.entry.seq.cmp(&a.entry.seq))
+        });
+        hits
+    }
 }
 
 impl MemoryStore {
@@ -288,6 +393,15 @@ impl MemoryStore {
     pub fn drop_locks(&self) {
         self.lock().locked.clear();
     }
+
+    /// How many vectors are stored for `model`.
+    pub fn vector_count(&self, model: &str) -> usize {
+        self.lock()
+            .vectors
+            .keys()
+            .filter(|(_, _, stored)| stored == model)
+            .count()
+    }
 }
 
 impl SessionStore for MemoryStore {
@@ -304,7 +418,9 @@ impl SessionStore for MemoryStore {
                 id,
                 key: key.to_owned(),
                 entries: HashMap::new(),
+                times: HashMap::new(),
                 checkpoints: Vec::new(),
+                created_at: Utc::now(),
                 updated_at: Utc::now(),
             });
             inner.locked.insert(id);
@@ -395,6 +511,7 @@ impl SessionStore for MemoryStore {
                 return Err(StoreError::Failed(format!("entry {seq} is already stored")));
             }
             stored.entries.insert(seq, encode(entry));
+            stored.times.insert(seq, Utc::now());
             stored.updated_at = Utc::now();
             Ok(())
         })
@@ -426,6 +543,132 @@ impl SessionStore for MemoryStore {
         Box::pin(async move {
             self.lock().locked.remove(&session.0);
             Ok(())
+        })
+    }
+
+    fn recall_words<'a>(
+        &'a self,
+        scope: &'a RecallScope,
+        current: SessionId,
+        terms: &'a [String],
+        limit: usize,
+    ) -> BoxFuture<'a, Result<Vec<Hit>, String>> {
+        Box::pin(async move {
+            Ok(self
+                .lock()
+                .in_scope(scope, Some(current))
+                .into_iter()
+                .filter(|hit| matches_all(&hit.text, terms))
+                .take(limit)
+                .collect())
+        })
+    }
+
+    fn recall_missing<'a>(
+        &'a self,
+        scope: &'a RecallScope,
+        model: &'a str,
+        limit: usize,
+    ) -> BoxFuture<'a, Result<Vec<(EntryRef, String)>, String>> {
+        Box::pin(async move {
+            let inner = self.lock();
+            let mut missing: Vec<(EntryRef, String)> = inner
+                .in_scope(scope, None)
+                .into_iter()
+                .filter(|hit| !hit.text.is_empty())
+                .filter(|hit| {
+                    !inner.vectors.contains_key(&(
+                        hit.entry.session_id,
+                        hit.entry.seq,
+                        model.to_owned(),
+                    ))
+                })
+                .map(|hit| (hit.entry, hit.text))
+                .collect();
+            missing.sort_by_key(|(entry, _)| (entry.session_id, entry.seq));
+            missing.truncate(limit);
+            Ok(missing)
+        })
+    }
+
+    fn recall_put<'a>(
+        &'a self,
+        model: &'a str,
+        vectors: &'a [(EntryRef, Vec<f32>)],
+    ) -> BoxFuture<'a, Result<(), String>> {
+        Box::pin(async move {
+            let mut inner = self.lock();
+            for (entry, vector) in vectors {
+                inner.vectors.insert(
+                    (entry.session_id, entry.seq, model.to_owned()),
+                    vector.clone(),
+                );
+            }
+            Ok(())
+        })
+    }
+
+    fn recall_nearest<'a>(
+        &'a self,
+        scope: &'a RecallScope,
+        current: SessionId,
+        model: &'a str,
+        vector: &'a [f32],
+        limit: usize,
+    ) -> BoxFuture<'a, Result<Vec<Hit>, String>> {
+        Box::pin(async move {
+            let inner = self.lock();
+            let mut scored: Vec<(f64, Hit)> = inner
+                .in_scope(scope, Some(current))
+                .into_iter()
+                .filter_map(|hit| {
+                    let stored = inner.vectors.get(&(
+                        hit.entry.session_id,
+                        hit.entry.seq,
+                        model.to_owned(),
+                    ))?;
+                    Some((cosine_distance(stored, vector), hit))
+                })
+                .collect();
+            scored.sort_by(|(a, _), (b, _)| a.total_cmp(b));
+            Ok(scored.into_iter().take(limit).map(|(_, hit)| hit).collect())
+        })
+    }
+
+    fn recall_around<'a>(
+        &'a self,
+        scope: &'a RecallScope,
+        entry: EntryRef,
+        before: u64,
+        after: u64,
+    ) -> BoxFuture<'a, Result<Option<Vec<Hit>>, String>> {
+        Box::pin(async move {
+            let inner = self.lock();
+            let Some(session) = inner
+                .sessions
+                .iter()
+                .find(|session| session.id == entry.session_id && scope.includes(&session.key))
+            else {
+                return Ok(None);
+            };
+            let Ok(seq) = u64::try_from(entry.seq) else {
+                return Ok(None);
+            };
+            if !session.entries.contains_key(&seq) {
+                return Ok(None);
+            }
+            let mut seqs: Vec<u64> = session
+                .entries
+                .keys()
+                .copied()
+                .filter(|other| *other + before >= seq && *other <= seq + after)
+                .collect();
+            seqs.sort_unstable();
+            Ok(Some(
+                seqs.into_iter()
+                    .filter_map(|seq| session.hit(seq))
+                    .collect(),
+            ))
         })
     }
 }
@@ -515,6 +758,9 @@ async fn migrate(client: &mut Client, memory_folder: &Path) -> Result<(), StoreE
             if version == MEMORY_MIGRATION {
                 crate::memory_import::import(&transaction, memory_folder).await?;
             }
+            if version == RECALL_MIGRATION {
+                fill_search_text(&transaction).await?;
+            }
             transaction
                 .execute("insert into schema_version (version) values ($1)", &[&version])
                 .await?;
@@ -527,6 +773,30 @@ async fn migrate(client: &mut Client, memory_folder: &Path) -> Result<(), StoreE
     let unlocked = client.execute("select pg_advisory_unlock(0)", &[]).await;
     result?;
     unlocked?;
+    Ok(())
+}
+
+/// Fills `history.text` for the entries saved before migration 4.
+async fn fill_search_text(transaction: &tokio_postgres::Transaction<'_>) -> Result<(), StoreError> {
+    let rows = transaction
+        .query("select session_id, seq, entry from history", &[])
+        .await?;
+    let update = transaction
+        .prepare("update history set text = $3 where session_id = $1 and seq = $2")
+        .await?;
+    for row in &rows {
+        let session: i64 = row.get(0);
+        let seq: i64 = row.get(1);
+        let entry = decode(row.get::<_, Value>(2))
+            .map_err(|error| StoreError::Failed(format!("session {session}: {error}")))?;
+        transaction
+            .execute(&update, &[&session, &seq, &entry.search_text()])
+            .await?;
+    }
+    tracing::info!(
+        entries = rows.len(),
+        "filled the searchable text of saved history"
+    );
     Ok(())
 }
 
@@ -823,8 +1093,8 @@ impl SessionStore for PgStore {
             let message = message_id(entry).map(|id| id as i64);
             self.client
                 .execute(
-                    "insert into history (session_id, seq, kind, message_id, entry) values ($1, $2, $3, $4, $5)",
-                    &[&session.0, &(seq as i64), &kind(entry), &message, &encode(entry)],
+                    "insert into history (session_id, seq, kind, message_id, entry, text) values ($1, $2, $3, $4, $5, $6)",
+                    &[&session.0, &(seq as i64), &kind(entry), &message, &encode(entry), &entry.search_text()],
                 )
                 .await?;
             self.client
@@ -868,6 +1138,190 @@ impl SessionStore for PgStore {
                 .await?;
             Ok(())
         })
+    }
+
+    fn recall_words<'a>(
+        &'a self,
+        scope: &'a RecallScope,
+        current: SessionId,
+        terms: &'a [String],
+        limit: usize,
+    ) -> BoxFuture<'a, Result<Vec<Hit>, String>> {
+        Box::pin(async move {
+            let patterns: Vec<String> = terms.iter().map(|term| like_pattern(term)).collect();
+            let rows = self
+                .client
+                .query(
+                    &format!(
+                        "{HIT_COLUMNS} where {IN_SCOPE} and {NOT_VISIBLE}
+                         and coalesce(h.text, '') ilike all($3::text[])
+                         order by h.created_at desc, h.session_id desc, h.seq desc limit $4"
+                    ),
+                    &[&scope.only_key(), &current.0, &patterns, &(limit as i64)],
+                )
+                .await
+                .map_err(text_error)?;
+            Ok(rows.iter().map(hit_row).collect())
+        })
+    }
+
+    fn recall_missing<'a>(
+        &'a self,
+        scope: &'a RecallScope,
+        model: &'a str,
+        limit: usize,
+    ) -> BoxFuture<'a, Result<Vec<(EntryRef, String)>, String>> {
+        Box::pin(async move {
+            let rows = self
+                .client
+                .query(
+                    &format!(
+                        "select h.session_id, h.seq, h.text from history h join sessions s on s.id = h.session_id
+                         where {IN_SCOPE} and coalesce(h.text, '') <> ''
+                         and not exists (select 1 from history_embeddings e
+                             where e.session_id = h.session_id and e.seq = h.seq and e.model = $2)
+                         order by h.session_id, h.seq limit $3"
+                    ),
+                    &[&scope.only_key(), &model, &(limit as i64)],
+                )
+                .await
+                .map_err(text_error)?;
+            Ok(rows
+                .iter()
+                .map(|row| {
+                    (
+                        EntryRef {
+                            session_id: row.get(0),
+                            seq: row.get(1),
+                        },
+                        row.get(2),
+                    )
+                })
+                .collect())
+        })
+    }
+
+    fn recall_put<'a>(
+        &'a self,
+        model: &'a str,
+        vectors: &'a [(EntryRef, Vec<f32>)],
+    ) -> BoxFuture<'a, Result<(), String>> {
+        Box::pin(async move {
+            let insert = self
+                .client
+                .prepare(
+                    "insert into history_embeddings (session_id, seq, model, embedding)
+                     values ($1, $2, $3, $4::text::vector) on conflict do nothing",
+                )
+                .await
+                .map_err(text_error)?;
+            for (entry, vector) in vectors {
+                self.client
+                    .execute(
+                        &insert,
+                        &[&entry.session_id, &entry.seq, &model, &vector_text(vector)],
+                    )
+                    .await
+                    .map_err(text_error)?;
+            }
+            Ok(())
+        })
+    }
+
+    fn recall_nearest<'a>(
+        &'a self,
+        scope: &'a RecallScope,
+        current: SessionId,
+        model: &'a str,
+        vector: &'a [f32],
+        limit: usize,
+    ) -> BoxFuture<'a, Result<Vec<Hit>, String>> {
+        Box::pin(async move {
+            let rows = self
+                .client
+                .query(
+                    &format!(
+                        "{HIT_COLUMNS} join history_embeddings e on e.session_id = h.session_id and e.seq = h.seq
+                         where {IN_SCOPE} and {NOT_VISIBLE} and e.model = $3
+                         order by e.embedding <=> $4::text::vector limit $5"
+                    ),
+                    &[
+                        &scope.only_key(),
+                        &current.0,
+                        &model,
+                        &vector_text(vector),
+                        &(limit as i64),
+                    ],
+                )
+                .await
+                .map_err(text_error)?;
+            Ok(rows.iter().map(hit_row).collect())
+        })
+    }
+
+    fn recall_around<'a>(
+        &'a self,
+        scope: &'a RecallScope,
+        entry: EntryRef,
+        before: u64,
+        after: u64,
+    ) -> BoxFuture<'a, Result<Option<Vec<Hit>>, String>> {
+        Box::pin(async move {
+            let found = self
+                .client
+                .query_opt(
+                    &format!(
+                        "select 1 from history h join sessions s on s.id = h.session_id
+                         where {IN_SCOPE} and h.session_id = $2 and h.seq = $3"
+                    ),
+                    &[&scope.only_key(), &entry.session_id, &entry.seq],
+                )
+                .await
+                .map_err(text_error)?;
+            if found.is_none() {
+                return Ok(None);
+            }
+            let rows = self
+                .client
+                .query(
+                    &format!(
+                        "{HIT_COLUMNS} where h.session_id = $1 and h.seq between $2 and $3 order by h.seq"
+                    ),
+                    &[
+                        &entry.session_id,
+                        &(entry.seq - before as i64),
+                        &(entry.seq + after as i64),
+                    ],
+                )
+                .await
+                .map_err(text_error)?;
+            Ok(Some(rows.iter().map(hit_row).collect()))
+        })
+    }
+}
+
+/// The columns `hit_row` reads, from `history h` joined with `sessions s`.
+const HIT_COLUMNS: &str =
+    "select h.session_id, h.seq, s.key, s.created_at, h.created_at, h.kind, coalesce(h.text, '')
+     from history h join sessions s on s.id = h.session_id";
+/// The scope, with the one key or null for the owner's in `$1`.
+const IN_SCOPE: &str =
+    "(($1::text is null and (s.key like 'owner:%' or s.key like 'group:%')) or s.key = $1::text)";
+/// Leaves out the entries the session in `$2` still sees.
+const NOT_VISIBLE: &str = "not (h.session_id = $2 and h.seq >= coalesce(
+         (select max(c.first_kept_seq) from checkpoints c where c.session_id = $2), 0))";
+
+fn hit_row(row: &Row) -> Hit {
+    Hit {
+        entry: EntryRef {
+            session_id: row.get(0),
+            seq: row.get(1),
+        },
+        key: row.get(2),
+        session_started: row.get(3),
+        at: row.get(4),
+        kind: row.get(5),
+        text: row.get(6),
     }
 }
 

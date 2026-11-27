@@ -1,6 +1,7 @@
 //! `PgStore` against a throwaway PostgreSQL cluster, started with `initdb`
-//! and `pg_ctl` in a temporary folder. Without them on `PATH`, the test
-//! prints a skip notice and passes. See
+//! and `pg_ctl` in a temporary folder. Without them on `PATH`, or without
+//! pgvector, which recall's migration needs, the test prints a skip notice
+//! and passes. The dev shell's PostgreSQL has pgvector. See
 //! `docs/SessionStore.md#verification`.
 
 use std::{
@@ -17,7 +18,8 @@ use alyosha::{
         ToolOutcome, ToolResultEntry, UserEntry,
     },
     memory::{MemoryStore, MemoryTables},
-    session_store::{PgStore, SessionStore, StoreError},
+    recall::{EntryRef, RecallScope},
+    session_store::{PgStore, SessionStore, StoreError, encode},
     user_notes::UserNotes,
 };
 use chrono::NaiveDate;
@@ -74,11 +76,28 @@ impl Cluster {
             .output()
             .unwrap();
         assert!(status.status.success(), "{status:?}");
-        Some(Self {
+        let cluster = Self {
             _root: root,
             data,
             socket,
-        })
+        };
+        let vector = Command::new("psql")
+            .arg("-h")
+            .arg(&cluster.socket)
+            .args([
+                "-At",
+                "-d",
+                "postgres",
+                "-c",
+                "create extension if not exists vector",
+            ])
+            .output()
+            .unwrap();
+        if !vector.status.success() {
+            eprintln!("skipped: this PostgreSQL has no pgvector; use the dev shell's");
+            return None;
+        }
+        Some(cluster)
     }
 
     fn target(&self, database: &str) -> String {
@@ -168,7 +187,7 @@ async fn pg_store_saves_loads_and_locks() {
             "migrate",
             "select string_agg(version::text, ',' order by version) from schema_version"
         ),
-        "1,2,3"
+        "1,2,3,4"
     );
     cluster.psql("migrate", "insert into schema_version values (99)");
     let Err(StoreError::Failed(error)) =
@@ -318,7 +337,7 @@ async fn memory_files_are_imported_once_and_checked() {
         .unwrap();
     assert_eq!(
         cluster.psql("empty", "select max(version) from schema_version"),
-        "3"
+        "4"
     );
     assert_eq!(
         cluster.psql(
@@ -567,4 +586,200 @@ async fn media_rows_are_kept_once_by_hash() {
     );
     assert_eq!(store.get_media("missing").await.unwrap(), None);
     assert_eq!(cluster.psql("media", "select count(*) from media"), "1");
+}
+
+/// A vector of pgvector's 1,536 dimensions pointing along `axis`.
+fn axis(axis: usize) -> Vec<f32> {
+    let mut vector = vec![0.0; 1536];
+    vector[axis] = 1.0;
+    vector
+}
+
+#[tokio::test]
+async fn recall_migration_fills_text_and_searches_with_pgvector() {
+    let Some(cluster) = Cluster::start() else {
+        return;
+    };
+    // A database at version 3 with one saved entry.
+    cluster.create_database("recall");
+    for sql in [
+        include_str!("../migrations/001_sessions.sql"),
+        include_str!("../migrations/002_memory.sql"),
+        include_str!("../migrations/003_media.sql"),
+    ] {
+        cluster.psql("recall", sql);
+    }
+    let old = encode(&HistoryEntry::User(UserEntry::text_only(
+        MessageId(1),
+        MessageOrigin::Owner,
+        "[Wed 2026-11-25 10:02, Europe/Amsterdam]\nMy Router dropped the 路由 link",
+    )));
+    cluster.psql(
+        "recall",
+        &format!(
+            "create table schema_version (version integer not null);
+             insert into schema_version values (1), (2), (3);
+             insert into sessions (key, cwd) values ('owner:telegram', '/');
+             insert into history (session_id, seq, kind, message_id, entry)
+             values (1, 0, 'user', 1, '{}');",
+            old.to_string().replace('\'', "''")
+        ),
+    );
+
+    let store = PgStore::connect(&cluster.target("recall"), Path::new(NO_FOLDER))
+        .await
+        .unwrap();
+    assert_eq!(
+        cluster.psql("recall", "select text from history where seq = 0"),
+        "My Router dropped the 路由 link"
+    );
+    let group = store.create("group:qq:G", Path::new("/")).await.unwrap();
+    store
+        .append(
+            group.id,
+            0,
+            &HistoryEntry::Assistant(AssistantEntry {
+                parts: vec![AssistantPart::Text("100% picnic_day".into())],
+            }),
+        )
+        .await
+        .unwrap();
+    let current = store.create("owner:qq", Path::new("/")).await.unwrap();
+
+    let words = |scope: &'static RecallScope, terms: &'static [&'static str]| {
+        let store = &store;
+        async move {
+            let terms: Vec<String> = terms.iter().map(|t| (*t).to_owned()).collect();
+            store
+                .recall_words(scope, current.id, &terms, 20)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|hit| (hit.key, hit.entry.seq))
+                .collect::<Vec<_>>()
+        }
+    };
+    static OWNER: RecallScope = RecallScope::Owner;
+    assert_eq!(
+        words(&OWNER, &["router", "路由"]).await,
+        [("owner:telegram".to_owned(), 0)]
+    );
+    assert_eq!(
+        words(&OWNER, &["100%", "picnic_day"]).await,
+        [("group:qq:G".to_owned(), 0)]
+    );
+    assert!(
+        words(&OWNER, &["100x"]).await.is_empty(),
+        "% is not a wildcard"
+    );
+    assert!(words(&OWNER, &["picnic?day"]).await.is_empty());
+    let only_group = RecallScope::OnlyKey("group:qq:G".into());
+    assert!(
+        store
+            .recall_words(&only_group, current.id, &["router".to_owned()], 20)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    // Vectors: both entries are missing, then stored, then ranked.
+    let missing = store.recall_missing(&OWNER, "m", 10).await.unwrap();
+    assert_eq!(missing.len(), 2);
+    let telegram = EntryRef {
+        session_id: 1,
+        seq: 0,
+    };
+    let picnic = EntryRef {
+        session_id: group.id.0,
+        seq: 0,
+    };
+    store
+        .recall_put("m", &[(telegram, axis(0)), (picnic, axis(1))])
+        .await
+        .unwrap();
+    assert!(
+        store
+            .recall_missing(&OWNER, "m", 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        store
+            .recall_missing(&OWNER, "other", 10)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    let nearest = store
+        .recall_nearest(&OWNER, current.id, "m", &axis(1), 5)
+        .await
+        .unwrap();
+    assert_eq!(
+        nearest.iter().map(|hit| hit.entry).collect::<Vec<_>>(),
+        [picnic, telegram]
+    );
+    let nearest = store
+        .recall_nearest(&only_group, current.id, "m", &axis(0), 5)
+        .await
+        .unwrap();
+    assert_eq!(
+        nearest.iter().map(|hit| hit.entry).collect::<Vec<_>>(),
+        [picnic]
+    );
+
+    // The searching session's visible entries are left out.
+    store
+        .append(
+            current.id,
+            0,
+            &HistoryEntry::User(UserEntry::text_only(
+                MessageId(1),
+                MessageOrigin::Owner,
+                "[clock]\nrouter again",
+            )),
+        )
+        .await
+        .unwrap();
+    assert_eq!(words(&OWNER, &["router"]).await.len(), 1);
+    store
+        .save_checkpoint(current.id, 1, "summary")
+        .await
+        .unwrap();
+    assert_eq!(
+        words(&OWNER, &["router"]).await,
+        [("owner:qq".to_owned(), 0), ("owner:telegram".to_owned(), 0)]
+    );
+
+    // Around an entry, within scope only.
+    let around = store
+        .recall_around(&OWNER, telegram, 3, 3)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(around.len(), 1);
+    assert_eq!(around[0].text, "My Router dropped the 路由 link");
+    assert!(
+        store
+            .recall_around(&only_group, telegram, 3, 3)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .recall_around(
+                &OWNER,
+                EntryRef {
+                    session_id: 1,
+                    seq: 9
+                },
+                3,
+                3
+            )
+            .await
+            .unwrap()
+            .is_none()
+    );
 }

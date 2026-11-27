@@ -38,6 +38,7 @@ use crate::{
         send_file::{Outbox, send_file_tool},
     },
     memory::{self, MemoryStore, MemoryTables},
+    recall::{self, Recall, recall_tool},
     session_store::{self, INTERRUPTED_LINE, RESUMED_LINE},
     skills::{self, SkillStore},
     tools::{
@@ -125,17 +126,24 @@ async fn prepare_persistence(
 }
 
 /// The normal system instruction: the default, the memory and skills
-/// sections, and the channel line.
+/// sections, the recall line when the session has recall, and the channel
+/// line.
 async fn normal_instruction(
     memory: &dyn MemoryTables,
     skills: &SkillStore,
     channel_line: Option<&str>,
+    with_recall: bool,
 ) -> Result<String, String> {
     let mut instruction = format!(
         "{DEFAULT_INSTRUCTION}\n\n{}\n{}",
         memory::instruction_section(&memory::index(memory).await?),
         skills::instruction_section(&skills.index())
     );
+    if with_recall {
+        instruction.push('\n');
+        instruction.push_str(recall::INSTRUCTION_LINE);
+        instruction.push('\n');
+    }
     if let Some(line) = channel_line {
         instruction.push('\n');
         instruction.push_str(line);
@@ -289,6 +297,10 @@ pub async fn start_with_clock(
     registry.register(skills::skill_tool())?;
     registry.register(approvals::ask_owner_tool())?;
     registry.register(send_file_tool())?;
+    let with_recall = front_end.persistence.is_some();
+    if with_recall {
+        registry.register(recall_tool())?;
+    }
     let mut mcp_problems = mcp_warnings;
     for tool in mcp.tools() {
         let name = tool.definition.name.clone();
@@ -312,6 +324,7 @@ pub async fn start_with_clock(
         front_end.memory.as_ref(),
         &skills,
         front_end.channel_line.as_deref(),
+        with_recall,
     )
     .await
     .map_err(|error| StartupError::Store(format!("the memory store failed: {error}")))?;
@@ -328,6 +341,7 @@ pub async fn start_with_clock(
                     tables.as_ref(),
                     &SkillStore::open(&skills_root),
                     channel_line.as_deref(),
+                    with_recall,
                 )
                 .await
                 .inspect_err(|error| {
@@ -338,6 +352,15 @@ pub async fn start_with_clock(
         })
     };
     let persistence = prepare_persistence(front_end.persistence, &mut warnings).await?;
+    let recall = persistence.as_ref().map(|persistence| {
+        Recall::for_session(
+            config,
+            paths,
+            persistence.store.clone(),
+            persistence.stored.id,
+            &persistence.stored.key,
+        )
+    });
 
     let job_environment = JobEnvironment {
         sandbox,
@@ -356,6 +379,7 @@ pub async fn start_with_clock(
         mcp: Some(mcp),
         media: front_end.media.as_ref().map(|media| media.services(config)),
         outbox: Some(Outbox::new(session_dir.join("outbox"))),
+        recall,
         ..SessionServices::default()
     };
     let (driver, events) = SessionDriver::start(SessionSetup {
@@ -415,6 +439,9 @@ pub async fn start_guest(
     let (mcp, mcp_warnings) = McpManager::start(&servers, &folder, &paths.secrets()).await;
     let mut registry = ToolRegistry::new();
     registry.register(user_memory_tool())?;
+    if persistence.is_some() {
+        registry.register(recall_tool())?;
+    }
     let mut problems = mcp_warnings;
     for tool in mcp.tools() {
         let name = tool.definition.name.clone();
@@ -431,15 +458,30 @@ pub async fn start_guest(
         warnings.push(format!("MCP: {}", problems.join("; ")));
     }
     let mut system_instruction = GUEST_INSTRUCTION.to_owned();
+    if persistence.is_some() {
+        system_instruction.push('\n');
+        system_instruction.push_str(recall::INSTRUCTION_LINE);
+        system_instruction.push('\n');
+    }
     if let Some(line) = &channel_line {
         system_instruction.push('\n');
         system_instruction.push_str(line);
         system_instruction.push('\n');
     }
     let persistence = prepare_persistence(persistence, &mut warnings).await?;
+    let recall = persistence.as_ref().map(|persistence| {
+        Recall::for_session(
+            config,
+            paths,
+            persistence.store.clone(),
+            persistence.stored.id,
+            &persistence.stored.key,
+        )
+    });
     let timezone = config.timezone;
     let services = SessionServices {
         mcp: Some(mcp),
+        recall,
         users: Some(UserNotes::open(
             memory,
             Arc::new(move || Utc::now().with_timezone(&timezone).date_naive()),

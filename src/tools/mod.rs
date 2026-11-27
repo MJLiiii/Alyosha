@@ -118,6 +118,8 @@ pub struct SessionServices {
     /// Where `send_file` puts files for the bridge. The driver sets how it
     /// tells the bridge.
     pub outbox: Option<crate::media::send_file::Outbox>,
+    /// Searches saved sessions; only in sessions with a store.
+    pub recall: Option<crate::recall::Recall>,
 }
 
 impl SessionServices {

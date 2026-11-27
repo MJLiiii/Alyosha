@@ -31,6 +31,8 @@
           clippy
           rustfmt
           python3 # the fake MCP server in the tests
+          # The session store's tests, with recall's pgvector.
+          (postgresql_17.withPackages (p: [ p.pgvector ]))
         ];
       };
     };

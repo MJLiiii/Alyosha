@@ -41,7 +41,7 @@ Designed and written after v1. You send photos, voice, video, GIFs, stickers, an
 
 ## 7. Recall of past sessions
 
-Designed. The `recall` tool searches saved sessions by the words and by meaning, with OpenAI embeddings through GPROXY, and reads around a hit. Your private chat searches itself and your trusted groups; each group searches only itself. [Recall](Recall.md)
+Designed and written. The `recall` tool searches saved sessions by the words and by meaning, with OpenAI embeddings through GPROXY, and reads around a hit. Your private chat searches itself and your trusted groups; each group searches only itself. [Recall](Recall.md)
 
 ## Later
 

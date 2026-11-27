@@ -45,7 +45,7 @@ The normal and guest instructions each get one line: **When the conversation ref
 
 ## Implementation
 
-Add a `recall` module in the root crate with the search, the embedding client, and the `recall` tool. Add migration `004_recall.sql` and the pgvector extension. Register the tool for direct model calls in every session, guest sessions included. [Built-in tools](reference/BuiltInTools.md#recall) · [Schema](SessionStore.md#schema)
+The `recall` module in the root crate, `src/recall.rs`, holds the search, the embedding client, and the `recall` tool. The queries are methods of the `SessionStore` trait, so `PgStore` and the tests' `MemoryStore` both answer them. Migration `004_recall.sql` adds the tables. The tool is registered for direct model calls in every session with a session store, guest sessions included, and the instruction line goes with it. [Built-in tools](reference/BuiltInTools.md#recall) · [Schema](SessionStore.md#schema)
 
 ### Schema and text
 
@@ -66,7 +66,7 @@ create table history_embeddings (
 
 `HistoryEntry::search_text()` gives an entry's text: a user entry's text parts joined by line breaks, without the clock line; an assistant entry's text, then one line per tool call, `<name> <arguments as JSON>`; a tool result's output or error. `append` writes it into `history.text` with the entry. Migration 4 fills it for existing rows in its transaction from the Rust side, as migration 2 imports the memory files. Vectors are keyed by model, so a changed `embed_model` gets new vectors on the next search, and the old ones stay unused.
 
-The container's PostgreSQL loads `pgvector` through `services.postgresql.extensions`. [Deployment](Deployment.md#implementation)
+The container's PostgreSQL loads `pgvector` through `services.postgresql.extensions`. pgvector is not a trusted extension, so the role `alyosha` cannot create it: the `alyosha-db` service, which runs as `postgres`, runs `create extension if not exists vector` in the database, and the migration's own `create extension if not exists` does nothing there. The dev shell's PostgreSQL has pgvector for the tests, which skip with a notice on a PostgreSQL without it. [Deployment](Deployment.md#implementation)
 
 ### Search
 
@@ -108,7 +108,7 @@ The provider may be `[media] transcribe_provider`, which `alyosha gateway login 
 
 ### Verification
 
-Scripted, with `MemoryStore` and a fake embedding server:
+Scripted in `tests/recall.rs`, with `MemoryStore` and a fake embedder:
 
 - Two sessions under `owner:telegram`, the first before a `/new`. Search a word from the first. Check the hit's ref, date, and excerpt, and that `read` returns the entries around it.
 - In a session with a checkpoint, search a word said before and one said after `first_kept_seq`. Check that only the first is found.
@@ -120,6 +120,6 @@ Scripted, with `MemoryStore` and a fake embedding server:
 - Change `embed_model`. Check the next search embeds again under the new model.
 - Run migration 4 on a version 3 database with entries. Check `text` is filled and the clock line is not in it.
 
-With PostgreSQL and pgvector: the migration on a throwaway server, then `nearest` against stored vectors.
+With PostgreSQL and pgvector, in `tests/pg_store.rs`: migration 4 on a throwaway server at version 3, then the words with `%` and `_` in them, the scope, the visible entries, missing and stored vectors, `nearest`, and `read` around an entry.
 
 On ms02: ask from the private chat "what did we talk about the first day?" and check the model calls `recall` and answers from the earlier session.
