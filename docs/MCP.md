@@ -36,7 +36,7 @@ When Alyosha runs in its NixOS container, the container is the outer limit. A se
 
 The model requests an MCP tool like any other tool. The Tool Executor looks it up, checks the caller's scope, and validates the arguments against the schema the server advertised. The handler forwards the call to the server and turns its reply into a tool result. Calls run without approval unless your configuration marks the tool `ask`. Then the Tool Executor shows you the exact call and runs it only if you approve. [Approvals](Approvals.md) The chat's progress message names each call as it starts, for example **MCP: github.search_issues**, so you can see what leaves the machine. [Shared dispatch](ToolExecutor.md#shared-dispatch)
 
-Text in the reply becomes the tool output. Images and other non-text content appear as a one-line placeholder. A reply that the server marks as an error becomes a tool error the model can act on. The usual result limits apply. When the text is too long for them, such as a large page snapshot or a long email thread, the result keeps the start of the text, and Alyosha saves the whole text in the session's logs, as it does for long shell output. The result then carries a `log_path`, and the model reads the rest in chunks with `read_file`. [Large tool results](ContextManager.md#large-tool-results)
+Text in the reply becomes the tool output. Images reach the model as images, as in a screenshot, and other non-text content appears as a one-line placeholder. [Images the tools return](Media.md#images-the-tools-return) A reply that the server marks as an error becomes a tool error the model can act on. The usual result limits apply. When the text is too long for them, such as a large page snapshot or a long email thread, the result keeps the start of the text, and Alyosha saves the whole text in the session's logs, as it does for long shell output. The result then carries a `log_path`, and the model reads the rest in chunks with `read_file`. [Large tool results](ContextManager.md#large-tool-results)
 
 Only direct model calls can use MCP tools. Code Mode scripts cannot.
 
@@ -103,7 +103,8 @@ The handler sends `tools/call` with the original tool name and the validated arg
 | Reply | Tool outcome |
 | --- | --- |
 | `text` content | The text, with blocks joined by newlines |
-| `image` or `audio` content | `[image omitted: <mimeType>]` or `[audio omitted: <mimeType>]` |
+| `image` content | An image of the result, prepared as in [Images in tool results](Media.md#images-in-tool-results) |
+| `audio` content | `[audio omitted: <mimeType>]` |
 | `resource_link` | `[resource: <uri>]` |
 | Embedded `resource` | Its `text` if present, otherwise `[resource omitted: <uri>]` |
 | No content, only `structuredContent` | The structured content as compact JSON |
@@ -129,7 +130,7 @@ Write a small fake stdio server for tests with scriptable tools: one that echoes
 - Configure the fake server. Check that its tools appear as `mcp__fake__<tool>` with the advertised schemas, and that `tools = ["echo"]` registers only `echo`.
 - Advertise a tool named `get.item` and another whose full name exceeds 64 bytes. Check that the first registers as `mcp__fake__get_item` and is called as `get.item`, and the second is skipped with a warning.
 - Configure a missing command and a server that never answers `initialize`. Check that the session starts with the other servers' tools and shows the startup warning within 30 seconds.
-- Call echo, image, and `isError` tools. Check the converted text, the placeholder, and the tool error, and that each result keeps its call ID.
+- Call echo, image, and `isError` tools. Check the converted text, the image in the result, and the tool error, and that each result keeps its call ID.
 - Call the 50 KB tool. Check that the recorded result is the start of the text with a `log_path`, that `read_file` on that path with the next offset returns the following text, that a Code Mode script cannot open it, and that the file is gone after the session ends. Fill the session's log budget first and repeat. Check that the preview survives and the rest is reported unavailable.
 - Call with arguments that violate the schema. Check that the executor rejects them and the server receives nothing.
 - Stop during the sleeping tool with a second call pending. Check that the server receives `notifications/cancelled`, the loop records a cancellation at once and a cancellation for the pending call, and a late reply is ignored. Repeat with a short deadline and check the timeout error.

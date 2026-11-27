@@ -43,12 +43,15 @@ Designed and written after v1. You send photos, voice, video, GIFs, stickers, an
 
 Designed and written. The `recall` tool searches saved sessions by the words and by meaning, with OpenAI embeddings through GPROXY, and reads around a hit. Your private chat searches itself and your trusted groups; each group searches only itself. [Recall](Recall.md)
 
+## 8. Images the tools return
+
+Designed. The model sees images that `read_file`, MCP servers, and browser screenshots return, on the codex, OpenAI, and Claude routes. [Images the tools return](Media.md#images-the-tools-return)
+
 ## Later
 
 These are already deferred on their components' pages and are less urgent:
 
-- Images in tool results, such as `read_file` on an image or a browser screenshot. Images you send are designed. [Media deferred work](Media.md#deferred)
 - Downloads from the browser.
-- Full desktop control. [Browser deferred work](Browser.md#deferred)
+- Full desktop control. Screenshots of pages are designed. [Browser deferred work](Browser.md#deferred)
 
 [Architecture overview](README.md)

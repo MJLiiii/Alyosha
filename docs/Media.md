@@ -38,6 +38,15 @@ The `send_file` tool sends a file from the working folder to the chat the conver
 
 `send_file` is in your private sessions and trusted groups, not in guest sessions. A file must be in the working folder and at most 50 MB, the most Telegram lets a bot send.
 
+## Images the tools return
+
+The model also sees images its tools return, not only the ones you send: a chart it drew and opens with `read_file`, a photo in `inbox/`, an image an MCP server returns, and a screenshot of a web page. "Does this chart look right?", "what is in the photo I sent yesterday?", or "what does the graph on this page show?" then work. [Built-in tools](reference/BuiltInTools.md#read_file) · [MCP results](MCP.md#handle-one-call) · [Browser screenshots](Browser.md#a-small-set-of-tools)
+
+- **Shrunk and kept like yours.** A returned image goes through the same steps as one you send: at most 2048 pixels on the longer side, stored once in the session database, in the conversation from then on. [Images](#images)
+- **Four per result.** A tool result shows at most four images. Further ones become a line saying how many were left out.
+- **Where the route cannot.** The codex and OpenAI routes and Claude take images in tool results. Chat Completions, such as DeepSeek, takes only text there, and Gemini's support is unchecked, so on those routes each image becomes `[image not shown: this route cannot return images from tools]`. With `[model] images = false`, it becomes `[image not shown: this model cannot see images]`, as for images you send.
+- **Text only in Code Mode.** A script's `read_file` of an image is an error. Scripts filter text. [Read-only Code Mode](ToolExecutor.md#read-only-code-mode)
+
 ## Limits
 
 | Limit | Why |
@@ -46,12 +55,15 @@ The `send_file` tool sends a file from the working folder to the chat the conver
 | 25 MB per attachment from QQ | A bound of Alyosha's own, until QQ's own limit is known. |
 | 25 MB of sound per transcription | OpenAI's limit. Alyosha sends the sound as compressed Opus, so this is about two hours. |
 | Eight frames per video or GIF | Each frame costs as much as an image, about 1,600 tokens. |
+| Four images per tool result, 20 MB per image file `read_file` opens | The same cost per image. A larger image file is a tool error. |
 | Ten attachments per message | Telegram's album limit. Further attachments become a line saying they were left out. |
 | 50 MB per file sent, 5 MB on QQ | Telegram's limit for bots, and the most QQ takes in one upload request. QQ's chunked upload is deferred. |
 
 ## Deferred
 
-- Images in tool results: `read_file` on an image, screenshots from the browser, and images that MCP servers return. Until then the model sees an image only when you send it. [MCP results](MCP.md#handle-one-call) · [Browser](Browser.md#deferred)
+- Images in tool results on Chat Completions and Gemini, for example as a user message after the results.
+- PDFs as page images, and audio that MCP servers return.
+- Images in Code Mode.
 - Voice replies spoken by Alyosha, generated images, and live voice calls.
 - Telegram files over 20 MB, which need a Bot API server of your own.
 - Sending the model video or audio natively on routes that take it.
@@ -162,6 +174,28 @@ create table media (
 
 The bridge collects the links of a prompt in order and sends the files after the reply. It deletes each copy once sent or given up on. The session folder is removed when the session ends, as now.
 
+### Images in tool results
+
+A handler returns raw images next to its text, and the Agent Loop prepares them before it records the result, as it prepares attachments before a `User` entry. [Agent Loop tool contract](AgentLoop.md#v1-tool-contract)
+
+```rust
+struct ToolOutput { text, notice, kind, images: Vec<RawImage> }   // images is new
+struct RawImage { mime: String, bytes: Vec<u8> }
+
+struct ToolResultEntry {
+    call_id: CallId,
+    outcome: ToolOutcome,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    images: Vec<MediaRef>,      // new; an entry without images is stored as before
+}
+```
+
+- **Preparing.** For each of the first four images, run the steps of [Images](#images): decode, refuse over 50 megapixels or 512 MB, orient, shrink to 2048 pixels, encode as JPEG or PNG, and `put_media`. An image that fails adds the line `[image could not be read: <reason>]` to the text instead, and the call still succeeds. Further images add `[N more images not shown]`. Without media services, as in the scripted tests' minimal sessions, or with `[model] images = false`, add the matching `image not shown` line and store nothing. A tool error carries no images.
+- **`read_file`.** Before reading text, look at the file's first bytes. PNG, JPEG, GIF, and WebP signatures make the result an image: the text `<path>: <mime>, <width>×<height>, <size>` and the file as one `RawImage`, read through the handle `open_file` returned. A GIF shows its first frame. Over 20 MB is a tool error, **<path> is an image over 20 MB.** `offset` and `max_bytes` are ignored for an image. In Code Mode an image is the tool error **<path> is an image. Code Mode reads text only.** [Built-in tool contracts](reference/BuiltInTools.md#read_file)
+- **MCP.** Each `image` content block, base64 `data` with a `mimeType`, becomes a `RawImage`; one whose data does not decode as base64 becomes the `could not be read` line. `audio` keeps its placeholder. [Handle one call](MCP.md#handle-one-call)
+- **Encoding.** An entry's images follow its text, in order. Each route's native form is in [Images in requests](LLMClientGateway.md#images-in-requests). The Agent Loop loads their bytes into the request's `media` map as it does for `User` entries.
+- **Limits and summaries.** The result limits apply to the text only. The Context Manager counts each image as 1,600 tokens. A summary transcript shows each as `[image]` after the result's excerpt, and `session/load` replays nothing for them. Recall searches the text only. [Token budgets](ContextManager.md#v1-token-budgets) · [Recall](Recall.md)
+
 ### Context and compaction
 
 - **Requests.** Before each model request, the Agent Loop loads the bytes of every image in it with `get_media` into the request's `media` map, base64-encoded. A missing row fails the turn with an error naming the hash. The LLM Client sends them inline, in their place among the text parts. [Image parts](LLMClientGateway.md#images-in-requests)
@@ -186,6 +220,9 @@ These run under `cargo test` with the scripted model, a fake transcription serve
 - Stop during preparation. Check the `Stopped` outcome and no `User` entry.
 - Load a stored v1 `User` entry. Check that it reads as one `Text` part. Resume a session with an image over ACP. Check that the replay shows `[image]`.
 - Script a summary over an image. Check that the transcript shows `[image]` and that the estimate counted 1,600 tokens for it.
+- Script `read_file` on a 4000×3000 PNG in the workspace. Check the text line, one image of 2048×1536 in the `ToolResult` entry, one media row, and the image in the next request on the Responses and Claude fixtures and the `image not shown` line on the Chat Completions and Gemini fixtures. Read a text file, then a 21 MB JPEG and a PNG from Code Mode. Check the text, then the two tool errors.
+- Return five images and one broken image from the fake MCP server's image tool. Check four images, the `could not be read` line, and `[2 more images not shown]`. Set `[model] images = false`. Check the `image not shown` lines and no media rows.
+- Store a `ToolResult` entry with images and load it. Check it reads back with its images, and that an entry stored before this change reads with none. Script a summary over it. Check `[image]` in the transcript and 1,600 tokens per image in the estimate.
 - Call `send_file` on a workspace file. Check the copy in `outbox/`, the `resource_link` before `end_turn`, and the result. Call it on a symlink to a file outside the workspace, on a folder, and on a 51 MB file. Check the tool errors. Check that a guest session has no `send_file`.
 
 In the container:
@@ -197,6 +234,7 @@ With real bots:
 
 - From Telegram send a photo, an album of three, a voice message, a round video, a GIF, an animated sticker, a PDF, and a location, and ask about each. Check the answers and the files in `work/owner/inbox/`.
 - From QQ send a photo, a voice message, a video, and a file. Record what QQ sends for each, then check the answers.
+- Ask Alyosha to open a page with a chart and say what it shows. Check that it takes a screenshot and describes the chart. Through GPROXY on ms02 on 2026-11-27, the codex route answered "Red" to a tool result holding a red 2×2 PNG.
 - Ask Alyosha to draw a chart and send it, and to send a PDF. Check that Telegram shows a photo and a file, and that QQ shows them within its four replies.
 
 [Architecture overview](README.md)

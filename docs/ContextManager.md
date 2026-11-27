@@ -40,7 +40,7 @@ With no checkpoint, select the full history. Otherwise supply the summary separa
 
 ### V1 token budgets
 
-Use one text estimator across native routes. Round up model-visible UTF-8 bytes divided by three and include native message framing. Count each image part as 1,600 tokens, whatever its size. [Context and compaction](Media.md#context-and-compaction) Count system instructions, summary, user and assistant content, tool schemas, call arguments and results, and replay fields that use context. Calibrate the estimate against provider-reported input usage.
+Use one text estimator across native routes. Round up model-visible UTF-8 bytes divided by three and include native message framing. Count each image part as 1,600 tokens, whatever its size, in user entries and in tool results alike. [Context and compaction](Media.md#context-and-compaction) Count system instructions, summary, user and assistant content, tool schemas, call arguments and results, and replay fields that use context. Calibrate the estimate against provider-reported input usage.
 
 | Budget | V1 calculation |
 | --- | --- |

@@ -63,6 +63,14 @@ A `User` entry's parts go in order as the content of one user message, adjacent 
 | Chat Completions | `{"type": "image_url", "image_url": {"url": "data:<mime>;base64,<data>"}}` |
 | Gemini | `{"inline_data": {"mime_type": <mime>, "data": <data>}}` |
 
+A `ToolResult` entry's images follow its text in the tool result. [Images in tool results](Media.md#images-in-tool-results)
+
+| Route | Tool result with images |
+| --- | --- |
+| Responses (`codex`, `openai`) | `output` becomes a list: `{"type": "input_text", "text": ...}` then one `input_image` part per image, as above. Without images it stays a string. |
+| Claude Messages | `content` becomes a list: a `text` block, then one `image` block per image. |
+| Chat Completions, Gemini | The text, then `[image not shown: this route cannot return images from tools]` per image. |
+
 A route or model that rejects images fails like any unsupported request; set `[model] images = false` for such a model. [Configuration](reference/Configuration.md#model)
 
 The client also sends speech to OpenAI's transcription route through GPROXY, with the same connect and response limits. [Transcription](Media.md#transcription)

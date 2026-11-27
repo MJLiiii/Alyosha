@@ -8,7 +8,7 @@ The Tool Registry advertises eleven built-in tools, plus any tools from configur
 
 | Tool | Purpose | Inputs | Successful output |
 | --- | --- | --- | --- |
-| `read_file` | Read a bounded chunk of UTF-8 text | `path`, `offset?`, `max_bytes?` | `text` and `next_offset?` |
+| `read_file` | Read a bounded chunk of UTF-8 text, or look at an image | `path`, `offset?`, `max_bytes?` | `text` and `next_offset?`, or the image |
 | `write_file` | Create or overwrite a workspace file | `path`, `content` | `bytes_written` |
 | `edit_file` | Replace one exact match in a workspace file | `path`, `old_text`, `new_text` | Success acknowledgment |
 | `run_command` | Run a shell command in the workspace sandbox, or start it as a background job | `command`, `timeout_seconds?`, `background?` | `status`, `output`, and `log_path?`, or a job's `job_id`, `log_path`, and `Started` |
@@ -23,6 +23,8 @@ The Tool Registry advertises eleven built-in tools, plus any tools from configur
 ### `read_file`
 
 Open the workspace file, current session log, or skill file under `/skills` with `open_file(path, Read)`. A session log is a `log_path` from `run_command` or from a shortened MCP result. [MCP results](../MCP.md#handle-one-call) Code Mode may read regular workspace files only. Use a zero-based byte `offset`, defaulting to zero, on a UTF-8 character boundary. Accept a positive `max_bytes` and cap it at the per-result byte limit. Use that limit when `max_bytes` is omitted. Return only whole characters.
+
+A PNG, JPEG, GIF, or WebP file, recognized by its first bytes, returns a line describing it and the image itself, at most 20 MB, and ignores `offset` and `max_bytes`. Code Mode gets a tool error for it. [Images in tool results](../Media.md#images-in-tool-results)
 
 Include `next_offset` whenever more text remains. Add the requested offset to the UTF-8 byte length of the text actually returned, accounting for any shortening by the batch budget. Keep this offset in result metadata so it survives even when only metadata fits. [Tool result limits](../ContextManager.md#v1-tool-result-limits)
 
