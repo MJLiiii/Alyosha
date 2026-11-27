@@ -121,7 +121,8 @@ let
       EOF
       }
       in_container() {
-        systemd-run -M alyosha --quiet --wait --pipe --collect "$@"
+        systemd-run -M alyosha --quiet --wait --pipe --collect \
+          --setenv=PATH=/run/current-system/sw/bin "$@"
       }
       restart_users() {
         case "$1" in
@@ -226,7 +227,7 @@ let
             /run/current-system/sw/bin/bash -c "cd ${state} && exec bash"
           ;;
         check)
-          in_container --uid=alyosha --setenv=PATH=/run/current-system/sw/bin ${alyosha}/bin/alyosha check-units
+          in_container --uid=alyosha ${alyosha}/bin/alyosha check-units
           ;;
         commands)
           cat <<'EOF'
