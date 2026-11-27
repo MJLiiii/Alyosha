@@ -2,7 +2,7 @@
 
 Memory holds facts that outlast a session. Examples are your preferences, facts about you, corrections you have given, and stable facts about your machines and projects. Session history ends with the session. Memory starts in the next one. [Agent State](AgentState.md) · [Architecture overview](README.md)
 
-V1 stores **curated facts only**. Alyosha does not keep or search past conversations, and it does not learn procedures. Procedures you write yourself are [skills](Skills.md). Every memory is one you or the model wrote on purpose.
+Memory stores **curated facts only**. Searching past conversations is [recall](Recall.md), a separate tool. Alyosha does not learn procedures. Procedures you write yourself are [skills](Skills.md). Every memory is one you or the model wrote on purpose.
 
 ## Where memories live
 
@@ -63,7 +63,6 @@ The notes are not mixed with your own memory in either direction.
 
 ## Deferred
 
-- Recall of past sessions. Their history is now saved in the session store, but nothing searches it yet. [Durable sessions](SessionStore.md)
 - Background extraction of memories after a session.
 - Per-workspace memory.
 - Approval for writes after the turn has read untrusted content.

@@ -56,7 +56,6 @@ If the database cannot be reached, `alyosha acp` stops with an error instead of 
 ## Deferred
 
 - Saving the message queue, so messages sent during a crash are answered after it.
-- Searching or recalling past sessions. [Memory deferred work](Memory.md#deferred)
 - An archive of chat messages as the apps show them, including group messages that do not mention Alyosha.
 - Deleting old sessions. V1 keeps them all.
 - Resuming background jobs, open approvals, or saved full outputs after a restart.
@@ -109,7 +108,7 @@ create table checkpoints (
 );
 ```
 
-`002_memory.sql` adds the `memories` and `user_notes` tables. [Memory store](Memory.md#v1-store-contract) `003_media.sql` adds the `media` table, which holds the images of every session, and the store gains `put_media` and `get_media`. [The media table](Media.md#the-media-table)
+`002_memory.sql` adds the `memories` and `user_notes` tables. [Memory store](Memory.md#v1-store-contract) `004_recall.sql` adds the searchable `text` column and the `history_embeddings` table. [Recall schema](Recall.md#schema-and-text) `003_media.sql` adds the `media` table, which holds the images of every session, and the store gains `put_media` and `get_media`. [The media table](Media.md#the-media-table)
 
 A key's current session is its row with the highest `id`. `entry` is `json` rather than `jsonb` because `jsonb` reorders object keys, and provider replay data goes back to the provider as it came.
 

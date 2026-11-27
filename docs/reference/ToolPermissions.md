@@ -10,6 +10,7 @@ Selecting a workspace at session startup authorizes the following operations. Th
 | `run_command` | Run each command in a fresh command unit for the session's workspace, as `alyosha-run`, with `/skills` mounted read-only. |
 | `job` | See and stop this session's background jobs, which run in command units like `run_command`. Direct model calls only. [Background jobs](../Jobs.md) |
 | `memory` | Read and atomically replace files in the owner's memory store. Direct model calls only. [Memory store](#memory-store) |
+| `recall` | Read saved history within the session's scope: owner sessions see `owner:*` and `group:*`, every other session only its own key. Direct model calls only. [Recall](../Recall.md#what-the-model-can-search) |
 | `skill` | Read the skills directory. Direct model calls only. [Skills directory](#skills-directory) |
 | `ask_owner` | Ask the owner through the session's front end. No file, shell, or network access. Direct model calls only. [Approvals](../Approvals.md) |
 | `send_file` | Read a regular workspace file, as `read_file` does, and copy it into the session's own folder for the bridge to send. Direct model calls only. [Sending files out](../Media.md#sending-files-out) |

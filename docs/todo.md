@@ -39,11 +39,14 @@ Designed. Alyosha acts freely in its own space and asks before reaching the real
 
 Designed and written after v1. You send photos, voice, video, GIFs, stickers, and files, and Alyosha sends files back. [Photos, voice, video, and files](Media.md)
 
+## 7. Recall of past sessions
+
+Designed. The `recall` tool searches saved sessions by the words and by meaning, with OpenAI embeddings through GPROXY, and reads around a hit. Your private chat searches itself and your trusted groups; each group searches only itself. [Recall](Recall.md)
+
 ## Later
 
 These are already deferred on their components' pages and are less urgent:
 
-- Recall of past sessions. [Memory deferred work](Memory.md#deferred)
 - Images in tool results, such as `read_file` on an image or a browser screenshot. Images you send are designed. [Media deferred work](Media.md#deferred)
 - Downloads from the browser.
 - Full desktop control. [Browser deferred work](Browser.md#deferred)

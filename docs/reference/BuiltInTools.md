@@ -1,10 +1,10 @@
 # Built-in tool contracts
 
-The Tool Registry advertises ten built-in tools, plus any tools from configured MCP servers. The Tool Executor passes validated arguments and a scoped `ToolContext` to each handler. File and shell handlers use the Environment Interface. Relative paths and shell commands start from the session working directory. Absolute paths under `/workspace` work in both the shell and the file tools. Paths under `/skills` are read-only in both. [MCP Client](../MCP.md) · [Tool Registry](../ToolRegistry.md) · [Environment Interface](../EnvironmentInterface.md#handler-interface) · [Tool permissions](ToolPermissions.md)
+The Tool Registry advertises eleven built-in tools, plus any tools from configured MCP servers. The Tool Executor passes validated arguments and a scoped `ToolContext` to each handler. File and shell handlers use the Environment Interface. Relative paths and shell commands start from the session working directory. Absolute paths under `/workspace` work in both the shell and the file tools. Paths under `/skills` are read-only in both. [MCP Client](../MCP.md) · [Tool Registry](../ToolRegistry.md) · [Environment Interface](../EnvironmentInterface.md#handler-interface) · [Tool permissions](ToolPermissions.md)
 
 ## V1 inputs and outputs
 
-`offset`, `max_bytes`, and `timeout_seconds` are integers, and `background` is a boolean. All other inputs are strings. A question mark marks an optional field.
+`offset`, `max_bytes`, `timeout_seconds`, `before`, and `after` are integers, and `background` is a boolean. All other inputs are strings. A question mark marks an optional field.
 
 | Tool | Purpose | Inputs | Successful output |
 | --- | --- | --- | --- |
@@ -15,6 +15,7 @@ The Tool Registry advertises ten built-in tools, plus any tools from configured 
 | `job` | List, check, or stop this session's background jobs | `command`, `id?` | Depends on `command` |
 | `execute_code` | Read and filter files in a JavaScript sandbox | `code` | Text returned by the script |
 | `memory` | List, read, write, or delete long-term memories | `command`, `name?`, `description?`, `content?` | Depends on `command` |
+| `recall` | Search saved sessions, or read around a hit | `command`, `query?`, `ref?`, `before?`, `after?` | Hits with refs and excerpts, or the entries around one |
 | `skill` | List skills or load one | `name?` | The skill list, or one skill's files and instructions |
 | `ask_owner` | Ask the owner a question and wait for the answer | `question`, `choices?` | The owner's answer as text |
 | `send_file` | Send a workspace file to the chat | `path`, `caption?` | `status`, `name`, and `bytes` |
@@ -59,6 +60,10 @@ The `code` string contains an async JavaScript function that takes `tools` and r
 
 Only in guest sessions, which answer group chats. `notes` replaces the complete notes of the person whose message the turn answers, at most 2 KiB. The tool has no input naming the person: Alyosha takes it from the message's sender. Successful writes return a notice. [People's notes](../Memory.md#notes-on-people)
 
+### `recall`
+
+`command` is `search` or `read`. `search` takes a `query` and returns up to eight hits from the saved sessions the session may see, found by the words and by meaning, each with a ref, date, chat, and excerpt. `read` takes a `ref` and returns the entries around it. In every session, guest sessions included; a group searches only its own history. Direct model calls only. The handler uses the session store, not the Environment Interface. [Recall tool contract](../Recall.md#recall-tool)
+
 ### `skill`
 
 With no `name`, list every valid skill with its description. With a `name`, return a header with the path of its `SKILL.md` and its other files under `/skills/<name>/`, followed by the instructions without the front matter. An invalid or missing skill returns a tool error. The handler uses the session's skill store, not the Environment Interface. [Skill tool contract](../Skills.md#skill-tool)
@@ -73,4 +78,4 @@ The model sends a file from the workspace to the chat the conversation is in: a 
 
 ## Startup registration
 
-The filesystem module supplies the three file handlers, the shell module supplies `run_command` and `job`, the Code Mode module supplies `execute_code`, the memory module supplies `memory`, the skills module supplies `skill`, the approvals module supplies `ask_owner`, and the media module supplies `send_file`. The Tool Registry pairs each handler with its model-facing definition at startup. [Registration example](../ToolRegistry.md#register-built-in-tools-at-startup) · [Architecture overview](../README.md)
+The filesystem module supplies the three file handlers, the shell module supplies `run_command` and `job`, the Code Mode module supplies `execute_code`, the memory module supplies `memory`, the recall module supplies `recall`, the skills module supplies `skill`, the approvals module supplies `ask_owner`, and the media module supplies `send_file`. The Tool Registry pairs each handler with its model-facing definition at startup. [Registration example](../ToolRegistry.md#register-built-in-tools-at-startup) · [Architecture overview](../README.md)

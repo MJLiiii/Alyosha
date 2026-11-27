@@ -55,6 +55,9 @@ url = "http://127.0.0.1:18787"
 [media]
 transcribe_provider = "openai"
 
+[recall]
+embed_provider = "openai"
+
 [approvals]
 timeout_minutes = 60
 
@@ -109,6 +112,13 @@ MODE = "stdio"
 | --- | --- | --- | --- |
 | `transcribe_provider` | string | none | The GPROXY provider, on the `openai` channel, that transcribes voice messages and the sound of videos. `alyosha gateway login transcription` creates it and asks for your OpenAI API key, which GPROXY keeps encrypted and which never goes in the settings. It may be the same as `[model] provider` when that is an `openai` provider. Without it, voice messages reach the model as a line saying transcription is not set up. [Transcription](../Media.md#transcription) |
 | `transcribe_model` | string | `"gpt-transcribe"` | The transcription model. |
+
+### `[recall]`
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `embed_provider` | string | none | The GPROXY provider, on the `openai` channel, that computes the vectors for search by meaning. It may be `[media] transcribe_provider`. Without it, `recall` searches only by the words. [Recall](../Recall.md#how-it-searches) |
+| `embed_model` | string | `"text-embedding-3-small"` | The embedding model. Its vectors must have 1,536 dimensions. |
 
 ### `[approvals]`
 

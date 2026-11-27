@@ -245,7 +245,7 @@ When a background job finishes, do not queue its message. Send the notification 
 `alyosha acp --guest` serves the guest session of one group chat. Bridges start one per group. Everything above applies, with these differences. [Group chats](#group-chats)
 
 - **Session.** `session/new` still requires an absolute `cwd`, but the session ignores it. It runs in `/var/lib/alyosha/work/guest`, created with mode `0700`, which is only the working directory of its MCP servers. It loads no dev shell and no sandbox.
-- **Tools.** Register `user_memory` and the tools of the MCP servers named in `[guest] mcp_servers`, and nothing else: no workspace, shell, Code Mode, job, `memory`, `skill`, `send_file`, or `ask_owner` tool. The session has no approver. `available_commands_update` lists no commands. [People's notes](Memory.md#notes-on-people) · [Configuration](reference/Configuration.md#guest)
+- **Tools.** Register `user_memory`, `recall` limited to the group's own key, and the tools of the MCP servers named in `[guest] mcp_servers`, and nothing else: no workspace, shell, Code Mode, job, `memory`, `skill`, `send_file`, or `ask_owner` tool. The session has no approver. `available_commands_update` lists no commands. [People's notes](Memory.md#notes-on-people) · [Configuration](reference/Configuration.md#guest)
 - **Instruction.** Use the guest instruction below instead of the normal one, with no memory or skills index. The channel line is "People write to you in a group chat through <client name>."
 - **Prompts.** Each `session/prompt` must carry the sender in `_meta`: `{"alyosha": {"sender": {"id": "telegram-123", "name": "Bob"}}}`. Refuse a prompt without a valid sender with an invalid-params error. Treat all text as a message: `/compact` and `/job` are not commands here.
 - **Startup warnings** go to the log only, never into a group.
@@ -282,7 +282,7 @@ These run under `cargo test` with an in-process ACP client and the scripted mode
 - Send `session/cancel` during a scripted tool call. Check that all updates arrive before the response and that the response is `cancelled`.
 - Send `/compact` during a turn. Check that it returns the busy message and does not enter history.
 - In group mode, check that the channel line names a trusted group chat and that the session has the normal tools and `available_commands_update`.
-- In guest mode, check that the tool list holds only `user_memory` and the `[guest]` servers' tools, that the system instruction holds no memory index, that a prompt without a sender is refused, and that `/job ls` is sent to the model as text.
+- In guest mode, check that the tool list holds only `user_memory`, `recall`, and the `[guest]` servers' tools, that the system instruction holds no memory index, that a prompt without a sender is refused, and that `/job ls` is sent to the model as text.
 - Script a model failure. Check that the prompt gets a JSON-RPC error and the next prompt still runs.
 - Send `session/new` while a session is open with a waiting prompt. Check that the waiting prompt ends `cancelled` and the old session's MCP servers exit.
 - Parse every line written to standard output during these cases. Check that each is a valid JSON-RPC message.
