@@ -159,13 +159,12 @@ impl LoginTerminal for StdTerminal {
     }
 }
 
-/// Creates the gateway key and the provider when missing, signs in, replaces
-/// the provider's old credentials, and sends one small request.
-pub async fn login(
+/// Reads the admin key and creates the gateway key when missing.
+async fn connect(
     config: &Config,
     files: &GatewayFiles,
     terminal: &mut dyn LoginTerminal,
-) -> Result<(), GatewayError> {
+) -> Result<(Admin, String), GatewayError> {
     if !files.env_file.exists() {
         return Err(GatewayError::NotInitialized(files.env_file.clone()));
     }
@@ -196,7 +195,46 @@ pub async fn login(
             key
         }
     };
+    Ok((admin, gateway_key))
+}
 
+/// Checks an API key as typed: surrounding space is dropped, and a key with
+/// anything but letters, digits, `-`, and `_` is refused, since that means
+/// more than the key was pasted. The error never shows the key.
+pub fn check_api_key(typed: &str) -> Result<&str, GatewayError> {
+    let key = typed.trim();
+    if key.is_empty() {
+        return Err(GatewayError::Login("no key was entered".into()));
+    }
+    if let Some((position, character)) = key
+        .chars()
+        .enumerate()
+        .find(|(_, c)| !(c.is_ascii_alphanumeric() || *c == '-' || *c == '_'))
+    {
+        let shown = if character.is_whitespace() {
+            "a space".to_owned()
+        } else {
+            format!("{character:?}")
+        };
+        return Err(GatewayError::Login(format!(
+            "the key has {shown} at character {} of {}. An API key has only letters, digits, - and _, so more than the key was pasted. Copy only the key and try again.",
+            position + 1,
+            key.chars().count()
+        )));
+    }
+    Ok(key)
+}
+
+/// `alyosha gateway login`: creates the gateway key and the model's
+/// provider when missing, signs in, replaces the provider's old
+/// credentials, and sends one small request. Transcription has a login of
+/// its own, [`login_transcription`].
+pub async fn login(
+    config: &Config,
+    files: &GatewayFiles,
+    terminal: &mut dyn LoginTerminal,
+) -> Result<(), GatewayError> {
+    let (admin, gateway_key) = connect(config, files, terminal).await?;
     let provider = &config.model.provider;
     let channel = channel(config.model.api);
     let provider_id = match admin.find_provider(provider).await? {
@@ -213,11 +251,8 @@ pub async fn login(
     let credential_id = if config.model.api == Api::Codex {
         admin.device_login(&provider_id, terminal).await?
     } else {
-        let key = terminal.read_secret(&format!("API key for {provider}: "))?;
-        let key = key.trim();
-        if key.is_empty() {
-            return Err(GatewayError::Login("no key was entered".into()));
-        }
+        let typed = terminal.read_secret(&format!("API key for {provider}: "))?;
+        let key = check_api_key(&typed)?;
         admin.add_api_key(&provider_id, key).await?
     };
     for old in old_credentials.iter().filter(|id| **id != credential_id) {
@@ -254,28 +289,30 @@ pub async fn login(
                 config.model.name,
                 reply.entry.text().trim()
             ));
+            Ok(())
         }
-        Err(error) => {
-            return Err(GatewayError::Login(format!(
-                "the test request failed: {error}"
-            )));
-        }
+        Err(error) => Err(GatewayError::Login(format!(
+            "the test request failed: {error}"
+        ))),
     }
-    login_transcription(config, &admin, &gateway_key, terminal).await
 }
 
-/// Sets up `[media] transcribe_provider` on the `openai` channel with its
-/// own API key, unless it is the model's provider, and sends it one short
-/// transcription. See `docs/Media.md#transcription`.
-async fn login_transcription(
+/// `alyosha gateway login transcription`: sets up `[media]
+/// transcribe_provider` on the `openai` channel with its own API key, unless
+/// it is the model's provider, and sends it one short transcription. It
+/// never touches the model's sign-in. See `docs/Media.md#transcription`.
+pub async fn login_transcription(
     config: &Config,
-    admin: &Admin,
-    gateway_key: &str,
+    files: &GatewayFiles,
     terminal: &mut dyn LoginTerminal,
 ) -> Result<(), GatewayError> {
     let Some(provider) = config.media.transcribe_provider.as_deref() else {
-        return Ok(());
+        return Err(GatewayError::Login(
+            "media.transcribe_provider is not set in the settings".into(),
+        ));
     };
+    let (admin, gateway_key) = connect(config, files, terminal).await?;
+    let gateway_key = gateway_key.as_str();
     if provider == config.model.provider {
         if config.model.api != Api::Openai {
             return Err(GatewayError::Login(format!(
@@ -292,11 +329,9 @@ async fn login_transcription(
             }
         };
         let old_credentials = admin.credentials(&provider_id).await?;
-        let key = terminal.read_secret(&format!("OpenAI API key for {provider} (transcription): "))?;
-        let key = key.trim();
-        if key.is_empty() {
-            return Err(GatewayError::Login("no key was entered".into()));
-        }
+        let typed =
+            terminal.read_secret(&format!("OpenAI API key for {provider} (transcription): "))?;
+        let key = check_api_key(&typed)?;
         let credential_id = admin.add_api_key(&provider_id, key).await?;
         for old in old_credentials.iter().filter(|id| **id != credential_id) {
             admin.delete_credential(old).await?;
@@ -605,6 +640,17 @@ mod tests {
 
     fn files(root: &Path) -> GatewayFiles {
         GatewayFiles::new(&Paths::under(root))
+    }
+
+    #[test]
+    fn pasted_extras_are_refused_without_showing_the_key() {
+        assert_eq!(check_api_key("  sk-proj-Ab_9-x \n").unwrap(), "sk-proj-Ab_9-x");
+        let error = check_api_key("sk-proj-secret 15:58").unwrap_err().to_string();
+        assert!(error.contains("a space at character 15 of 20"), "{error}");
+        assert!(!error.contains("secret"), "{error}");
+        let error = check_api_key("sk-proj-secret:58").unwrap_err().to_string();
+        assert!(error.contains("':' at character 15"), "{error}");
+        assert!(check_api_key("   ").is_err());
     }
 
     #[test]

@@ -71,7 +71,7 @@ On the host, `alyosha` is a small program of the flake's module that manages the
 | `alyosha secret set <name>` | Reads a secret from the terminal without echo, or from standard input, writes it with the right owner and mode, and restarts the services that use it |
 | `alyosha secret list` | The names of the secrets that are set, never their values |
 | `alyosha secret remove <name>` | Removes one and restarts its services |
-| `alyosha gateway init` · `alyosha gateway login` | GPROXY's first setup and provider sign-in, run as root in the container [Run GPROXY as a service](LLMClientGateway.md#run-gproxy-as-a-service) |
+| `alyosha gateway init` · `alyosha gateway login` · `alyosha gateway login transcription` | GPROXY's first setup, the model provider's sign-in, and the OpenAI API key for transcription, run as root in the container [Run GPROXY as a service](LLMClientGateway.md#run-gproxy-as-a-service) · [Transcription](Media.md#transcription) |
 | `alyosha backup now` · `alyosha backup list` · `alyosha backup restore <file>` | Start a dump, list dumps, restore one into an emptied database |
 | `alyosha memory list` | Your memories' names, dates, and descriptions, then how many memories and people's notes the database holds, read-only. It runs `alyosha memory-list` in the container as `alyosha`. [The host's list](Memory.md#the-hosts-list) |
 | `alyosha shell` | A shell as `alyosha` in its state folder, to look at the working folders |

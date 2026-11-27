@@ -112,6 +112,7 @@ let
         alyosha secret remove NAME            Remove a secret
         alyosha gateway init                  Write GPROXY's secrets and start it
         alyosha gateway login                 Sign in to the model provider
+        alyosha gateway login transcription   Set the OpenAI API key for voice transcription
         alyosha backup now|list               Dump the session database, or list the dumps
         alyosha backup restore FILE           Load a dump into an emptied database
         alyosha memory list                   Your memories and how many people have notes, read-only
@@ -195,8 +196,17 @@ let
               systemctl -M alyosha start gproxy
               ;;
             login)
-              machinectl shell -q --setenv=TERM="''${TERM:-xterm-256color}" root@alyosha ${alyosha}/bin/alyosha gateway login
-              restart_users gateway-key
+              case "''${3:-}" in
+                "")
+                  machinectl shell -q --setenv=TERM="''${TERM:-xterm-256color}" root@alyosha ${alyosha}/bin/alyosha gateway login
+                  restart_users gateway-key
+                  ;;
+                transcription)
+                  # Only the transcription key: the model's sign-in stays as it is.
+                  machinectl shell -q --setenv=TERM="''${TERM:-xterm-256color}" root@alyosha ${alyosha}/bin/alyosha gateway login transcription
+                  ;;
+                *) usage; exit 2 ;;
+              esac
               ;;
             *) usage; exit 2 ;;
           esac
@@ -230,7 +240,7 @@ let
           cat <<'EOF'
       [{"command":"status"},{"command":"logs","args":["telegram|qq|gproxy|db","-f"]},
        {"command":"secret set","args":["NAME"]},{"command":"secret list"},{"command":"secret remove","args":["NAME"]},
-       {"command":"gateway init"},{"command":"gateway login"},
+       {"command":"gateway init"},{"command":"gateway login"},{"command":"gateway login transcription"},
        {"command":"backup now"},{"command":"backup list"},{"command":"backup restore","args":["FILE"]},
        {"command":"memory list"},{"command":"shell"},{"command":"check"},{"command":"commands --json"}]
       EOF

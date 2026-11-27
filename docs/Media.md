@@ -132,9 +132,9 @@ Voice messages already in Ogg Opus, as Telegram sends them, go to transcription 
 
 Send the sound to OpenAI's transcription API through GPROXY: `POST <gateway url>/<transcribe_provider>/v1/audio/transcriptions`, with the gateway key, as `multipart/form-data` with `file` and `model`, without a language, so OpenAI detects it. Read `text` from the JSON reply. Use the same 10-second connect and 5-minute response limits as model requests. Sound over 25 MB is a failed step. [Model requests](LLMClientGateway.md#v1-caller-contract)
 
-`[media] transcribe_provider` names a GPROXY provider on the `openai` channel, and `transcribe_model` the model, `gpt-transcribe` by default. Without `transcribe_provider`, the step fails with `transcription is not set up`. `alyosha gateway login` creates the provider and asks for its API key, as it does for the model's provider. [Gateway login](LLMClientGateway.md#run-gproxy-as-a-service) · [Configuration](reference/Configuration.md#media)
+`[media] transcribe_provider` names a GPROXY provider on the `openai` channel, and `transcribe_model` the model, `gpt-transcribe` by default. Without `transcribe_provider`, the step fails with `transcription is not set up`. The API key has a login of its own, `alyosha gateway login transcription`, separate from the model's `alyosha gateway login`, so setting or replacing the key never asks you to sign in to ChatGPT again, and signing in again never asks for the key. It creates the provider when missing, reads the key without echo, and refuses a key with anything but letters, digits, `-`, and `_`, which means more than the key was pasted, without showing the key. GPROXY keeps the key encrypted in its own folder in the container, so neither the settings nor your NixOS configuration ever hold it. A transcription OpenAI answers with 401 or 403 says the key was refused and names the command. [Gateway login](LLMClientGateway.md#run-gproxy-as-a-service) · [Configuration](reference/Configuration.md#media)
 
-GPROXY lists the route, but its documentation does not say how it forwards a multipart body. That is checked at the start of this work. If it does not work, Alyosha calls `api.openai.com` directly with a secret of its own, `openai-api-key`, instead.
+GPROXY forwards the multipart body: on ms02 on 2026-11-27, a voice message reached OpenAI through it, which answered 401 for a key pasted with extra characters. No direct connection to OpenAI is needed.
 
 ### The media table
 
@@ -191,7 +191,7 @@ These run under `cargo test` with the scripted model, a fake transcription serve
 In the container:
 
 - Start a media unit by hand on a sample video. Check the frames and `audio.ogg`, that `curl` to any address fails inside it, and that it cannot read `/var/lib/alyosha-secrets`.
-- Send a short voice message through GPROXY to OpenAI with the configured provider. Check the transcript. This settles the multipart question above.
+- Run `alyosha gateway login transcription` with a key followed by a space and more text. Check that it is refused without showing the key. Run it with the key alone. Check the test transcription, then send a voice message and check the transcript.
 
 With real bots:
 

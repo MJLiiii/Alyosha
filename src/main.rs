@@ -19,6 +19,8 @@ Usage:
   alyosha acp --group     The same, as a trusted group chat's full session
   alyosha gateway init    Write GPROXY's secrets file
   alyosha gateway login   Set up the model provider and sign in
+  alyosha gateway login transcription
+                          Set the OpenAI API key for voice transcription
   alyosha config check FILE
                           Check a configuration file, as the container module does
   alyosha run-exec RUN    Inside a command's unit: run the command its run folder holds
@@ -35,7 +37,8 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         ["gateway", "init"] => gateway_init(),
-        ["gateway", "login"] => gateway_login(),
+        ["gateway", "login"] => gateway_login(false),
+        ["gateway", "login", "transcription"] => gateway_login(true),
         ["gateway", ..] => usage_error(),
         ["acp"] => ExitCode::from(alyosha::acp::run(Mode::Owner)),
         ["acp", "--guest"] => ExitCode::from(alyosha::acp::run(Mode::Guest)),
@@ -125,7 +128,7 @@ fn gateway_init() -> ExitCode {
     }
 }
 
-fn gateway_login() -> ExitCode {
+fn gateway_login(transcription: bool) -> ExitCode {
     let paths = match paths() {
         Ok(paths) => paths,
         Err(code) => return code,
@@ -135,11 +138,14 @@ fn gateway_login() -> ExitCode {
         Err(error) => return fail(&error.to_string()),
     };
     let runtime = tokio::runtime::Runtime::new().expect("a Tokio runtime starts");
-    let result = runtime.block_on(gateway_admin::login(
-        &config,
-        &GatewayFiles::new(&paths),
-        &mut StdTerminal,
-    ));
+    let files = GatewayFiles::new(&paths);
+    let result = runtime.block_on(async {
+        if transcription {
+            gateway_admin::login_transcription(&config, &files, &mut StdTerminal).await
+        } else {
+            gateway_admin::login(&config, &files, &mut StdTerminal).await
+        }
+    });
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {

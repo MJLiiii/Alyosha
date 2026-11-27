@@ -107,7 +107,7 @@ MODE = "stdio"
 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `transcribe_provider` | string | none | The GPROXY provider, on the `openai` channel, that transcribes voice messages and the sound of videos. `alyosha gateway login` creates it and asks for your OpenAI API key. It may be the same as `[model] provider` when that is an `openai` provider. Without it, voice messages reach the model as a line saying transcription is not set up. [Transcription](../Media.md#transcription) |
+| `transcribe_provider` | string | none | The GPROXY provider, on the `openai` channel, that transcribes voice messages and the sound of videos. `alyosha gateway login transcription` creates it and asks for your OpenAI API key, which GPROXY keeps encrypted and which never goes in the settings. It may be the same as `[model] provider` when that is an `openai` provider. Without it, voice messages reach the model as a line saying transcription is not set up. [Transcription](../Media.md#transcription) |
 | `transcribe_model` | string | `"gpt-transcribe"` | The transcription model. |
 
 ### `[approvals]`

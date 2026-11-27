@@ -117,8 +117,12 @@ impl GatewayTranscriber {
         if !status.is_success() {
             let message = error_message(&body).unwrap_or_default();
             return Err(match status.as_u16() {
-                401 | 403 | 404 => format!(
-                    "the transcription provider is not signed in; run `alyosha gateway login` ({status} {message})"
+                401 | 403 => format!(
+                    "OpenAI refused the API key; set it again with `alyosha gateway login transcription` ({status} {message})"
+                ),
+                404 => format!(
+                    "the transcription provider {} is not set up; run `alyosha gateway login transcription` ({status} {message})",
+                    self.provider
                 ),
                 429 => format!("rate limit ({message})"),
                 _ => format!("{status} {message}").trim().to_owned(),
@@ -230,7 +234,7 @@ mod tests {
             .transcribe(vec![1], "audio/ogg", CancellationToken::new())
             .await
             .unwrap_err();
-        assert!(error.contains("alyosha gateway login"), "{error}");
+        assert!(error.contains("alyosha gateway login transcription"), "{error}");
         let too_big = vec![0; MAX_AUDIO_BYTES + 1];
         let error = transcriber
             .transcribe(too_big, "audio/ogg", CancellationToken::new())
