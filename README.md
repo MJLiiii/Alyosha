@@ -12,9 +12,10 @@ The first implementation milestone is one complete turn with a scripted model an
 
 ```bash
 nix build .#alyosha .#gproxy          # or: cargo build --workspace
-alyosha gateway init                  # writes ~/alyosha/state/secrets/gproxy.env
-# start GPROXY (see docs/LLMClientGateway.md#implementation), then:
-alyosha gateway login
+# add nixosModules.container to your NixOS configuration, rebuild, then on the host:
+alyosha gateway init                  # GPROXY's master key, as a secret in the container
+alyosha gateway login                 # sign in to the provider
+alyosha secret set telegram-token     # and qq-secret for the QQ bridge
 ```
 
-Start from [examples/config.toml](examples/config.toml) for `~/alyosha/config/config.toml`, and copy the skills in [skills/](skills) to `~/alyosha/config/skills/`. Then message the Telegram or QQ bot. The container module is `nixosModules.container` in the flake. [Deployment](docs/Deployment.md#implementation)
+Write your settings as `services.alyosha.settings`, in the shape of [examples/config.toml](examples/config.toml), and copy the skills in [skills/](skills) to `~/.agents/skills/`. Then message the Telegram or QQ bot. The container module is `nixosModules.container` in the flake. [Deployment](docs/Deployment.md#implementation)

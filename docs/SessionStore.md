@@ -45,9 +45,9 @@ The 04:00 fresh start was how a chat session got rid of what it should not carry
 
 ## The database
 
-PostgreSQL runs as a service inside the NixOS container. It listens only on a Unix socket, not on any network address, and accepts your user by peer authentication, so there is no password to keep. Its data lives in the container's own state, and a daily dump goes to `~/alyosha/state/backups/`, which is mounted from the host. [Deployment](Deployment.md)
+PostgreSQL runs as a service inside the NixOS container. It listens only on a Unix socket, not on any network address, and accepts the user `alyosha` by peer authentication, so there is no password to keep. Its data lives in the container's own state, and a daily dump goes to `/var/backup/alyosha/` on the host. [Where things live](Deployment.md#where-things-live) [Deployment](Deployment.md)
 
-The model's shell runs in Bubblewrap, which does not mount the socket, so the model cannot read or change its history or memory with `psql`. MCP servers run outside the sandbox as you and could connect, like everything else they can reach. [Tool permissions](reference/ToolPermissions.md#container-limits)
+The model's commands run as `alyosha-run`, which has no role, in units that hide the socket, so the model cannot read or change its history or memory with `psql`. MCP servers run as `alyosha` and could connect, like everything else they can reach. [Tool permissions](reference/ToolPermissions.md#container-limits)
 
 The database holds what was said, which the logs never do. [Logging](reference/Logging.md)
 
@@ -199,13 +199,13 @@ services.postgresql = {
 };
 ```
 
-- **`alyosha-db.service`**, a oneshot that runs as `postgres` after PostgreSQL starts, creates the owner's login role and the `alyosha` database owned by it, each only if missing. NixOS's `ensureDBOwnership` only covers a database named after its user, so it does not fit.
-- **`alyosha-db-backup.service`** runs daily as the owner: `pg_dump alyosha | gzip` into `~/alyosha/state/backups/alyosha-<date>.sql.gz`, written to a temporary name and renamed, keeping 7 days.
+- **`alyosha-db.service`**, a oneshot that runs as `postgres` after PostgreSQL starts, creates the login role `alyosha` and the `alyosha` database owned by it, each only if missing. NixOS's `ensureDBOwnership` only covers a database named after its user, so it does not fit.
+- **`alyosha-db-backup.service`** runs daily as root: `runuser -u postgres -- pg_dump alyosha | gzip` into `/var/backup/alyosha/alyosha-<date>.sql.gz`, mode `0600`, written to a temporary name and renamed, keeping 7 days. The folder is the host's, mounted writable at the same path.
 - **The bridge services** require and start after `alyosha-db.service`.
 
-NixOS's default `local` rule authenticates by peer, so the owner connects as their own role without a password. The data stays in the container's state under `/var/lib/nixos-containers/alyosha` on the host, which survives restarts and rebuilds. `nixos-container destroy` removes it, and the dumps are the copy that survives that. Restore with `gunzip -c <dump> | psql alyosha` into an empty database.
+NixOS's default `local` rule authenticates by peer, so `alyosha` connects as its own role without a password. The data stays in the container's state under `/var/lib/nixos-containers/alyosha` on the host, which survives restarts and rebuilds. `nixos-container destroy` removes it, and the dumps are the copy that survives that. Restore with `alyosha backup restore <file>`, which empties the database and loads the dump.
 
-Bubblewrap must not mount `/run/postgresql`. The launch contract mounts no host service sockets already. [Bubblewrap launch contract](EnvironmentInterface.md#bubblewrap-launch-contract)
+Command units hide `/run/postgresql`, and `alyosha-run` has no role. [Command units](Deployment.md#command-units)
 
 ### Verification
 
@@ -233,6 +233,6 @@ In the container:
 - Kill `alyosha acp` under the Telegram bridge during a tool call. Check that the bridge restarts, the next reply starts with the resume line, and a follow-up question about the earlier conversation is answered.
 - Restart the container. Check that both bridges resume their sessions and a guest group keeps its conversation.
 - From `run_command`, run `ls /run/postgresql` and `psql alyosha`. Check that both fail.
-- Run the backup service. Check that a dump appears in `~/alyosha/state/backups/`, owned by you on the host, and restores into an empty database.
+- Run `alyosha backup now`. Check that a dump appears in `/var/backup/alyosha/` on the host, readable only by root, and that `alyosha backup restore` loads it into an emptied database.
 
 [Architecture overview](README.md)

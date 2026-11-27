@@ -70,25 +70,26 @@ Send the selected history entries in order. When supplied, encode the summary be
 
 ### Run GPROXY as a service
 
-GPROXY runs as one always-on systemd service, and every Alyosha process connects to it: `alyosha acp`, which the Telegram and QQ bridges run. Alyosha never starts or stops it. During v1 the service runs on the host. Once Alyosha moves into the container, it runs there instead. Never run both. [Container module](Deployment.md#host-module) · [Chat channels](Channels.md)
+GPROXY runs as one always-on systemd service, and every Alyosha process connects to it: `alyosha acp`, which the Telegram and QQ bridges run. Alyosha never starts or stops it. It runs in the container as the user `gproxy`, so only it and root hold the master key and the provider sign-in. During v1 on the host, the same service runs there instead. Never run both. [Container module](Deployment.md#host-module) · [Chat channels](Channels.md)
 
-1. **Create its secrets once.** `alyosha gateway init` creates the data folder `~/alyosha/state/gproxy` and writes `~/alyosha/state/secrets/gproxy.env` with mode `600`, creating `secrets` with mode `700`. The file holds a fresh 32-byte master key as 64 hex characters in `GPROXY_MASTER_KEY`, plus `GPROXY_ADMIN_PASSWORD` and `GPROXY_BOOTSTRAP_ADMIN_API_KEY`, which GPROXY uses when it creates a fresh database. Passing them through the environment keeps them out of startup logs. The command refuses to run if the file already exists, because a new master key cannot open an existing database. [Upstream configuration](https://gproxy.leenhawk.com/reference/configuration)
-2. **Declare the service.** It reads the file as its environment and listens on a fixed loopback port. The service is skipped until the file exists.
+1. **Create its secrets once.** `alyosha gateway init`, run as root in the container by the host command, writes the secret `gproxy.env`: `/var/lib/alyosha-secrets/gproxy.env`, owned by root, mode `0400`. [Secrets](reference/Configuration.md#secrets) The file holds a fresh 32-byte master key as 64 hex characters in `GPROXY_MASTER_KEY`, plus `GPROXY_ADMIN_PASSWORD` and `GPROXY_BOOTSTRAP_ADMIN_API_KEY`, which GPROXY uses when it creates a fresh database. Passing them through the environment keeps them out of startup logs. The command refuses to run if the file already exists, because a new master key cannot open an existing database. [Upstream configuration](https://gproxy.leenhawk.com/reference/configuration)
+2. **Declare the service.** systemd reads the file as root and passes it to GPROXY as its environment. GPROXY listens on a fixed loopback port and keeps its data in its own state folder. The service is skipped until the file exists.
 
    ```nix
    systemd.services.gproxy = let
-     data = "${home}/alyosha/state/gproxy";
-     envFile = "${home}/alyosha/state/secrets/gproxy.env";
+     envFile = "/var/lib/alyosha-secrets/gproxy.env";
    in {
      wantedBy = [ "multi-user.target" ];
      wants = [ "network-online.target" ];
      after = [ "network-online.target" ];
      unitConfig.ConditionPathExists = envFile;
      serviceConfig = {
-       User = user;
+       User = "gproxy";
+       StateDirectory = "gproxy";
+       StateDirectoryMode = "0700";
        EnvironmentFile = envFile;
-       WorkingDirectory = data;
-       ExecStart = "${gproxy}/bin/gproxy serve --host 127.0.0.1 --port 18787 --data-dir ${data}"
+       WorkingDirectory = "/var/lib/gproxy";
+       ExecStart = "${gproxy}/bin/gproxy serve --host 127.0.0.1 --port 18787 --data-dir /var/lib/gproxy"
          + " --log-format json --log-filter info --update-automatic=false";
        Restart = "on-failure";
        RestartSec = 5;
@@ -96,7 +97,7 @@ GPROXY runs as one always-on systemd service, and every Alyosha process connects
    };
    ```
 
-3. **Point Alyosha at it.** Set the address in `config.toml`, using the same port:
+3. **Point Alyosha at it.** Set the address in the settings, using the same port:
 
    ```toml
    [gateway]
@@ -104,19 +105,19 @@ GPROXY runs as one always-on systemd service, and every Alyosha process connects
    ```
 
    Alyosha connects there for every request. If nothing answers, the request fails with a model error that names the address and suggests `systemctl status gproxy`. If GPROXY restarts during a reply, the broken stream is an incomplete-response error like any other.
-4. **Sign in with `alyosha gateway login`.** This is the only way the provider gets set up or signed in again. Sessions never do it, so two Alyosha processes can never race to create the same provider. Run it in a terminal, on the host during v1 and through `machinectl shell` once Alyosha is in the container. [Start a session](Deployment.md#start-a-session)
+4. **Sign in with `alyosha gateway login`.** This is the only way the provider gets set up or signed in again. Sessions never do it, so two Alyosha processes can never race to create the same provider. Run it in a terminal on the host: the host command runs it as root in the container, since it reads the admin key and writes a secret. [The host command](Deployment.md#the-host-command)
 
-   1. Load `config.toml` and `gproxy.env`. If `gproxy.env` is missing, stop and say to run `alyosha gateway init` and start the service first. Use `GPROXY_BOOTSTRAP_ADMIN_API_KEY` from it for the admin API.
-   2. If `gproxy.env` has no `ALYOSHA_GATEWAY_KEY`, create a gateway key with management access disabled and append it as `ALYOSHA_GATEWAY_KEY`, which GPROXY ignores. `POST /admin/api/api-keys` needs a `userId`: the command finds the admin user (`GPROXY_ADMIN_USER`, default `admin`) in `GET /admin/api/users`. GPROXY's documentation describes 4.3.0; check these admin calls against 4.2.5 at step 2. Alyosha never writes `config.toml`. [Configuration](reference/Configuration.md#rules) · [Gateway keys](https://gproxy.leenhawk.com/guides/users-and-keys)
+   1. Load the settings and `gproxy.env`. If `gproxy.env` is missing, stop and say to run `alyosha gateway init` and start the service first. Use `GPROXY_BOOTSTRAP_ADMIN_API_KEY` from it for the admin API.
+   2. If the secret `gateway-key` is not set, create a gateway key with management access disabled and write it as `gateway-key`, owned by root and readable by the `alyosha` group. `POST /admin/api/api-keys` needs a `userId`: the command finds the admin user (`GPROXY_ADMIN_USER`, default `admin`) in `GET /admin/api/users`. GPROXY's documentation describes 4.3.0; check these admin calls against 4.2.5 at step 2. Alyosha never writes the settings. [Configuration](reference/Configuration.md#rules) · [Gateway keys](https://gproxy.leenhawk.com/guides/users-and-keys)
    3. If no provider has the name in `[model] provider`, create it with the channel that `[model] api` names, through `POST /admin/api/providers`. Disable upstream and downstream body capture. GPROXY sets body capture globally, not per provider, so this is `PATCH /admin/api/settings` with `logging.enableUpstreamLogBody` and `logging.enableDownstreamLogBody` false. [Body capture](https://gproxy.leenhawk.com/guides/observability#recording-bodies)
    4. Get the credential. For `codex`, POST to `/admin/api/credential-login/device/start`, print the verification address and code, and poll `device/poll` with the login session ID until you finish or the code expires. You can open the address on any device. For an API-key channel, read the key from the terminal without echo and add it through `POST /admin/api/credentials`. Replace any credential the provider already has, so running the command again is how you sign in again after a login expires or a key is revoked. [Provider login](https://gproxy.leenhawk.com/guides/providers#logging-in-to-obtain-a-credential)
    5. Send one small request through the gateway with the gateway key and report success, or the error.
 
    Changing only `[model] name` needs nothing. After changing `[model] provider` to a new name, run the command again. One key per provider for now. Adding several keys to the provider's pool is deferred.
 
-   Every other Alyosha process reads only `ALYOSHA_GATEWAY_KEY` from `gproxy.env` and sends it as `Authorization: Bearer <gateway-key>`. Only the `gateway` commands use the admin key. When a request fails because the provider does not exist, its login has expired, or its key is invalid, the client returns a not-signed-in error whose message says: "The model provider is not signed in. Run `alyosha gateway login` in a terminal." A chat shows it as **Failed:**, so a scheduled task that fails at night is how you find out. Check at step 2 which response GPROXY gives for a provider that does not exist, and record it here. Until checked, the client treats HTTP 401, 403, and 404 as not signed in.
+   Every other Alyosha process reads only the secret `gateway-key` and sends it as `Authorization: Bearer <gateway-key>`. Only the `gateway` commands use the admin key. When a request fails because the provider does not exist, its login has expired, or its key is invalid, the client returns a not-signed-in error whose message says: "The model provider is not signed in. Run `alyosha gateway login` in a terminal." A chat shows it as **Failed:**, so a scheduled task that fails at night is how you find out. Check at step 2 which response GPROXY gives for a provider that does not exist, and record it here. Until checked, the client treats HTTP 401, 403, and 404 as not signed in.
 
-Other users on the same machine can reach a loopback port, so every request needs the gateway key, and management needs the admin key. The shell sandbox has its own loopback and cannot reach the service at all. [Shell sandbox](reference/ToolPermissions.md#shell-sandbox)
+Other users on the same machine can reach a loopback port, so every request needs the gateway key, and management needs the admin key. Command units cannot reach the container's loopback at all. [Shell sandbox](reference/ToolPermissions.md#shell-sandbox)
 
 If `gproxy.env` is lost while the database remains, GPROXY cannot decrypt the stored credentials. Restore the file from a backup. Running `alyosha gateway init` again requires moving the old data folder away first, after which you set up the provider again.
 
@@ -173,8 +174,8 @@ For offline client checks, point the client at a local HTTP fixture that records
 - On each native route, return two tool calls, send both results back, and return a final reply. Check the path, call IDs, block order, and provider-specific fields on the second request. Use a streaming fixture for the `codex` route.
 - Cut a stream after the first complete tool call and before the response ends. Repeat with Stop and an output-token limit. Expect zero tool executions and zero partial assistant entries from that response.
 - Have the first key return HTTP 429 and the second succeed. Exhaust the pool and check that the rate limit reaches the caller. An expired ChatGPT login that cannot refresh, an invalid key, and a missing provider each return the not-signed-in error with the `gateway login` hint.
-- Run `alyosha gateway init` twice. Check that the second run refuses and the first wrote `gproxy.env` with mode `600` and all three variables.
-- Run `alyosha gateway login` without `gproxy.env`. Check that it says to run `init` first. Run it against the mock gateway for a `codex` provider and for an API-key provider. Check that it creates the provider and the gateway key once, prints the device address and code, reads the key without echo, and that a second run replaces the credential without creating a second provider or gateway key.
+- Run `alyosha gateway init` twice. Check that the second run refuses and the first wrote `gproxy.env` owned by root with mode `0400` and all three variables.
+- Run `alyosha gateway login` without `gproxy.env`. Check that it says to run `init` first. Run it against the mock gateway for a `codex` provider and for an API-key provider. Check that it creates the provider and the `gateway-key` secret once, prints the device address and code, reads the key without echo, and that a second run replaces the credential without creating a second provider or gateway key.
 - Start `alyosha acp` with no provider. Check that it does not call the admin API and that the first turn fails with the not-signed-in message.
 - Start the service, then run two `alyosha acp` processes at once. Check that both get replies through the one service.
 - Have the mock accept a connection and send nothing. Check for a timeout error after the idle limit, shortened in the test. Have it stream one event every minute for ten minutes. Check that the reply completes. Point the client at an address that drops packets. Check for a connect timeout.

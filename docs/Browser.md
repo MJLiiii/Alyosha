@@ -37,7 +37,7 @@ Alyosha never stores or types your passwords. To let it use an account, you sign
 
 - **Sign-ins expire.** Sites end sessions after days or weeks. When a saved site shows its sign-in page, the model stops and tells you, and you sign in again on the host. The model never tries to sign in itself.
 - **Changes during a session are not saved.** Chromium starts from the file each session and discards its cookies at the end. Only signing in again on the host updates the file.
-- **The file is as powerful as your passwords** for those sites. It lives in `~/alyosha/config/browser/`, readable only by you and read-only in the container. The file tools and the shell sandbox cannot reach that folder.
+- **The file is as powerful as your passwords** for those sites. It is the secret `browser-state.json`, which only root and the agent's user read in the container. The file tools and the commands cannot reach it. [Secrets](reference/Configuration.md#secrets)
 
 Prefer separate accounts made for Alyosha where a site allows it. Anything Alyosha does while signed in, it does as that account.
 
@@ -49,17 +49,16 @@ The browser is the first tool that both reads text written by strangers and acts
 
 Playwright MCP blocks `file://` addresses by default, and pages cannot add tools of their own. That keeps the saved sign-ins, memory, and GPROXY's secrets out of page snapshots. Playwright calls its blocking a convenience rather than a security boundary, so running the browser server in its own sandbox remains a deferred hardening step.
 
-Chromium can open addresses on your local network, such as a router's admin page. The host's firewall keeps the host's own services out of reach unless you have opened their ports.
+Chromium cannot open addresses on your local network, such as a router's admin page, nor the host itself: the host refuses to forward the container's traffic there. [Network](Deployment.md#network)
 
-The browser has full internet access, so the model can send information out through a website. That is the purpose of having a browser. The shell sandbox also has internet access, for downloading dependencies, so it adds little to that risk.
+The browser has full internet access, so the model can send information out through a website. That is the purpose of having a browser. Commands also have internet access, for downloading dependencies, so they add little to that risk.
 
 Web search comes from a separate MCP server, open-webSearch. The model searches there, then opens the results in Chromium. [Web search](WebSearch.md)
 
 ## Deferred
 
 - Stored passwords with placeholders that Alyosha fills in only on the account's sites, and two-factor codes.
-- Running the browser server in its own Bubblewrap sandbox without Alyosha's private folders.
-- Blocking local-network addresses in Chromium.
+- Running the browser server in its own sandbox without the agent's secrets and database.
 - Downloads.
 - Screenshots and full desktop control, which need image support in tool results and a model that reads images.
 - Loading browser tools only when a task needs them.
@@ -76,11 +75,11 @@ Add `playwright-mcp` to `environment.systemPackages` on the host, and later in t
 | --- | --- | --- |
 | `playwright-mcp` | 0.0.83 | The nixpkgs wrapper points it at Playwright's own Chromium from `playwright-driver.browsers`. It uses a fresh temporary profile unless `PLAYWRIGHT_MCP_USER_DATA_DIR` is set. |
 
-Use Chromium, not Google Chrome. Chrome is unfree and adds nothing here. [Packages and the Nix store](Deployment.md#packages-and-the-nix-store)
+Use Chromium, not Google Chrome. Chrome is unfree and adds nothing here. [Packages and the Nix store](Deployment.md#packages-from-the-nix-store)
 
 ### Configuration
 
-Add the server to `~/alyosha/config/config.toml`. The server name becomes part of the tool names, such as `mcp__chromium__browser_click`. [MCP configuration](MCP.md#v1-configuration)
+Add the server to `services.alyosha.settings`. The server name becomes part of the tool names, such as `mcp__chromium__browser_click`. [MCP configuration](MCP.md#v1-configuration)
 
 ```toml
 [mcp.servers.chromium]
@@ -107,23 +106,22 @@ The tool names were checked against the `tools/list` reply of `playwright-mcp` 0
 To use a website that needs an account, save its sign-in on the host, where you have a display. Use the `playwright-test` package from the same nixpkgs as `playwright-mcp` so both use the same Chromium.
 
 ```bash
-install -d -m 700 ~/alyosha/config/browser
-nix shell nixpkgs#playwright-test -c playwright open --save-storage ~/alyosha/config/browser/chromium-state.json https://github.com
+nix shell nixpkgs#playwright-test -c playwright open --save-storage /tmp/browser-state.json https://github.com
 ```
 
-A Chromium window opens. Sign in, complete any two-factor check, and open other sites in new tabs to sign in to them too. Closing the window writes every site's cookies and local storage to the file. Running the command again replaces the file, so sign in to all the sites you want each time. Then restrict the file:
+A Chromium window opens. Sign in, complete any two-factor check, and open other sites in new tabs to sign in to them too. Closing the window writes every site's cookies and local storage to the file. Running the command again replaces the file, so sign in to all the sites you want each time. Then hand it to the container and delete it on the host:
 
 ```bash
-chmod 600 ~/alyosha/config/browser/chromium-state.json
+alyosha secret set browser-state.json < /tmp/browser-state.json && rm /tmp/browser-state.json
 ```
 
-The folder is inside the read-only `~/alyosha/config` mount, so the container sees the new file at the next session start and nothing in it can change the file. The `read_file` tool cannot open it because it is outside the workspace, and the shell sandbox does not mount it. [Tool permissions](reference/ToolPermissions.md#container-limits)
+The container sees the new file at the next session start. The `read_file` tool cannot open it because it is outside the workspace, and command units do not mount it. [Tool permissions](reference/ToolPermissions.md#container-limits)
 
-Once the file exists, add `"--storage-state"` and its absolute path as two elements of `mcp.servers.chromium.args` in your personal config. Run `realpath ~/alyosha/config/browser/chromium-state.json` to get the path. Start a new Alyosha session to load the sign-ins. If a configured file is missing, Playwright MCP can still list its tools, but navigation fails with `Error reading storage state from …: ENOENT`.
+Once it is set, add `"--storage-state"` and `"/var/lib/alyosha-secrets/browser-state.json"` as two elements of `mcp.servers.chromium.args` in your settings. Start a new Alyosha session to load the sign-ins. If a configured file is missing, Playwright MCP can still list its tools, but navigation fails with `Error reading storage state from …: ENOENT`.
 
 ### The skill
 
-Write the skill at `~/alyosha/config/skills/web-browsing/SKILL.md`. The description tells the model when to load it, because the model sees it in every session's index. [Skills store](Skills.md#v1-store-contract)
+Alyosha's package ships the skill in `skills/web-browsing/SKILL.md`. Copy it to `~/.agents/skills/web-browsing/SKILL.md` on the host. The description tells the model when to load it, because the model sees it in every session's index. [Skills store](Skills.md#v1-store-contract)
 
 ```markdown
 ---
@@ -144,7 +142,7 @@ Step 5 relies on the model, because a purchase is the same `browser_click` as an
 
 ### Chromium inside the container
 
-Chromium's own sandbox needs unprivileged user namespaces, like Bubblewrap. Check it together with Bubblewrap when first starting the container. If it fails, fix the namespace setting. Running Chromium with its sandbox off is a last resort, because the container would then be its only limit. [Bubblewrap inside the container](Deployment.md#bubblewrap-inside-the-container)
+Chromium's own sandbox needs unprivileged user namespaces, which the container allows. Check it with a real navigation when first starting the container. Running Chromium with its sandbox off is a last resort, because the container would then be its only limit. [Why units and not Bubblewrap](Deployment.md#why-units-and-not-bubblewrap)
 
 Alyosha starts every configured MCP server at session start. Playwright MCP launches Chromium only on the first browser call, so a session that never uses the browser does not pay Chromium's memory cost. Tested with `playwright-mcp` 0.0.83 on 2026-11-25.
 

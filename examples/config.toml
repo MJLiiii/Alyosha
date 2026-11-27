@@ -1,4 +1,6 @@
-# ~/alyosha/config/config.toml — copy, fill in, and `chmod 600` it.
+# The shape of /etc/alyosha/config.toml. In the container, write the same values as
+# services.alyosha.settings in Nix; for development on the host, point ALYOSHA_CONFIG at a copy.
+# No secrets here: set them with `alyosha secret set <name>`.
 # Every setting: docs/reference/Configuration.md. Alyosha never writes this file.
 
 timezone = "Europe/Amsterdam"
@@ -17,18 +19,16 @@ timeout_minutes = 60
 
 # The Telegram bridge (docs/TelegramBridge.md).
 # [telegram]
-# owner_id = 123456789
-# token = "..."
+# owner_id = 123456789          # the token is the secret telegram-token
 #
-# Groups whose members get your full powers, each working in ~/work/groups/<name>.
+# Groups whose members get your full powers, each working in work/groups/<name>.
 # [telegram.trusted_groups]
 # family = -1001234567890
 
 # The QQ bridge (docs/QQBridge.md).
 # [qq]
 # app_id = "102000000"
-# owner_openid = ""
-# secret = "..."
+# owner_openid = ""             # the AppSecret is the secret qq-secret
 #
 # [qq.trusted_groups]
 # friends = "<group_openid>"
@@ -90,7 +90,9 @@ tools = [
 # ask = ["gmail_send_message"]
 #
 # [mcp.servers.google.env]
-# GOG_HOME = "/home/you/alyosha/state/gog"
+# GOG_HOME = "/var/lib/alyosha/gog"
 # GOG_KEYRING_BACKEND = "file"
-# GOG_KEYRING_PASSWORD = "..."
 # DBUS_SESSION_BUS_ADDRESS = "disabled:"
+#
+# [mcp.servers.google.secret_env]
+# GOG_KEYRING_PASSWORD = "gog-keyring-password"

@@ -14,9 +14,9 @@ The same handler serves direct calls and Code Mode scripts. On a direct call it 
 
 ## Shell commands
 
-Each command runs in a fresh Bubblewrap sandbox and starts in the session's working directory under `/workspace`. The workspace is writable and the Nix store is read-only. The command's tools come from the project's Nix dev shell when the workspace has a `flake.nix`, and otherwise from a small default set. It runs at a lower CPU priority than the rest of the machine. It gets private scratch space, a persistent cache for downloads such as crates and npm packages, and internet access that cannot reach Alyosha's own services in the container, such as GPROXY. The Environment Interface enforces the command deadline and captures output for the handler. If a preview is shortened, Alyosha can keep the full log within a 64 MiB budget per session. If the log is unavailable, the result still carries the command's status and preview. [Shell and log behavior](reference/BuiltInTools.md#run_command) · [Bubblewrap launch contract](#bubblewrap-launch-contract)
+Each command runs in a systemd unit of its own, as the user `alyosha-run`, and starts in the session's working directory under `/workspace`. The unit sees only that session's working folder, writable, the Nix store and skills, read-only, a fresh home and `/tmp`, and a shared cache for downloads such as crates and npm packages. It sees only its own processes. The command's tools come from the project's Nix dev shell when the workspace has a `flake.nix`, and otherwise from a small default set. It runs at a lower CPU priority than the rest of the machine, with its own memory cap. It can reach the internet, but not Alyosha's own services in the container, such as GPROXY, nor the host or your local network. The Environment Interface enforces the command deadline and captures output for the handler. If a preview is shortened, Alyosha can keep the full log within a 64 MiB budget per session. If the log is unavailable, the result still carries the command's status and preview. [Shell and log behavior](reference/BuiltInTools.md#run_command) · [Command launch](#command-launch) · [Deployment](Deployment.md#command-units)
 
-In the v1 contracts, `ToolContext` carries the session's environment and `ToolPermissions` provides the operations handlers call. Model traffic to the GPROXY service belongs to the LLM Client / Gateway. MCP server processes belong to the MCP Client and run outside the shell sandbox. Skill files are visible read-only at `/skills` to direct reads and the shell. Alyosha itself runs inside a NixOS container, so the selected workspace must be under a mounted folder. The sandbox works the same there. [Deployment](Deployment.md) · [MCP Client](MCP.md#where-servers-run) · [Skills](Skills.md#bundled-files) [Implementation](#implementation) · [LLM Client / Gateway](LLMClientGateway.md) · [Architecture overview](README.md)
+In the v1 contracts, `ToolContext` carries the session's environment and `ToolPermissions` provides the operations handlers call. Model traffic to the GPROXY service belongs to the LLM Client / Gateway. MCP server processes belong to the MCP Client and run outside the shell sandbox. Skill files are visible read-only at `/skills` to direct reads and the shell. Alyosha runs inside a NixOS container, and each session's workspace is one of its working folders. [Where things live](Deployment.md#where-things-live) [Deployment](Deployment.md) · [MCP Client](MCP.md#where-servers-run) · [Skills](Skills.md#bundled-files) [Implementation](#implementation) · [LLM Client / Gateway](LLMClientGateway.md) · [Architecture overview](README.md)
 
 ## Implementation
 
@@ -60,41 +60,44 @@ For `edit_file`, snapshot the resolved file's identity and original contents whe
 
 Commit by renaming the temporary file into place relative to the authorized parent directory. Enforce workspace containment for the commit as well. On a failure before commit, remove the temporary file and return a `ToolError`. Treat the rename as the commit point and return success after it completes. V1 promises atomic visibility at the destination. A power-loss durability guarantee would also require syncing the parent directory. [Linux `rename(2)`](https://man7.org/linux/man-pages/man2/rename.2.html) · [Linux `fsync(2)`](https://man7.org/linux/man-pages/man2/fsync.2.html)
 
-### Bubblewrap launch contract
+### Command launch
 
-Launch a fresh sandbox for each `run_command` using `bwrap` from `pkgs.bubblewrap`. Build its argument list from trusted session and package configuration. Invoke the packaged Bash executable with `--noprofile --norc -c` and pass the model's command as a single argument. Require unprivileged user namespaces and return a tool error if the sandbox cannot start. [Bubblewrap manual](https://github.com/containers/bubblewrap/blob/v0.12.0/bwrap.xml)
+Run each `run_command`, and each background job, in a fresh unit from the session's template, `alyosha-run-<folder>@<pid>-<n>.service`, where `<pid>` is this process's ID and `<n>` counts up from 1. The template fixes the user, mounts, and limits. [Command units](Deployment.md#command-units)
 
-| Path inside the sandbox | Contents |
+1. Create `/run/alyosha-run/<pid>-<n>/`, mode `0750`, group `alyosha-work`, and write `spec.json` into it: the command, the working directory under `/workspace`, and the environment. Create an empty `output` file there.
+2. Start the unit through systemd's D-Bus API (`StartUnit`, mode `replace`), and subscribe to its property changes.
+3. Inside the unit, `alyosha run-exec <instance>` reads `spec.json`, changes to the working directory, replaces its environment with the one given, and `exec`s the packaged Bash with `--noprofile --norc -c` and the command as one argument. systemd attaches standard input to `/dev/null` and standard output and error to `output`.
+4. Read `output` as it grows, for the preview and the session log. [Session logs](#session-logs)
+5. When the unit becomes inactive or failed, read `Result`, `ExecMainCode`, and `ExecMainStatus`, then reset a failed unit so its name is free. Remove the run folder.
+
+If systemd refuses the start, or the unit fails before `run-exec` starts the command, return a `ToolError` with systemd's message. This is the sandbox setup failure.
+
+| Path in the unit | Contents |
 | --- | --- |
-| `/workspace` | The selected workspace, bound writable. Set the shell's working directory to the session's corresponding directory under this mount. |
-| `/skills` | The skills directory, bound read-only with `--ro-bind` when it exists. [Skills paths](Skills.md#skills-paths) |
-| `/nix/store` | The whole store, bound read-only. It holds no secrets by design, and the container already sees all of it. This makes every dev shell's tools available without computing closures. Never bind the Nix daemon socket or `/nix/var`. |
-| `/tmp` and `/home/alyosha` | Fresh scratch storage and a fresh home directory for this invocation. |
-| `/home/alyosha/.cache` | The persistent shell cache, bound writable. [Shell cache](#shell-cache) |
-| `/dev` and `/proc` | Bubblewrap's minimal device tree and procfs for the sandbox's PID namespace. |
+| `/workspace` | The session's working folder, writable. |
+| `/skills` | The skills directory, read-only. [Skills paths](Skills.md#skills-paths) |
+| `/nix/store` | The whole store, read-only. It holds no secrets by design, and the container already sees all of it. This makes every dev shell's tools available without computing closures. The Nix daemon socket is hidden. |
+| `/tmp`, `/home/alyosha` | Fresh, private scratch storage and home directory for this unit. |
+| `/home/alyosha/.cache` | The persistent shell cache, writable. [Shell cache](#shell-cache) |
+| `/proc` | A fresh procfs of the unit's own PID namespace. |
 
-Keep host service sockets, Alyosha's provider credentials, and private session logs outside the exposed mounts. Resolve `/workspace/...` to the selected workspace in `open_file` so paths printed by the shell also work in file tools. With `Read` access on a direct call, resolve `/skills/...` to the skills directory, read-only. Enforce the caller's scope and workspace containment when opening the target. [Tool permissions](reference/ToolPermissions.md)
+`/var/lib`, `/var/cache`, and the other runs' folders are empty, and the database socket and the backups are hidden. Resolve `/workspace/...` to the session's working folder in `open_file` so paths printed by the shell also work in file tools. With `Read` access on a direct call, resolve `/skills/...` to the skills directory, read-only. Enforce the caller's scope and workspace containment when opening the target. [Tool permissions](reference/ToolPermissions.md)
 
-Use `--unshare-user`, `--unshare-pid`, and `--unshare-ipc`. Run Bubblewrap inside a fresh network namespace from `pasta`, as below. Build the environment from nothing in this order: the dev shell's exported variables, if any; then `PATH` with the default tool directories appended after the dev shell's entries; then the cache variables, except those the dev shell already set; then `HOME=/home/alyosha` and `TMPDIR=/tmp`, which always win. Start the launcher, and so everything under it, with niceness 10, so builds and tests leave the host responsive. Background jobs use the same launch. Use `--new-session`, attach stdin to `/dev/null`, and drain stdout and stderr concurrently on the host. Keep the Bubblewrap status pipe separate from command output. [Bubblewrap manual](https://github.com/containers/bubblewrap/blob/v0.12.0/bwrap.xml)
+Build the environment from nothing in this order: the dev shell's exported variables, if any; then `PATH` with the default tool directories appended after the dev shell's entries; then the cache variables, except those the dev shell already set; then `SSL_CERT_FILE` and `NIX_SSL_CERT_FILE` naming the CA bundle's store path; then `HOME=/home/alyosha` and `TMPDIR=/tmp`, which always win.
+
+The agent's files and the commands' files must stay usable by both users. The working folders belong to `alyosha-run` with the group `alyosha-work`, which holds `alyosha` too, and are set-group-ID with a default ACL that gives the group read and write. Alyosha creates files group-writable as well.
 
 #### Network
 
-Each command gets outgoing internet, so package managers such as cargo, npm, and pip can download dependencies. It never reaches the container's own loopback, where GPROXY listens. Start Bubblewrap under [`pasta`](https://passt.top/passt/about/) from `pkgs.passt`, which gives the command's process tree its own network namespace with a user-mode connection to the outside, as rootless Podman does. Configure it with no inbound port forwarding and without mapping the gateway address to the container's loopback (`--no-map-gw`). A failure to start `pasta` is a sandbox setup failure and returns a tool error.
+Each command gets outgoing internet, so package managers such as cargo, npm, and pip can download dependencies. Every unit is in `alyosha-run.slice`, and a rule in the container refuses that slice's loopback connections, so commands never reach GPROXY or any other service listening inside the container. The host refuses the whole container's connections to the host itself and to private addresses. [Network](Deployment.md#network)
 
-Checked with `passt` 2025_09_19 and Bubblewrap 0.13.1 on 2026-11-25:
+Name resolution goes to the container's public nameservers, as for every program in it.
 
-- **Flags.** `pasta --config-net --quiet --no-map-gw -t none -u none -T none -U none`. Find `pasta` on `PATH` without resolving its symlink: it is a link to `passt` and picks its mode from the name it runs under.
-- **Status pipe.** `pasta` closes inherited descriptors, so `--json-status-fd` cannot pass through it. A trusted Bash wrapper inside `pasta`'s namespace runs `exec 3>"$0" && exec "$@"` with a private status file as `$0`, then execs `bwrap ... --json-status-fd 3`. The host reads the file after the launcher exits.
-- **DNS.** When the host resolves through a loopback server such as systemd-resolved at `127.0.0.53`, the sandbox cannot reach it. Add `--dns-forward 169.254.0.53 --dns-host 127.0.0.53` and bind a generated `resolv.conf` naming `169.254.0.53`. Only DNS queries to that address are forwarded. With a non-loopback nameserver, bind the host's `/etc/resolv.conf`.
-- **Certificates and user.** Bind the CA bundle's store path at `/etc/ssl/certs/ca-certificates.crt` and set `SSL_CERT_FILE` and `NIX_SSL_CERT_FILE` to it. Pass `--uid` and `--gid` with the owner's IDs.
-
-The integration checks in `tests/shell.rs` and `tests/jobs.rs` start this sandbox when `bwrap`, `pasta`, and `bash` are on `PATH`.
-
-The network adds downloading and running code from the internet, still confined by Bubblewrap and the container. It adds little new risk of information leaving, because the browser already has full internet access. [Browser trust](Browser.md#trust)
+The network adds downloading and running code from the internet, still confined by the unit and the container. It adds little new risk of information leaving, because the browser already has full internet access. [Browser trust](Browser.md#trust)
 
 ### Project dev shell
 
-At session start, if the workspace root holds `flake.nix`, run `nix --extra-experimental-features "nix-command flakes" print-dev-env --json <workspace>` outside the sandbox, as the session's user. It reaches the Nix daemon and its substituters the way any program in the container does. Show **Loading dev shell…** in the status area while it runs, with a 10-minute limit. Keep the result for the session.
+At session start, if the workspace root holds `flake.nix`, run `nix --extra-experimental-features "nix-command flakes" print-dev-env --json <workspace>` outside the unit, as `alyosha`. It reaches the Nix daemon and its substituters the way any program in the container does. Show **Loading dev shell…** in the status area while it runs, with a 10-minute limit. Keep the result for the session.
 
 Take the variables whose type is `exported`, except `HOME`, `PWD`, `SHELL`, `TMPDIR`, `TMP`, `TEMP`, `TEMPDIR`, and `NIX_BUILD_TOP`, and pass them to every command. The `shellHook` does not run. In a Git repository Nix sees only tracked files, so an untracked `flake.nix` is not found.
 
@@ -102,15 +105,22 @@ If evaluation fails or times out, show a startup warning naming the error and us
 
 ### Shell cache
 
-Bind `${XDG_CACHE_HOME:-$HOME/.cache}/alyosha/shell` writable at `/home/alyosha/.cache`, creating it with mode `0700` on first use. Set `XDG_CACHE_HOME=/home/alyosha/.cache`, `CARGO_HOME=/home/alyosha/.cache/cargo`, and `npm_config_cache=/home/alyosha/.cache/npm`. pip and most other tools follow `XDG_CACHE_HOME`. Downloads and build caches then survive between commands and sessions.
+The unit binds `/var/cache/alyosha/shell`, owned by `alyosha-run`, writable at `/home/alyosha/.cache`. Set `XDG_CACHE_HOME=/home/alyosha/.cache`, `CARGO_HOME=/home/alyosha/.cache/cargo`, and `npm_config_cache=/home/alyosha/.cache/npm`. pip and most other tools follow `XDG_CACHE_HOME`. Downloads and build caches then survive between commands and sessions.
 
 Every workspace and session shares the one cache. It exists only inside the container. Alyosha does not limit or clean it. Delete the folder to reclaim space.
 
-#### Deadline and result
+### Command results
 
-Start a deadline before launching Bubblewrap, covering setup and execution. It is the call's `timeout_seconds`, from 1 to 1800, or 120 seconds when the model omits it. Read the completion record from `--json-status-fd`. If Bubblewrap exits before the deadline with an `exit-code` record, return `ShellStatus(code)` and the captured output, including for nonzero codes. Bubblewrap encodes signal termination as `128 + signal`. If the launcher fails to start or exits without a command completion record, return a `ToolError` with the available diagnostic. [Bubblewrap status reporting](https://github.com/containers/bubblewrap/blob/v0.12.0/bubblewrap.c#L403-L449)
+Start a deadline before starting the unit, covering setup and execution. It is the call's `timeout_seconds`, from 1 to 1800, or 120 seconds when the model omits it. Watch the call's cancellation token alongside it.
 
-On timeout, terminate the whole sandbox, including any subprocesses, reap the launcher, and finish collecting the output captured so far. Use Bubblewrap's PID namespace and `--die-with-parent` to tie subprocess cleanup to the launcher's lifetime. Return `TimedOut` with the captured output. Stop does the same, with `Stopped` in place of `TimedOut`: `run_shell` watches the call's cancellation token alongside the deadline. The Agent Loop records that outcome and cancels unstarted calls. [Bubblewrap process cleanup](https://github.com/containers/bubblewrap/blob/v0.12.0/bwrap.xml#L562-L590) · [Agent Loop tool contract](AgentLoop.md#v1-tool-contract)
+| systemd reports | Result |
+| --- | --- |
+| `Result=success`, or `exit-code` with `ExecMainCode=exited` | `ShellStatus(ExecMainStatus)` and the captured output, including for nonzero codes |
+| `ExecMainCode=killed` or `dumped` | `ShellStatus(128 + signal)`, as a shell reports it |
+| `Result=oom-kill` | `ShellStatus(137)` and a note that the command passed its memory limit |
+| The unit failed before the command started | A `ToolError` with systemd's message |
+
+At the deadline, stop the unit. systemd kills its whole cgroup, so every subprocess ends with it, whatever it did to leave its process group. Finish reading `output`, and return `TimedOut` with the captured output. Stop does the same, with `Stopped` in place of `TimedOut`. The Agent Loop records that outcome and cancels unstarted calls. [Agent Loop tool contract](AgentLoop.md#v1-tool-contract) A background job uses the job's own deadline and token instead. [Background jobs](Jobs.md#implementation)
 
 ### Session logs
 
@@ -118,18 +128,20 @@ Give each session a 64 MiB budget for log content: the full text of shortened co
 
 Publish `log_path` only when the recorded preview omits text and the complete captured output fits in the budget. If the preview includes all the output, discard the temporary capture and release its space. If writing would exceed the budget or saving fails, discard the incomplete log and keep draining command output. Preserve the actual command status and bounded preview. An MCP result follows the same rules, except that its text is complete before the preview is sized, so save it only when the preview omits text. [MCP calls](MCP.md#handle-one-call) When output was omitted, keep the reason the full log was unavailable in the result metadata.
 
-Issue log paths as `/session-logs/<name>`, a prefix no workspace path uses. Keep issued `log_path` references readable through direct `read_file` calls until the session ends in this process, or until a compaction replaces the result that issued them. Open them through the session's log store for bounded reads. Keep each session's logs, status files, and generated `resolv.conf` in its own folder, `${XDG_CACHE_HOME:-$HOME/.cache}/alyosha/sessions/<process ID>-<random>`, mode `0700`. Remove the folder when the process ends the session. At startup, also remove the folders whose process ID no longer runs, which a crashed process left behind. A resumed session starts with an empty log store, and its earlier paths read as gone. [After each compaction](SessionStore.md#after-each-compaction) [Tool permissions](reference/ToolPermissions.md)
+Issue log paths as `/session-logs/<name>`, a prefix no workspace path uses. Keep issued `log_path` references readable through direct `read_file` calls until the session ends in this process, or until a compaction replaces the result that issued them. Open them through the session's log store for bounded reads. Keep each session's logs in its own folder, `/var/cache/alyosha/sessions/<process ID>-<random>`, mode `0700`. Remove the folder when the process ends the session. At startup, also remove the folders whose process ID no longer runs, which a crashed process left behind. A resumed session starts with an empty log store, and its earlier paths read as gone. [After each compaction](SessionStore.md#after-each-compaction) [Tool permissions](reference/ToolPermissions.md)
 
 ### Verify on the host
 
 Create a temporary workspace and log store and pass their `ToolContext` to the handlers through the Tool Executor. Exercise file reads, rejected paths, atomic replacement, and access to a log from each caller scope. These checks run locally without a model account or GPROXY. [Permission test cases](reference/ToolPermissions.md#verification)
 
-Run shell integration checks on NixOS with Bubblewrap, `pasta`, unprivileged user namespaces, and the Nix store. Have a command print a workspace file path and read that path through the file handler. Check a nonzero command exit, a sandbox setup error, and a timeout with a subprocess. For shortened output, follow the returned log reference through a direct read and verify that the reference expires at session end. A fake shell result can exercise the Agent Loop’s result handling.
+Run the shell integration checks in the container, where `alyosha` may start the command units. Have a command print a workspace file path and read that path through the file handler. Check a nonzero command exit, a sandbox setup error from a refused start, and a timeout with a subprocess. For shortened output, follow the returned log reference through a direct read and verify that the reference expires at session end. A fake shell result can exercise the Agent Loop’s result handling.
 
 - In a workspace with a flake dev shell that provides `cargo`, run `cargo --version` and `git --version`. Check that both work. Break the flake and start a new session. Check for the startup warning and that `cargo` is missing while `git` works.
 - Run `cargo fetch` in a small Rust project. Check that it downloads, that a second command finds the crates in `/home/alyosha/.cache/cargo`, and that a new session still finds them.
-- Fetch an HTTPS address from a command. Check that it works. Connect to GPROXY's port on `127.0.0.1` and on the gateway address. Check that both fail.
-- Check that `/nix/var/nix/daemon-socket` is absent and that `nix shell nixpkgs#hello` fails.
-- Run `nice` in a command. Check that it prints `10`. Verifying isolation and process cleanup requires starting the actual sandbox. [Bubblewrap launch contract](#bubblewrap-launch-contract) · [Shell result contract](reference/BuiltInTools.md#run_command)
+- Fetch an HTTPS address from a command. Check that it works. Connect to GPROXY's port on `127.0.0.1`, the host at `10.233.1.1`, and the router. Check that all three fail.
+- Check that `/nix/var/nix/daemon-socket`, `/var/lib/alyosha-secrets`, `/run/postgresql`, and the other working folders are absent, and that `nix shell nixpkgs#hello` fails.
+- Run `ls /proc` and `nice`. Check that only the unit's processes appear and that `nice` prints `10`.
+- Allocate past the memory limit. Check the result and that the bridge keeps running.
+- Have the agent write a file and a command edit it, and the other way round. Check that both succeed. [Command units](Deployment.md#command-units) · [Shell result contract](reference/BuiltInTools.md#run_command)
 
 [Architecture overview](README.md)

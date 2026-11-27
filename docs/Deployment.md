@@ -1,30 +1,30 @@
 # Deployment
 
-Alyosha runs inside a NixOS container on your machine. The container holds the whole agent: the Agent Loop, GPROXY, and the MCP servers. Inside it, each shell command still gets its own Bubblewrap sandbox. The container limits what the agent as a whole can reach, and Bubblewrap limits what the model's shell can reach. [Architecture overview](README.md) · [Environment Interface](EnvironmentInterface.md)
+Alyosha runs inside a NixOS container on your machine. Everything it keeps lives inside the container: its configuration, secrets, conversations, memory, and working folders. Inside, each service runs as its own Unix user, so ordinary file permissions keep secrets with the one service that needs them. Each shell command runs as a separate user again, in a systemd unit of its own that sees only its session's working folder. The container keeps the agent away from your machine, and the users and units keep the model's commands away from the agent's secrets and from other sessions. [Architecture overview](README.md) · [Environment Interface](EnvironmentInterface.md)
 
 ```text
 host (NixOS)
-└─ containers.alyosha               declared in your host configuration
-   │  sees: ~/alyosha/config (read-only), ~/alyosha/state; its own ~/work
-   │  network: private, internet through the host
-   │
-   └─ your user (not root)
-      ├─ alyosha-telegram service ─► alyosha acp (agent)
-      ├─ alyosha-qq service ───────► alyosha acp (agent)
-      ├─ gproxy service ◄── every alyosha process
-      ├─ MCP servers
-      └─ bwrap for each run_command      sees /workspace, /skills, the store read-only, and its cache
+├─ ~/.agents/skills/              your skills, read-only in the container
+├─ /var/backup/alyosha/           daily dumps of the session database
+├─ alyosha                        the host command: status, logs, secrets, backups
+├─ firewall                       the container reaches the internet, never the host or the LAN
+└─ containers.alyosha             declared in your host configuration
+   ├─ gproxy        user gproxy   GPROXY, its database, and its master key
+   ├─ postgres      user postgres the session database: conversations, memory, people's notes
+   ├─ alyosha       user alyosha  the Telegram and QQ bridges → alyosha acp → MCP servers
+   └─ alyosha-run   user alyosha-run
+                    one unit per run_command or job, seeing only its session's folder
 ```
 
 ## Why a container around the whole agent
 
-Without the container, Bubblewrap protects your machine only from shell commands. MCP servers run as ordinary processes and can reach anything your user can. A bug in Alyosha's own path checks could too. Inside the container, all of them see only the folders you mount and have no route to services on your host's `localhost`. [Where MCP servers run](MCP.md#where-servers-run)
+Without the container, MCP servers run as ordinary processes and can reach anything your user can, and so could a bug in Alyosha's own path checks. Inside the container, nothing of your home exists except your skills, read-only, and nothing on your host or your local network can be reached. [Where MCP servers run](MCP.md#where-servers-run)
 
-Bubblewrap stays inside the container because the two layers do different jobs. GPROXY's credentials, the memory store, and session logs live in the container, and the model's shell must still not see them. [Shell commands](EnvironmentInterface.md#shell-commands)
+The container alone does not protect Alyosha from its own commands. The model's shell runs whatever a prompt, an email, or a web page talks the model into, and on 2026-11-26 a process running as the agent's user could read every key, the whole session database, and other processes' environments, and reach the host's SSH port and the router. So inside the container, the services and the commands run as different users, and each command runs in a unit that sees only its own folder. [Command units](EnvironmentInterface.md#shell-commands)
 
 ## What the container is
 
-A NixOS container is a `systemd-nspawn` machine declared in the host's NixOS configuration. It runs its own systemd, users, and services on the host's kernel. `nixos-rebuild switch` builds it like the rest of the system, so there is no image to download.
+A NixOS container is a `systemd-nspawn` machine declared in the host's NixOS configuration. It runs its own systemd, users, and services on the host's kernel. `nixos-rebuild switch` builds it like the rest of the system, so there is no image to download. Its files live in `/var/lib/nixos-containers/alyosha` on the host and survive restarts and rebuilds.
 
 ## Packages from the Nix store
 
@@ -33,262 +33,209 @@ The container does not get its own copy of the Nix store. It shares the host's `
 ```text
 host /nix/store                  every package the host has built or downloaded
 └─ container                     sees all of it, read-only; only declared packages are on PATH
-   └─ bwrap (run_command)        sees all of it, read-only; PATH from the project's dev shell or the default tools
+   └─ a command's unit           sees all of it, read-only; PATH from the project's dev shell or the default tools
 ```
 
 - **The container sees the whole store but installs only what you declare.** Its configuration puts Alyosha, GPROXY, and the commands of your MCP servers on `PATH`. Other packages are on disk, and a program can still run one by its full store path.
-- **Programs in the container can add packages.** NixOS gives the container the host's Nix daemon socket, so `nix shell` or `nix build` inside the container asks the host daemon. New packages land in the shared store, where the host sees them too. Nothing in the container can change a path that already exists. Removing this access is deferred.
-- **The model's shell cannot add packages.** Bubblewrap mounts the store read-only, without the daemon socket. Its tools come from the project's Nix dev shell, which Alyosha loads outside the sandbox at session start, or from a small default list. To give the shell a new tool, add it to the project's `flake.nix` and start a new session. For projects without a flake, add it to Alyosha's default tool list and rebuild with `nixos-rebuild switch`. [Bubblewrap launch contract](EnvironmentInterface.md#bubblewrap-launch-contract)
-- **Secrets never go in the store.** Everything in `/nix/store` is readable by every user and by the container. Keep tokens and keys in `~/alyosha` and never put them directly in a Nix expression.
+- **The agent can add packages.** NixOS gives the container the host's Nix daemon socket, so Alyosha can load a project's dev shell through it. New packages land in the shared store, where the host sees them too. Nothing in the container can change a path that already exists. Removing this access is deferred.
+- **The model's shell cannot add packages.** A command's unit hides the daemon socket. Its tools come from the project's Nix dev shell, which Alyosha loads outside the unit at session start, or from a small default list. To give the shell a new tool, add it to the project's `flake.nix` and start a new session. [Project dev shell](EnvironmentInterface.md#project-dev-shell)
+- **Secrets never go in the store.** Everything in `/nix/store` is readable by every user and by the container. Secrets live in the container's secrets folder, never in a Nix expression. [Where things live](#where-things-live)
 
-## What it can see
+## Where things live
 
-The container mounts one host folder, `~/alyosha`, at the same path it has on the host. It has two parts, split by who writes them:
+| What | Where in the container | Owner and mode | How you change it |
+| --- | --- | --- | --- |
+| Settings | `/etc/alyosha/config.toml`, generated from `services.alyosha.settings` | root, read-only | Edit the host configuration, then `sudo nixos-rebuild switch` [Configuration](reference/Configuration.md) |
+| Secrets | `/var/lib/alyosha-secrets/<name>`, one file each | root, readable by the `alyosha` group; `gproxy.env` root only | `alyosha secret set <name>` [Secrets](reference/Configuration.md#secrets) |
+| GPROXY's database and provider sign-in | `/var/lib/gproxy` | `gproxy` | `alyosha gateway login` [LLM Client / Gateway](LLMClientGateway.md) |
+| Conversations, memory, people's notes | PostgreSQL | `postgres`; only the `alyosha` role connects | Ask Alyosha; look with `alyosha memory list` [Memory](Memory.md) |
+| Working folders | `/var/lib/alyosha/work/owner`, `work/groups/<name>`, `work/guest` | `alyosha-run`, group `alyosha-work` | Look with `alyosha shell` |
+| Google sign-in store, `schedule.toml` | `/var/lib/alyosha` | `alyosha` | `alyosha shell` [Email and calendar](EmailCalendar.md) · [Scheduled tasks](Schedule.md) |
+| Skills | host `~/.agents/skills`, mounted read-only at `/var/lib/alyosha/.agents/skills` | you | Your editor [Skills](Skills.md) |
+| Shell cache and session folders | `/var/cache/alyosha` | `alyosha-run` and `alyosha` | Nothing; Alyosha rebuilds them |
+| Logs | the container's journal | — | `alyosha logs` [Logging](reference/Logging.md) |
+| Database dumps | host `/var/backup/alyosha`, mounted writable | root on the host | `alyosha backup` |
 
-- **`~/alyosha/config`, read-only.** What you write: the configuration file, skills, and the browser's saved sign-ins. Nothing in the container can change them, so neither the agent nor an MCP server can rewrite its own settings or instructions. [Configuration](reference/Configuration.md) · [Skills](Skills.md)
-- **`~/alyosha/state`, writable.** What Alyosha and its services write and you may want to read on the host: GPROXY's secrets and database, the Google sign-in store, scheduled tasks, Alyosha's log files, and the daily dumps of the session database. [Logging](reference/Logging.md)
+- **Each session has one working folder.** Your private chats in Telegram and QQ share `work/owner`, each trusted group has `work/groups/<name>`, and guest sessions' MCP servers start in `work/guest`. The folders hold only what the agent made, such as notes, saved pages, clones, and downloads. None of your own folders is shared: for Alyosha to work on a project, it clones the project into its folder. [Chat channels](Channels.md#two-bridges-at-once)
+- **What each user can read.** A command, as `alyosha-run`, sees its own folder, the Nix store, the shell cache, and the internet. The agent and its MCP servers, as `alyosha`, read the secrets they need, the database, and every working folder. Only `gproxy` and root read GPROXY's master key and provider sign-in.
+- **Backups.** Only the database is dumped each day. The working folders are not backed up. The container's own files survive restarts and rebuilds, but `nixos-container destroy` removes them.
 
-Everything else exists only inside the container:
+## The host command
 
-- **`~/work`, Alyosha's own working folder.** Each session works in one folder under it: `~/work/owner` for your private chats in Telegram and QQ, `~/work/groups/<name>` for each trusted group, and `~/work/guest` as the working directory of guest sessions' MCP servers. The folders hold only files the agent made, such as notes, saved pages, and downloads. The conversations are in the session database. None of your own folders is shared: for Alyosha to work on a project, it clones or downloads the project into its folder. To look at the files, open `machinectl shell <you>@alyosha`. [Chat channels](Channels.md#two-bridges-at-once)
-- **The session database.** PostgreSQL runs as a service in the container, reachable only through its Unix socket. It holds the conversations, your memory, and the notes on people in group chats. [Durable sessions](SessionStore.md#the-database) · [Memory](Memory.md)
-- **`~/.cache/alyosha`.** The shell's download cache and each session's private folders, which Alyosha rebuilds when they are missing.
+On the host, `alyosha` is a small program of the flake's module that manages the container, so you never need the container's paths. Commands that change something ask for `sudo` themselves.
 
-The container's own files survive a restart or rebuild of the container. They live in `/var/lib/nixos-containers/alyosha` on the host. Only the database is dumped each day; `~/work` is not backed up.
+| Command | What it does |
+| --- | --- |
+| `alyosha status` | The container, each service, the last backup, and whether the provider sign-in still works |
+| `alyosha logs [telegram\|qq\|gproxy\|db] [-f]` | The service's journal, as `journalctl -M alyosha -u …` |
+| `alyosha secret set <name>` | Reads a secret from the terminal without echo, or from standard input, writes it with the right owner and mode, and restarts the services that use it |
+| `alyosha secret list` | The names of the secrets that are set, never their values |
+| `alyosha secret remove <name>` | Removes one and restarts its services |
+| `alyosha gateway init` · `alyosha gateway login` | GPROXY's first setup and provider sign-in, run as root in the container [Run GPROXY as a service](LLMClientGateway.md#run-gproxy-as-a-service) |
+| `alyosha backup now` · `alyosha backup list` · `alyosha backup restore <file>` | Start a dump, list dumps, restore one into an emptied database |
+| `alyosha memory list` | Your memories' names, dates, and descriptions, read-only |
+| `alyosha shell` | A shell as `alyosha` in its state folder, to look at the working folders |
+| `alyosha check` | The container checks from [Verification](#verification) that need no model account |
+| `alyosha commands --json` | Every command with its arguments, for scripts and coding agents |
 
-Keeping `~/alyosha` at the same path on both sides means a path in a log line or an error is also the path on the host. Everything else on the host, such as your home directory, `~/.ssh`, and your projects, does not exist inside.
+## Network
 
-The container has its own network with a route to the internet through the host. GPROXY and MCP servers can reach their services. Services listening on the host's `localhost` are out of reach.
+The container has its own network with a route to the internet through the host. GPROXY and MCP servers reach their services, and commands download packages.
+
+- **Not the host.** The host's firewall drops everything the container sends to the host itself, so services listening on all the host's addresses, such as SSH, are out of reach too.
+- **Not your local network.** The host refuses to forward the container's traffic to private addresses: `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `169.254.0.0/16` (which includes cloud metadata addresses), `100.64.0.0/10`, and the private and link-local IPv6 ranges. This holds for the browser too, so a web page cannot steer it to your router.
+- **Not the container's own loopback, for commands.** GPROXY listens on the container's `127.0.0.1`. A rule in the container refuses loopback connections from commands' units. The agent and MCP servers still reach GPROXY. [Command network](EnvironmentInterface.md#network)
+
+Name resolution uses the public nameservers in the container's configuration. A nameserver on the LAN, such as the router, would be unreachable.
 
 ## Limits on memory and CPU
 
-The container has a memory cap, set in the host configuration. When everything inside together uses more, the kernel stops processes inside the container instead of freezing your machine. A bridge whose agent is stopped this way restarts and resumes its session. [Durable sessions](SessionStore.md) Shell commands and background jobs also run at a lower CPU priority, so a long build leaves the host responsive. [Container module](#host-module)
+The container has a memory cap, set in the host configuration. When everything inside together uses more, the kernel stops processes inside the container instead of freezing your machine. A bridge whose agent is stopped this way restarts and resumes its session. [Durable sessions](SessionStore.md) Each command's unit has its own cap as well, so a runaway build is stopped before it touches the bridges. Commands and background jobs run at a lower CPU priority, so a long build leaves the host responsive. [Container module](#host-module)
 
 ## Using it
 
-The host starts the container at boot. The Telegram and QQ bridges run in the container as always-on services, and you talk to Alyosha by messaging them. [Chat channels](Channels.md#the-telegram-bridge) The host's `alyosha` is a small launcher that runs the container's `alyosha` through `machinectl shell`, for `alyosha gateway init` and `gateway login`. A polkit rule lets you, and only you, open that shell without a password. Alyosha runs as your user, never as root, because root inside a NixOS container is close to root on the host. Your user has the same user ID inside, so files Alyosha writes are owned by you on the host.
+The host starts the container at boot. The Telegram and QQ bridges run in the container as always-on services, and you talk to Alyosha by messaging them. [Chat channels](Channels.md#the-telegram-bridge) You manage it with the host command. Nothing runs as root in the container except the services that must, because root inside a NixOS container is close to root on the host.
 
 ## How we get there
 
-The component code does not depend on the container. The same build runs on the host and inside the container, because Alyosha finds its folders from `$HOME` and `ALYOSHA_HOME` and does not fix them in code. Build and debug the core and the first plugins on the host, which are steps 1 to 4 of the implementation order. Then add the container as a NixOS module at step 5, before any real sign-ins or tokens are used. The first check in the container is whether Bubblewrap starts inside it. If it does not, adjust the container's settings and keep Bubblewrap. [Implementation order](README.md#where-to-start-implementing)
+The component code does not depend on the container. Alyosha finds its folders at fixed paths, which environment variables replace for tests and development on the host. [Folders](reference/Configuration.md#folders) Build and debug the core and the first plugins on the host, which are steps 1 to 4 of the implementation order. Then add the container as a NixOS module at step 5, before any real sign-ins or tokens are used. [Implementation order](README.md#where-to-start-implementing)
 
 ## Deferred
 
 - Sharing your own project folders with the container.
 - Removing the container's access to the host's Nix daemon, which lets programs in the container build or download packages into the shared store.
-- An ephemeral container that resets its own files on restart. It would also clear `~/work` and the database, which live in the container's own state.
-- Running each MCP server in its own sandbox.
+- An ephemeral container that resets its own files on restart. It would also clear the working folders and the database, which live in the container's own state.
+- Running each MCP server in its own sandbox. They run as `alyosha` and can read what the agent reads.
+- Running commands under gVisor inside their units, for a user-space kernel between them and the host's. It ran rootless in the container on 2026-11-26, but has no memory limit or loopback rule of its own and slows builds. [Why units](#why-units-and-not-bubblewrap)
 
 ## Implementation
 
-Add the container at step 5 of the build order, after the core, search, and the browser work on the host, and before email and the bridges. Nothing in the components changes for it. Alyosha must find its folders through `$HOME` and the XDG variables and take the workspace from the bridge, as the component pages already describe. [Architecture overview](README.md)
+Add the container at step 5 of the build order, after the core, search, and the browser work on the host, and before email and the bridges. [Architecture overview](README.md)
 
 ### Host module
 
-Declare the container in the host configuration. This sketch assumes the user `mjli` with user ID 1000. `alyosha` and `gproxy` stand for the packages that Alyosha's flake will provide. On the host for v1, install the same two packages. [GPROXY package](LLMClientGateway.md#install-and-update-gproxy-with-nix)
+The flake's module, `nixosModules.container` in `nix/container.nix`, declares everything below. In the host configuration:
 
 ```nix
-{ config, pkgs, ... }:
-let
-  user = "mjli";
-  home = "/home/${user}";
-in {
-  containers.alyosha = {
-    autoStart = true;
-    privateNetwork = true;
-    hostAddress = "10.233.1.1";
-    localAddress = "10.233.1.2";
-
-    # Each mount keeps its host path. ~/work exists only inside.
-    bindMounts = {
-      "${home}/alyosha/config" = { hostPath = "${home}/alyosha/config"; isReadOnly = true; };
-      "${home}/alyosha/state" = { hostPath = "${home}/alyosha/state"; isReadOnly = false; };
-    };
-
-    config = { pkgs, ... }: {
-      users.users.${user} = { isNormalUser = true; uid = 1000; };
-      # Add the commands your MCP servers use, such as the browser's
-      # playwright-mcp (Browser.md), gogcli (EmailCalendar.md), and
-      # open-websearch (WebSearch.md).
-      environment.systemPackages = [ alyosha gproxy ];
-      # Add systemd.services.gproxy from LLMClientGateway.md, PostgreSQL,
-      # alyosha-db, and its backup from SessionStore.md, and the bridge
-      # services from TelegramBridge.md and QQBridge.md, here. The flake's
-      # nixosModules.container (nix/container.nix) does all of this.
-      # Set system.stateVersion to the host's value.
-    };
+imports = [ inputs.alyosha.nixosModules.container ];
+services.alyosha = {
+  enable = true;
+  owner = "mjli";                 # whose ~/.agents/skills is mounted
+  externalInterface = "enp4s0";   # the host's uplink, for NAT
+  memoryMax = "12G";              # everything in the container
+  commandMemoryMax = "4G";        # each command or job
+  telegram.enable = true;
+  qq.enable = true;
+  nameservers = [ "62.179.104.196" "213.46.228.196" ];
+  settings = {
+    timezone = "Europe/Amsterdam";
+    model = { provider = "chatgpt"; api = "codex"; name = "gpt-6.2-sol"; };
+    telegram.owner_id = 123456789;
+    qq = { app_id = "102000000"; owner_openid = "…"; trusted_groups.friends = "<group_openid>"; };
   };
-
-  # Kill processes inside the container instead of freezing the host when
-  # memory runs out. Pick a value for your machine, such as 75% of its RAM.
-  systemd.services."container@alyosha".serviceConfig.MemoryMax = "12G";
-
-  networking.nat = {
-    enable = true;
-    internalInterfaces = [ "ve-+" ];
-    externalInterface = "wlan0";  # the host's uplink
-  };
-}
-```
-
-| Setting | Why |
-| --- | --- |
-| `bindMounts` | `config` stays read-only, the NixOS default, so nothing in the container can change your settings or skills. `state` needs writes for GPROXY, the logs, and the database dumps. Mounting at the host path keeps paths identical on both sides. |
-| `uid = 1000` | The container does not remap user IDs, so the same ID makes files written inside belong to you on the host. Use the output of `id -u`. |
-| `privateNetwork` and `networking.nat` | The container gets its own network and loopback. NAT gives GPROXY and MCP servers the internet while services on the host's `localhost` stay unreachable. |
-| `autoStart` | The container is ready when you open a shell. |
-| `MemoryMax` on `container@alyosha` | Caps the memory of everything in the container: the agent, the Chromium of each session, builds, and jobs. When the cap is reached, the kernel's out-of-memory killer chooses processes inside the container, and the host keeps running. |
-
-GPROXY keeps listening on `127.0.0.1` inside the container. That is the container's own loopback, so the gateway setup is unchanged. When moving in, disable the host's `gproxy` service before starting the container's. [Run GPROXY as a service](LLMClientGateway.md#run-gproxy-as-a-service)
-
-### Packages and the Nix store
-
-The container module mounts the host's `/nix/store`, the Nix database, and the Nix daemon socket read-only. It also gives the container its own profile and garbage-collector roots under `/nix/var/nix/*/per-container/alyosha`. A read-only socket mount still lets programs connect, so `nix` commands inside the container work through the host daemon. [NixOS container module](https://github.com/NixOS/nixpkgs/blob/master/nixos/modules/virtualisation/nixos-containers.nix)
-
-Bubblewrap and `pasta` come from Alyosha's package, which refers to `pkgs.bubblewrap`, `pkgs.passt`, and the default shell tools. The sandbox mounts the whole store read-only and never the daemon socket. Alyosha loads a project's dev shell outside the sandbox through the daemon, so the container needs Nix with flakes allowed. The launch contract is unchanged inside the container. [Project dev shell](EnvironmentInterface.md#project-dev-shell) Install the commands MCP servers need through `environment.systemPackages` in the container's configuration. [Bubblewrap launch contract](EnvironmentInterface.md#bubblewrap-launch-contract)
-
-Keep secrets out of Nix expressions, including the container module and MCP `env` values. Anything written into a Nix expression ends up in the world-readable store. Alyosha's configuration file stays an ordinary file in `~/alyosha/config`. [MCP configuration](MCP.md#v1-configuration)
-
-### Start a session
-
-```bash
-machinectl shell mjli@alyosha
-```
-
-Then run `alyosha gateway …` or probe the sandbox. Never run Alyosha as root inside the container.
-
-The flake's module, `nixosModules.container`, mounts `~/alyosha/config` and `~/alyosha/state` and, with `hostCommand` (on by default), installs a host `alyosha`, which runs `machinectl shell -q --uid=<user> alyosha /run/current-system/sw/bin/alyosha <args>`, passing `TERM` on, for the gateway commands. A polkit rule allows `org.freedesktop.machine1.shell` for the owner into this machine as themselves. Remove a host install of `alyosha` and the host's `gproxy` service when switching to the container.
-
-### Bubblewrap inside the container
-
-Bubblewrap needs unprivileged user namespaces, a private procfs for the sandbox, and a TUN device for pasta. The shell is still blocked in the container on ms02, so every `run_command` fails with "The sandbox could not start". The search and Chromium servers run outside Bubblewrap and can be tested independently. [Shell launch contract](EnvironmentInterface.md#bubblewrap-launch-contract)
-
-Probed on ms02 on 2026-11-26 (kernel 6.18.60, systemd 260, Bubblewrap 0.13.1, passt 2026_07_16), as the owner inside the container:
-
-- **TUN.** `/dev/net/tun` does not exist in the container. pasta stops with `Failed to open() /dev/net/tun: No such file or directory` and `Failed to set up tap device in namespace`. It also warns `Couldn't mount /proc`.
-- **Namespaces.** Bubblewrap starts with `--unshare-user`, `--unshare-pid`, `--unshare-ipc`, `--unshare-net`, and `--dev /dev`.
-- **procfs.** Only `--proc /proc` fails, with `Can't mount proc on /proc: Operation not permitted`. The kernel lets a user namespace mount a new procfs only when its mount namespace already has a fully visible one. nspawn covers the container's `/proc` with read-only mounts over `sys`, `acpi`, `asound`, `bus`, `fs`, and `irq`, and with empty files over `kallsyms`, `kcore`, `keys`, `kmsg`, `sysrq-trigger`, `timer_list`, and `sys/kernel/random/boot_id`, so it is not fully visible.
-- **Host.** On the host, the same pasta and Bubblewrap launch, `--proc /proc` included, works.
-
-Two shortcuts are ruled out. `enableTun` would also give the whole container `CAP_NET_ADMIN`, which pasta does not need. Binding the container's `/proc` into the sandbox (`--ro-bind /proc /proc`) would show the sandbox every container process, and a process running as the owner can read the environment of the owner's other processes, such as GPROXY's keys.
-
-#### Experiment: unblock the sandbox in the container
-
-This experiment decides whether the container can be fixed or the inner sandbox needs a different design. Run it on ms02. It restarts the container, and with it the bridges. Record each result here.
-
-**1. Give the container the TUN device.** Add a temporary override next to `services.alyosha` in the host flake, then rebuild and restart the container:
-
-```nix
-containers.alyosha = {
-  bindMounts."/dev/net/tun" = { hostPath = "/dev/net/tun"; isReadOnly = false; };
-  allowedDevices = [ { node = "/dev/net/tun"; modifier = "rw"; } ];
 };
 ```
 
-```bash
-sudo nixos-rebuild switch --flake /etc/nixos#ms02
+`settings` is the configuration file as Nix values. The module writes it with `pkgs.formats.toml` to `/etc/alyosha/config.toml` and checks it with `alyosha config check` at build time, so a wrong key fails the rebuild instead of the start. It holds no secrets: the module refuses a `settings` value under a key the reference lists as a secret. [Configuration](reference/Configuration.md)
+
+| Host setting | Why |
+| --- | --- |
+| `privateNetwork` and `networking.nat` | The container gets its own network and loopback. NAT gives it the internet. |
+| `bindMounts` | Only two: `~<owner>/.agents/skills` read-only at `/var/lib/alyosha/.agents/skills`, and `/var/backup/alyosha` writable at the same path. |
+| Firewall rules on `ve-alyosha` | Input from the container to the host is dropped. Forwarded traffic from it to the private ranges under [Network](#network) is rejected. |
+| `MemoryMax` on `container@alyosha` | Caps everything in the container. When it is reached, the kernel's out-of-memory killer chooses processes inside the container, and the host keeps running. |
+| The host command | `alyosha`, described under [The host command](#the-host-command). It reaches the container with `machinectl shell`, `systemctl -M`, and `journalctl -M`, and writes secrets through the container's root folder with `sudo`. |
+
+### Inside the container
+
+| Piece | Setting |
+| --- | --- |
+| Users | `alyosha` (home `/var/lib/alyosha`), `alyosha-run`, and `gproxy`, all system users without a login shell. The group `alyosha-work` holds `alyosha` and `alyosha-run`. |
+| Folders | tmpfiles rules create `/var/lib/alyosha-secrets` (root:alyosha, `0750`), `/var/lib/alyosha/work/owner` and `work/groups/<name>` for each trusted group (alyosha-run:alyosha-work, `2770`, with a default ACL giving the group read and write), `work/guest` (alyosha, `0700`), `/var/cache/alyosha/shell` (alyosha-run, `0700`), `/var/cache/alyosha/sessions` (alyosha, `0700`), and `/run/alyosha-run` (alyosha:alyosha-work, `0750`). |
+| `gproxy.service` | `User=gproxy`, `StateDirectory=gproxy`, `EnvironmentFile=/var/lib/alyosha-secrets/gproxy.env`, which systemd reads as root. Skipped until the file exists. [Run GPROXY as a service](LLMClientGateway.md#run-gproxy-as-a-service) |
+| PostgreSQL | As in [Durable sessions](SessionStore.md#container), with the role and database owner `alyosha`. |
+| The bridges | `alyosha-telegram.service` and `alyosha-qq.service`, `User=alyosha`, standard output and error to the journal. They require the database and start after GPROXY. |
+| Command units | One template per working folder, the slice, the polkit rule, and the loopback rule, under [Command units](#command-units). |
+| Chromium | A tmpfiles rule gives `alyosha` a writable `~/.config`, which Chromium needs for its crash database. Without it Chromium exits on its first navigation with `chrome_crashpad_handler: --database is required`. [Chromium inside the container](Browser.md#chromium-inside-the-container) |
+
+### Command units
+
+Each working folder that runs commands gets a template unit: `alyosha-run-owner@.service`, and `alyosha-run-group-<name>@.service` for each trusted group. Trusted groups are a fixed list in the settings, so the templates are too, and no unit is ever told which folder to mount at run time. Guest sessions run no commands and get none. The instance name is `<process ID>-<counter>` of the `alyosha acp` that started it. [Command launch](EnvironmentInterface.md#command-launch)
+
+```ini
+[Service]
+Type=exec
+User=alyosha-run
+Group=alyosha-work
+Slice=alyosha-run.slice
+ExecStart=/run/current-system/sw/bin/alyosha run-exec %i
+StandardOutput=truncate:/run/alyosha-run/%i/output
+StandardError=inherit
+WorkingDirectory=/workspace
+BindPaths=/var/lib/alyosha/work/owner:/workspace
+BindPaths=/var/cache/alyosha/shell:/home/alyosha/.cache
+BindReadOnlyPaths=/var/lib/alyosha/.agents/skills:/skills
+BindReadOnlyPaths=/run/alyosha-run/%i:/run/alyosha-run/%i
+TemporaryFileSystem=/var/lib /var/cache /home /run/alyosha-run
+InaccessiblePaths=/run/postgresql /nix/var/nix/daemon-socket /var/backup
+PrivatePIDs=yes
+PrivateTmp=yes
+PrivateIPC=yes
+ProtectSystem=strict
+ProtectHome=no
+NoNewPrivileges=yes
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryMax=4G
+MemorySwapMax=0
+TasksMax=4096
+RuntimeMaxSec=24h
+Nice=10
+KillMode=control-group
 ```
 
-```bash
-sudo systemctl restart container@alyosha
-```
+- **Who may start them.** A polkit rule lets the user `alyosha` start and stop units whose name matches `alyosha-run-[a-z0-9-]+@[0-9]+-[0-9]+\.service`, and nothing else. A template fixes its user, mounts, and limits, so starting one cannot gain anything beyond what the unit allows.
+- **The slice.** `alyosha-run.slice` is started at boot. A oneshot after it, `alyosha-run-firewall.service`, adds `iptables -I OUTPUT -o lo -m cgroup --path alyosha-run.slice -j REJECT` and the same for `ip6tables`. The rule can only be added once the slice's cgroup exists. systemd's own `IPAddressDeny=` would be simpler, but it needs a BPF firewall, and the container lacks `CAP_BPF`.
+- **Leftovers.** When `alyosha acp` starts, it stops every `alyosha-run-*@<pid>-*` unit whose process ID no longer runs: commands and jobs of a process that crashed.
 
-**2. Probe as the owner.** Open `machinectl shell mjli@alyosha`, put the sandbox's own programs on `PATH` from the `alyosha` wrapper, and define the two launches with Alyosha's flags:
+### Why units and not Bubblewrap
 
-```bash
-eval "$(grep -E '^(PATH=|export PATH)' "$(readlink -f "$(command -v alyosha)")")"
-sh=$(command -v bash)
-net() { pasta --config-net --quiet --no-map-gw -t none -u none -T none -U none -- "$@"; }
-box() { bwrap --unshare-user --unshare-pid --unshare-ipc --ro-bind /nix/store /nix/store --dev /dev "$@"; }
-```
+The first design ran each command in Bubblewrap under `pasta`, as Codex and Claude Code do. In the container it cannot start, and fixing that would weaken the container. Probed on ms02 on 2026-11-26 (kernel 6.18.60, systemd 260, Bubblewrap 0.13.1, passt 2026_07_16):
 
-Then check pasta, its network, and Bubblewrap's procfs:
+- `/dev/net/tun` does not exist in the container, so pasta stops with `Failed to set up tap device in namespace`. Giving it the device is possible; `enableTun` would also give the whole container `CAP_NET_ADMIN`.
+- Bubblewrap creates its user, PID, IPC, and network namespaces, but `--proc /proc` fails with `Operation not permitted`. The kernel lets a user namespace mount a new procfs only when its mount namespace already has a fully visible one, and nspawn covers the container's `/proc` with read-only mounts and empty files.
+- A fresh procfs mounted read-only by the container's root does not help: the kernel locks it read-only inside the sandbox's user namespace. A writable one works, but it gives the container's root a writable view of the host's kernel settings.
+- Binding the container's `/proc` into the sandbox, Claude Code's weaker nested mode, would show every container process and let a command read their environments, such as GPROXY's keys.
 
-```bash
-net "$sh" -c 'echo pasta ok'
-```
+The container's systemd runs as root without a user namespace, so none of this refuses it. The same day, `systemd-run --wait --pipe` as root in the container, with the properties above, gave a command only its own processes, hid the other folders and the database socket, wrote files with the run user, kept the internet and name resolution, returned exit status 7 for `exit 7`, stopped a command and its background child at `RuntimeMaxSec=3`, and killed a 200 MB allocation at `MemoryMax=64M`. The cgroup-matched `iptables` rule refused loopback to those units only. Starting a template as `alyosha` through polkit is not yet checked here; Max runs its VMs the same way. [Max's VMs](https://github.com/HCHogan/max/blob/main/docs/design/vm.md)
 
-```bash
-net "$sh" -c 'exec 3<>/dev/tcp/1.1.1.1/443 && echo internet ok'
-```
+### Move into the container
 
-```bash
-net "$sh" -c 'exec 3<>/dev/tcp/127.0.0.1/18787 && echo GPROXY REACHABLE || echo loopback blocked'
-```
+Earlier versions of the module ran Alyosha as the owner and mounted `~/work`, `~/.config/alyosha`, and `~/.local/share/alyosha`. Move once:
 
-```bash
-box --proc /proc -- "$sh" -c 'echo bwrap ok'
-```
-
-Expect `pasta ok`, `internet ok`, and `loopback blocked`. Bubblewrap's procfs should still fail at this step.
-
-**3. Give the container a fully visible procfs.** As the container's root (`sudo nixos-container root-login alyosha` on the host), mount a fresh procfs under a folder only root can open. The folder must be the parent of the mount point, because a mounted procfs shows its own permissions instead of the folder's. Try read-only first:
-
-```bash
-install -d -m 0700 /run/alyosha && install -d /run/alyosha/proc
-```
-
-```bash
-mount -t proc -o ro,nosuid,nodev,noexec proc /run/alyosha/proc
-```
-
-Run the Bubblewrap probe from step 2 again as the owner. If it still fails, remount the procfs writable and probe once more:
-
-```bash
-umount /run/alyosha/proc && mount -t proc -o nosuid,nodev,noexec proc /run/alyosha/proc
-```
-
-A read-only mount may not be enough, because the kernel treats it as locked read-only inside the sandbox's user namespace, while Bubblewrap mounts its procfs writable. The writable mount gives the container's root a procfs whose `/proc/sys` is not read-only, and the container shares the host's user IDs, so root there can change the host's kernel settings. The design already treats root in the container as close to root on the host. [Using it](#using-it) The writable mount removes one of the things that still limits it.
-
-**4. Check the full launch.** When the probe passes, check as the owner that `ls /run/alyosha` is refused and that the sandbox sees only its own processes:
-
-```bash
-net bwrap --unshare-user --unshare-pid --unshare-ipc --ro-bind /nix/store /nix/store --dev /dev --proc /proc -- "$sh" -c 'echo /proc/[0-9]*'
-```
-
-Expect one or two process IDs. Then ask Alyosha from Telegram to run `pwd; uname -r; nproc`, and work through the shell check in [Verification](#verification). The manual mount disappears when the container restarts.
-
-**5. Decide.**
-
-| TUN | procfs | Next |
-| --- | --- | --- |
-| Works | Read-only mount works | Keep the design. Add the device and a mount unit for `/run/alyosha/proc` to `nix/container.nix`. |
-| Works | Only the writable mount works | Choose between accepting the writable procfs and an inner sandbox that needs no namespaces, such as Landlock. |
-| Works | Neither works | Redesign the inner sandbox: Landlock, or a separate container for commands next to the agent's. |
-| Fails | Any | Record pasta's error. Bubblewrap's own network namespace works, so commands could reach the internet through a proxy instead of pasta. |
-
-The container's tmpfiles rules create `~/work` and give the owner write access to `~/.config`, which Chromium needs for its crash database. Without write access Chromium exits on its first navigation with `chrome_crashpad_handler: --database is required`. Check the browser with a real navigation and snapshot as the owner. [Chromium inside the container](Browser.md#chromium-inside-the-container)
-
-### Move to `~/alyosha`
-
-Earlier versions of the module mounted `~/work`, `~/.config/alyosha`, and `~/.local/share/alyosha`. Stop the container, move the files once, then start it with the new module:
-
-```bash
-sudo systemctl stop container@alyosha
-```
-
-```bash
-mkdir -p ~/alyosha/config ~/alyosha/state/secrets
-mv ~/.config/alyosha/config.toml ~/.config/alyosha/skills ~/alyosha/config/
-mv ~/.config/alyosha/gproxy.env ~/alyosha/state/secrets/
-mv ~/.local/share/alyosha/gproxy ~/.local/share/alyosha/logs ~/alyosha/state/
-```
-
-Move `~/.config/alyosha/gog` to `~/alyosha/state/gog`, `~/.local/share/alyosha/browser` to `~/alyosha/config/browser`, and `schedule.toml` to `~/alyosha/state/` if they exist, and update the paths in `config.toml`. Then remove the `workspace` keys and turn `trusted_groups` into tables. [Configuration](reference/Configuration.md#telegram) Copy each memory file into the new store by asking Alyosha to remember it again. The old `~/work` folders held only the bridges' scratch files. Delete them, and delete what is left of `~/.local/share/alyosha`: the shell cache, the session folders, and the empty guest folder.
+1. Rebuild with the new module and stop the bridges: `sudo systemctl -M alyosha stop alyosha-telegram alyosha-qq`.
+2. Set each secret from the old files with `alyosha secret set`: `telegram-token` and `qq-secret` from `config.toml`, `gproxy.env` without its `ALYOSHA_GATEWAY_KEY` line, `gateway-key` from that line, `browser-state.json` and `gog-keyring-password` if you use them. [Secrets](reference/Configuration.md#secrets)
+3. Move the rest of `config.toml` into `services.alyosha.settings`.
+4. Copy GPROXY's data folder to `/var/lib/gproxy` in the container and give it to `gproxy`, the Google sign-in store to `/var/lib/alyosha/gog`, and `schedule.toml` to `/var/lib/alyosha`, all with `sudo` through `/var/lib/nixos-containers/alyosha`.
+5. Move skills to `~/.agents/skills`.
+6. Start the bridges, and ask Alyosha to remember the one memory again.
+7. Delete `~/work`, `~/.config/alyosha`, and `~/.local/share/alyosha` on the host, and the owner's old folders in the container.
 
 ### Verification
 
-These checks need NixOS with the container built from the module above, and a provider account for the GPROXY case. Run the component tests with `cargo test` on the host first.
+These checks need NixOS with the container built from the module, and a provider account for the GPROXY case. Run the component tests with `cargo test` on the host first. `alyosha check` runs the ones that need no model account.
 
-- Run the shell integration checks from the Environment Interface page inside the container: a nonzero exit, a sandbox setup error, and a timeout with a subprocess. [Verify on the host](EnvironmentInterface.md#verify-on-the-host)
-- From a shell in the container, check that `~/work` exists, that `~/.ssh` and `~/Projects` do not, and that writing a file in `~/alyosha/config` fails while one in `~/alyosha/state` succeeds and belongs to your user on the host.
-- Run `alyosha --help` on the host. Check that it prints the container's usage without a password prompt.
-- Check that `systemctl show container@alyosha -p MemoryMax` on the host reports the configured value. In the container, run a job that allocates more than the cap. Check that the host stays responsive and the log of the program that lost a process says so, or the bridge restarts.
-- Start a test service on the host's `127.0.0.1`. Check that the container cannot connect to it, and that HTTPS to the provider works, name resolution included.
-- Run one tool exchange through GPROXY with the configured model from inside the container. [Gateway checks](LLMClientGateway.md#verify-with-the-upstream-binary-and-mock-providers)
-- Configure an MCP server that tries to read a host file outside the mounts. Check that the read fails. Repeat the environment check from the MCP page. [MCP checks](MCP.md#verification)
-- From a shell in the container, run `nix shell nixpkgs#hello -c hello`. Check that it works and that the new store path is visible on the host.
-- Ask the model to run `nix shell nixpkgs#hello` and `ls /nix/store` through `run_command`. Check that `nix` is missing or fails, while the store listing works. Repeat the shell network checks from the Environment Interface page inside the container. [Verify on the host](EnvironmentInterface.md#verify-on-the-host)
-- Add a skill on the host. Check that a new session in the container lists it.
+- In a command's unit: the working folder is writable and its files belong to `alyosha-run` with group `alyosha-work`; `/var/lib/alyosha-secrets`, `/var/lib/gproxy`, the other working folders, `/run/postgresql`, and the Nix daemon socket are absent; `/proc` shows only the unit's processes; `psql` cannot connect.
+- From a command: HTTPS to a public address and name resolution work; `127.0.0.1:18787`, the host's `10.233.1.1:22`, and the router fail.
+- As `alyosha`: `read_file` and `edit_file` work on a file a command wrote, and a command can change a file the agent wrote.
+- Exit status, a timeout, Stop, a job, and `MemoryMax` behave as in [Command results](EnvironmentInterface.md#command-results). Kill an `alyosha acp` with a job running and start it again. Check that the leftover unit is stopped.
+- Start a unit of another name as `alyosha` with `systemctl start`. Check that polkit refuses it.
+- The browser cannot open the router's address; MCP servers still reach GPROXY; `sudo alyosha gateway login` works.
+- `alyosha secret set telegram-token` restarts only the Telegram bridge; `alyosha secret list` prints no values; `alyosha logs qq -f` follows the bridge.
+- `systemctl show container@alyosha -p MemoryMax` reports the configured value.
+- Restart the container and the host. Check that the slice, the loopback rule, and the host's firewall rules are back.
+- From a shell in the container, run `nix shell nixpkgs#hello -c hello`. Check that it works. Ask the model to run it through `run_command`. Check that it fails while `ls /nix/store` works.
+- Add a skill in `~/.agents/skills` on the host. Check that a new session lists it.
 
 [Architecture overview](README.md)

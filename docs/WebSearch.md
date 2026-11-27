@@ -68,7 +68,7 @@ The package's `build` script compiles TypeScript to `build/index.js`, and `bin` 
 
 ### Configuration
 
-Add the server to `~/alyosha/config/config.toml`. The tool appears as `mcp__search__search`. [MCP configuration](MCP.md#v1-configuration)
+Add the server to `services.alyosha.settings`. The tool appears as `mcp__search__search`. [MCP configuration](MCP.md#v1-configuration)
 
 ```toml
 [mcp.servers.search]

@@ -4,13 +4,13 @@ Alyosha can use tools from Model Context Protocol (MCP) servers that you configu
 
 ## Configuring a server
 
-You list servers in the personal configuration file. Each entry gives the command that starts the server, its arguments, the environment variables it needs, and an optional allowlist of tools to expose.
+You list servers in the settings. Each entry gives the command that starts the server, its arguments, the environment variables it needs, and an optional allowlist of tools to expose. A variable whose value is a secret names the secret instead, under `secret_env`, because the settings are world-readable. [Secrets](reference/Configuration.md#secrets)
 
 ```toml
 [mcp.servers.github]
 command = "github-mcp-server"
 args = ["stdio"]
-env = { GITHUB_PERSONAL_ACCESS_TOKEN = "..." }
+secret_env = { GITHUB_PERSONAL_ACCESS_TOKEN = "github-token" }
 tools = ["search_issues", "get_issue"]
 ```
 
@@ -26,9 +26,9 @@ A server that fails to start, or a tool whose name or schema the registry reject
 
 ## Where servers run
 
-A server is a program you chose to configure, so Alyosha trusts it like the rest of your configuration. It runs as an ordinary child process outside the Bubblewrap sandbox, with the workspace as its working directory. It receives `PATH` and `HOME`, plus `ALYOSHA_HOME`, `XDG_CONFIG_HOME`, and `XDG_DATA_HOME` when they are set, and the variables listed in its `env`, and nothing else from Alyosha's environment. The XDG variables let a server such as the schedule server find the same folders as Alyosha. Provider credentials and GPROXY's settings never reach it. The servers stop when the session ends. [Environment Interface](EnvironmentInterface.md)
+A server is a program you chose to configure, so Alyosha trusts it like the rest of your configuration. It runs as an ordinary child process of the agent, as the user `alyosha`, outside the command units, with the workspace as its working directory. It receives `PATH` and `HOME`, plus Alyosha's path variables, `XDG_CONFIG_HOME`, and `XDG_DATA_HOME` when they are set, the variables listed in its `env`, and the secrets named in its `secret_env`, and nothing else from Alyosha's environment. The path variables let a server such as the schedule server find the same folders as Alyosha. [Folders](reference/Configuration.md#folders) Provider credentials and GPROXY's settings never reach it. The servers stop when the session ends. [Environment Interface](EnvironmentInterface.md)
 
-This means an MCP server can reach the network and files outside the workspace, depending on what it does. The workspace permissions and the shell sandbox apply to built-in tools, not to MCP servers. [Tool permissions](reference/ToolPermissions.md#mcp-tools)
+This means an MCP server can reach the network and files outside the workspace, depending on what it does. The workspace permissions and the command units apply to built-in tools, not to MCP servers. [Tool permissions](reference/ToolPermissions.md#mcp-tools)
 
 When Alyosha runs in its NixOS container, the container is the outer limit. A server sees only the folders the container mounts and cannot reach services on the host's `localhost`. Its command must be installed in the container's configuration. [Deployment](Deployment.md)
 
@@ -69,12 +69,13 @@ McpServerConfig {
     command: String
     args: Vec<String>          # default empty
     env: Map<String, String>   # default empty
+    secret_env: Map<String, String> # variable → secret name; default empty
     tools: Option<Vec<String>> # default: every tool
     ask: Vec<String>           # default empty; tools that need the owner's approval
 }
 ```
 
-A server name matches `[a-z0-9][a-z0-9-]{0,31}`. An invalid entry is a configuration error, and Alyosha refuses to start, as for any mistake in the file. A server that is valid but fails to start is only a warning. The configuration file holds tokens in `env`, so it must be readable only by you. [Configuration](reference/Configuration.md#mcpservers)
+A server name matches `[a-z0-9][a-z0-9-]{0,31}`. An invalid entry is a configuration error, and Alyosha refuses to start, as for any mistake in the file. A server that is valid but fails to start is only a warning, and so is one whose `secret_env` names a secret that is not set: it is not started, and the warning names the secret and `alyosha secret set`. [Configuration](reference/Configuration.md#mcpservers)
 
 ### Start servers and register tools
 
@@ -85,7 +86,7 @@ McpManager
     shutdown(self)
 ```
 
-Start all servers concurrently, each with a 30-second limit covering launch, the `initialize` handshake, and `tools/list` (following `nextCursor` until done). Launch each with the workspace as its working directory and a cleared environment holding the host `PATH` and `HOME`, plus `ALYOSHA_HOME`, `XDG_CONFIG_HOME`, and `XDG_DATA_HOME` when they are set, plus its `env`. Declare no client capabilities. Send stdin and stdout to the transport. Drain stderr into the program's log file, one line per entry, prefixed with the server's name and cut to 1 KiB. [Logging](reference/Logging.md#what-is-logged) A server that misses the limit or fails the handshake is killed and reported as a warning. [MCP lifecycle](https://modelcontextprotocol.io/specification/2025-06-18/basic/lifecycle)
+Start all servers concurrently, each with a 30-second limit covering launch, the `initialize` handshake, and `tools/list` (following `nextCursor` until done). Launch each with the workspace as its working directory and a cleared environment holding the host `PATH` and `HOME`, plus Alyosha's path variables, `XDG_CONFIG_HOME`, and `XDG_DATA_HOME` when they are set, plus its `env`, plus each `secret_env` variable with the secret's contents. Declare no client capabilities. Send stdin and stdout to the transport. Drain stderr into the program's log, one line per entry, prefixed with the server's name and cut to 1 KiB. [Logging](reference/Logging.md#what-is-logged) A server that misses the limit or fails the handshake is killed and reported as a warning. [MCP lifecycle](https://modelcontextprotocol.io/specification/2025-06-18/basic/lifecycle)
 
 For each listed tool, skipping any not in `tools`:
 
@@ -93,7 +94,7 @@ For each listed tool, skipping any not in `tools`:
 - Use the server's `description`, or its `title` if the description is missing, and its `inputSchema` unchanged.
 - Register it through the normal `ToolRegistry::register`. A registration error becomes a warning for that tool. [Tool Registry](ToolRegistry.md#v1-interface)
 
-Register MCP tools after the built-ins and before constructing the executor. Show warnings in the status area as **MCP: N problems at startup**, naming the log file that holds the details. [Logging](reference/Logging.md) Call `shutdown` when the session ends. It closes each server's stdin, waits up to 5 seconds, then kills the process. [Startup registration](ToolRegistry.md#register-built-in-tools-at-startup)
+Register MCP tools after the built-ins and before constructing the executor. Show warnings in the status area as **MCP: N problems at startup**, naming where the details are: `alyosha logs`. [Logging](reference/Logging.md) Call `shutdown` when the session ends. It closes each server's stdin, waits up to 5 seconds, then kills the process. [Startup registration](ToolRegistry.md#register-built-in-tools-at-startup)
 
 ### Handle one call
 
@@ -133,7 +134,7 @@ Write a small fake stdio server for tests with scriptable tools: one that echoes
 - Call with arguments that violate the schema. Check that the executor rejects them and the server receives nothing.
 - Stop during the sleeping tool with a second call pending. Check that the server receives `notifications/cancelled`, the loop records a cancellation at once and a cancellation for the pending call, and a late reply is ignored. Repeat with a short deadline and check the timeout error.
 - Kill the server mid-session. Check that its next call returns a tool error and the session continues.
-- Have the fake server report its environment. Check that it sees `PATH`, `HOME`, the XDG folder variables that were set, and its configured `env` only, and that its working directory is the workspace.
+- Have the fake server report its environment. Check that it sees `PATH`, `HOME`, the path variables that were set, its configured `env`, and its `secret_env` values only, and that its working directory is the workspace. Name an unset secret in `secret_env`. Check that the server is skipped with a warning naming it.
 - End the session. Check that every server process has exited.
 - Check that `tools.mcp__fake__echo` is undefined in an `execute_code` script.
 

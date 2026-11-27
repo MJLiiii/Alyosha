@@ -7,12 +7,12 @@ Selecting a workspace at session startup authorizes the following operations. Th
 | `read_file` | Read workspace files, session logs created for this session's shortened command and MCP output, and files under `/skills`. |
 | `write_file` | Atomically create or replace a workspace file. |
 | `edit_file` | Read and atomically replace an existing workspace file. |
-| `run_command` | Run each command in a fresh Bubblewrap sandbox configured for the session's workspace, with `/skills` mounted read-only. |
-| `job` | See and stop this session's background jobs, which run in the same sandbox as `run_command`. Direct model calls only. [Background jobs](../Jobs.md) |
+| `run_command` | Run each command in a fresh command unit for the session's workspace, as `alyosha-run`, with `/skills` mounted read-only. |
+| `job` | See and stop this session's background jobs, which run in command units like `run_command`. Direct model calls only. [Background jobs](../Jobs.md) |
 | `memory` | Read and atomically replace files in the owner's memory store. Direct model calls only. [Memory store](#memory-store) |
 | `skill` | Read the skills directory. Direct model calls only. [Skills directory](#skills-directory) |
 | `ask_owner` | Ask the owner through the session's front end. No file, shell, or network access. Direct model calls only. [Approvals](../Approvals.md) |
-| `mcp__<server>__<tool>` | Whatever the server itself can do. It runs outside the sandbox. Direct model calls only. [MCP tools](#mcp-tools) |
+| `mcp__<server>__<tool>` | Whatever the server itself can do. It runs as the agent's user, outside the command units. Direct model calls only. [MCP tools](#mcp-tools) |
 | `execute_code` | Run JavaScript in an isolated sandbox. Its only host operation is `tools.read_file`, limited to regular files inside the workspace. [Read-only Code Mode](../ToolExecutor.md#read-only-code-mode) |
 
 ## V1 interface
@@ -29,7 +29,7 @@ For Code Mode, expose only regular files inside the workspace and omit access to
 
 ## Shell sandbox
 
-Set up the Bubblewrap sandbox before spawning the shell. Give it a writable `/workspace`, a read-only `/skills` when the skills directory exists, the whole Nix store read-only, a fresh home directory, a writable shared shell cache, private scratch space, and internet access through `pasta` that cannot reach the container's loopback. Supply a minimal environment, plus the project's dev shell variables, and keep provider credentials, private session logs, and the Nix daemon socket out of it. Capture output and enforce the host-set deadline in the Environment Interface. [Bubblewrap launch contract](../EnvironmentInterface.md#bubblewrap-launch-contract) · [Command contract](BuiltInTools.md#run_command)
+Run each command in a unit from the session's template, as `alyosha-run`. It gets a writable `/workspace`, a read-only `/skills`, the whole Nix store read-only, a fresh home directory, a writable shared shell cache, private scratch space, its own PID namespace, a memory limit, and internet access that cannot reach the container's loopback, the host, or the local network. Supply a minimal environment, plus the project's dev shell variables. Secrets, the database socket, session logs, other working folders, and the Nix daemon socket stay out of it. Capture output and enforce the deadline in the Environment Interface. [Command launch](../EnvironmentInterface.md#command-launch) · [Command units](../Deployment.md#command-units) · [Command contract](BuiltInTools.md#run_command)
 
 ## Session logs
 
@@ -37,19 +37,21 @@ The session log store holds the full text of shortened command output and MCP re
 
 ## Memory store
 
-The memory store is in the session database and is reached only through the `memory` tool. Accept only valid memory names. The shell sandbox never mounts the database socket. Do not expose the tool to Code Mode. [Memory store contract](../Memory.md#v1-store-contract)
+The memory store is in the session database and is reached only through the `memory` tool. Accept only valid memory names. Command units cannot reach the database socket, and `alyosha-run` has no database role. Do not expose the tool to Code Mode. [Memory store contract](../Memory.md#v1-store-contract)
 
 ## Skills directory
 
-The skills directory is outside the workspace and read-only everywhere. The `skill` tool opens files relative to the skills root without following symlinks out of it. A direct `read_file` resolves `/skills/...` paths against the root with `Read` access and permits regular files only. `ReadWorkspace` and `replace_file` never resolve `/skills`, so `edit_file` and `write_file` fail there. The shell sandbox binds the root read-only at `/skills`. Code Mode cannot read it. [Skills paths](../Skills.md#skills-paths)
+The skills directory is outside the workspace and read-only everywhere. The `skill` tool opens files relative to the skills root without following symlinks out of it. A direct `read_file` resolves `/skills/...` paths against the root with `Read` access and permits regular files only. `ReadWorkspace` and `replace_file` never resolve `/skills`, so `edit_file` and `write_file` fail there. Command units bind the root read-only at `/skills`. Code Mode cannot read it. [Skills paths](../Skills.md#skills-paths)
 
 ## MCP tools
 
-An MCP server is a program the owner configured, so it is trusted like the rest of the configuration. It runs as a child process outside the Bubblewrap sandbox, with the workspace as its working directory. Workspace containment and the shell sandbox do not limit what it does. Its environment holds only `PATH` and `HOME`, plus `ALYOSHA_HOME`, `XDG_CONFIG_HOME`, and `XDG_DATA_HOME` when they are set, and its configured `env`. Provider credentials and GPROXY settings stay out of it. The executor still checks scope and validates arguments against the advertised schema before forwarding a call. Calls need no approval unless the configuration marks the tool `ask`, in which case the executor runs it only after the owner approves. The status area names each call as it starts. [Approvals](../Approvals.md) Code Mode cannot call MCP tools. [MCP Client](../MCP.md#where-servers-run)
+An MCP server is a program the owner configured, so it is trusted like the rest of the configuration. It runs as a child process of the agent, as `alyosha`, outside the command units, with the workspace as its working directory. Workspace containment and the command units do not limit what it does. Its environment holds only `PATH` and `HOME`, plus Alyosha's path variables, `XDG_CONFIG_HOME`, and `XDG_DATA_HOME` when they are set, its configured `env`, and its `secret_env` values. The gateway key and GPROXY settings stay out of it. [Folders](Configuration.md#folders) The executor still checks scope and validates arguments against the advertised schema before forwarding a call. Calls need no approval unless the configuration marks the tool `ask`, in which case the executor runs it only after the owner approves. The status area names each call as it starts. [Approvals](../Approvals.md) Code Mode cannot call MCP tools. [MCP Client](../MCP.md#where-servers-run)
 
 ## Container limits
 
-Alyosha runs in a NixOS container. Everything above applies inside it. The container adds an outer limit for the agent, GPROXY, and MCP servers: only `~/alyosha/config`, read-only, and `~/alyosha/state` are mounted from the host, and the host's `localhost` services are unreachable. Every workspace is a folder under the container's own `~/work`. [What it can see](../Deployment.md#what-it-can-see) MCP servers, including the browser server, and the shell sandbox have internet access through the host. The shell sandbox cannot reach the container's own loopback. Web pages the browser reads are untrusted content. Saved browser sign-ins live in `~/alyosha/config/browser/`, which only the browser server is configured to read. File tools and the shell sandbox cannot reach it, and the browser does not open `file://` addresses. The same holds for gogcli's Google sign-in in `~/alyosha/state/gog`. Nothing stops another MCP server from reading either folder, because every server runs as your user and is trusted like your configuration. Running each server in its own sandbox is deferred. [Deferred](../Deployment.md#deferred) [Email and calendar](../EmailCalendar.md#signing-in) [Saved sign-ins](../Browser.md#saved-sign-ins) · [Browser trust](../Browser.md#trust) · [Deployment](../Deployment.md) · [Container checks](../Deployment.md#verification)
+Alyosha runs in a NixOS container. Everything above applies inside it. The container adds an outer limit for the agent, GPROXY, and MCP servers: nothing of the host is mounted except your skills, read-only, and the backup folder, and the container cannot reach the host or your local network. Every workspace is one of the container's working folders. [Where things live](../Deployment.md#where-things-live) · [Network](../Deployment.md#network)
+
+Inside, each service runs as its own user. Commands run as `alyosha-run` and cannot read the secrets folder, GPROXY's files, the database, or other processes. The agent and its MCP servers run as `alyosha`. MCP servers, including the browser server, have internet access through the host. Web pages the browser reads are untrusted content. The secrets the agent's tools need, such as the browser's saved sign-ins and gogcli's keyring password, are readable by the `alyosha` group, so only the servers configured to use them do. The browser does not open `file://` addresses. Nothing stops another MCP server from reading them, because every server runs as `alyosha` and is trusted like your configuration. Running each server in its own sandbox is deferred. [Deferred](../Deployment.md#deferred) · [Email and calendar](../EmailCalendar.md#signing-in) · [Saved sign-ins](../Browser.md#saved-sign-ins) · [Browser trust](../Browser.md#trust) · [Container checks](../Deployment.md#verification)
 
 ## Verification
 

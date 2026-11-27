@@ -43,7 +43,7 @@ A protocol of Alyosha's own, like the JSON-lines RPC mode of the pi agent, would
 
 The bridge is a program you install and configure, so it is trusted like Alyosha's configuration. Whoever the bridge lets into your session can make Alyosha run shell commands, write files, and use websites with your saved sign-ins. A bridge lets only your own account into your session, in a private chat, and ignores everyone else's private messages without replying. Other people reach Alyosha only by mentioning it in a group. In a group you list as trusted, everyone gets your full powers through that group's own session. In any other group, a separate guest session without your tools answers them. [Group chats](#group-chats) The bridge holds the bot token. Like every other secret, it stays out of the Nix store. [Saved sign-ins](Browser.md#signing-in-to-your-accounts)
 
-Alyosha does not authenticate the bridge, because only programs that can already start `alyosha acp` as your user can talk to it.
+Alyosha does not authenticate the bridge, because only programs that can already start `alyosha acp` as its user can talk to it.
 
 ## Telegram first
 
@@ -62,7 +62,7 @@ Alyosha has its own bridge. Two existing bridges were checked in November 2026 a
 
 ```text
 containers.alyosha
-└─ alyosha-telegram.service (always on, runs as you)
+└─ alyosha-telegram.service (always on, runs as the user alyosha)
      ├─ long-polls api.telegram.org
      └─ alyosha acp (child process) ── same agent core
 ```
@@ -76,7 +76,7 @@ containers.alyosha
 - **Approvals as buttons.** An approval or a question from Alyosha arrives as a message with one button per answer. [Approvals](Approvals.md)
 - **Crashes resume.** If `alyosha acp` exits, the bridge tells you and exits, and systemd starts both again. The new child loads the same session. [Durable sessions](SessionStore.md)
 
-Your settings go in a `[telegram]` section of `~/alyosha/config/config.toml`: your Telegram user ID and the bot token. The file must be readable only by you. [Configuration](reference/Configuration.md#telegram)
+Your settings go in the `[telegram]` section of the settings: your Telegram user ID and any trusted groups. The bot token is a secret of its own, set with `alyosha secret set telegram-token`. [Secrets](reference/Configuration.md#secrets) [Configuration](reference/Configuration.md#telegram)
 
 Every bridge's `alyosha acp` uses the same GPROXY service. [Gateway lifetime](LLMClientGateway.md#provider-accounts-and-gateway-lifetime)
 
@@ -99,7 +99,7 @@ A bot registered by an individual can be used privately by its creator and by te
 
 ## Two bridges at once
 
-Each bridge runs its own `alyosha acp` session. Each has its own conversation and starts its own MCP servers, including its own Chromium. Both sessions are you, so they share GPROXY, the memory store, and one working folder, `~/work/owner`: a file Alyosha made in Telegram is there in QQ. If both sessions write the same file at the same moment, the later write wins. [Deployment](Deployment.md#what-it-can-see)
+Each bridge runs its own `alyosha acp` session. Each has its own conversation and starts its own MCP servers, including its own Chromium. Both sessions are you, so they share GPROXY, the memory store, and one working folder, `/var/lib/alyosha/work/owner`: a file Alyosha made in Telegram is there in QQ. If both sessions write the same file at the same moment, the later write wins. [Deployment](Deployment.md#where-things-live)
 
 The two bridges share their ACP side in a small library crate that only bridges use: starting `alyosha acp`, opening sessions, sending prompts, and collecting each prompt's updates and reply. Each bridge adds only its messaging app's side. [Package layout](TelegramBridge.md#package-layout)
 
@@ -131,7 +131,7 @@ A QQ user's ID is the `member_openid` QQ gives them, which may differ from group
 
 A trusted group's session is `alyosha acp --group`: your normal session with a different channel line, which says that people in a group your owner trusts write through the bridge and that each message starts with the sender's name. It differs from your private session in these ways:
 
-- **Its own working folder.** It works in `~/work/groups/<name>`, named by its entry in the configuration, which the bridge creates. A group's edits never collide with your private session's, and its file tools and sandbox reach only that folder.
+- **Its own working folder.** It works in `/var/lib/alyosha/work/groups/<name>`, named by its entry in the configuration, which the bridge creates. A group's edits never collide with your private session's, and its file tools and sandbox reach only that folder.
 - **Approvals come to you.** A tool in `ask`, and every `ask_owner` question, goes to your private chat, marked with the group it came from. Only you answer it. Nobody in the group can approve anything.
 - **Jobs report to the group.** When one of its background jobs finishes, the bridge gives the result to the group's session, and its answer goes to the group.
 - **It keeps running.** It is not stopped when the group is quiet, so its running jobs survive. There are only as many as you list. It stops with the bridge, and its conversation resumes when the bridge starts again.
@@ -158,7 +158,7 @@ A group that is not listed gets a guest session as before. Removing a group from
 
 Alyosha speaks ACP's newline-delimited JSON-RPC directly, in `src/acp.rs`, and the bridges do the same in `bridge/`. It needs only the messages this section lists. The official [`agent-client-protocol`](https://docs.rs/agent-client-protocol) crate was the first choice; its API changes incompatibly between releases, and writing the few messages by hand removed that churn. The protocol is JSON-RPC 2.0 and its version is the integer `1`. [ACP overview](https://agentclientprotocol.com/protocol/overview)
 
-Standard output carries only protocol messages. Send logs, warnings meant for a developer, and MCP servers' standard error to the `alyosha-acp` log file, never to standard output. [Logging](reference/Logging.md) Exit when standard input closes, after ending the open session.
+Standard output carries only protocol messages. Send logs, warnings meant for a developer, and MCP servers' standard error to the `alyosha-acp` log, never to standard output. [Logging](reference/Logging.md) Exit when standard input closes, after ending the open session.
 
 ### Initialization
 
@@ -169,7 +169,7 @@ Answer `initialize` with protocol version `1` and these agent capabilities:
 | `loadSession` | `true` | Sessions are saved and resumed by key. [Durable sessions](SessionStore.md#acp) |
 | `promptCapabilities` `image`, `audio`, `embeddedContext` | `false` | V1 accepts text and links only. |
 | `mcpCapabilities` `http`, `sse` | `false` | Bridge-supplied servers are ignored. |
-| `authMethods` | empty | Only a program that can start Alyosha as you can connect. |
+| `authMethods` | empty | Only a program that can start Alyosha as its user can connect. |
 
 Ignore the client's `fs` and `terminal` capabilities. Never call `fs/*` or `terminal/*` methods.
 
@@ -242,7 +242,7 @@ When a background job finishes, do not queue its message. Send the notification 
 
 `alyosha acp --guest` serves the guest session of one group chat. Bridges start one per group. Everything above applies, with these differences. [Group chats](#group-chats)
 
-- **Session.** `session/new` still requires an absolute `cwd`, but the session ignores it. It runs in `~/work/guest`, created with mode `0700`, which is only the working directory of its MCP servers. It loads no dev shell and no sandbox.
+- **Session.** `session/new` still requires an absolute `cwd`, but the session ignores it. It runs in `/var/lib/alyosha/work/guest`, created with mode `0700`, which is only the working directory of its MCP servers. It loads no dev shell and no sandbox.
 - **Tools.** Register `user_memory` and the tools of the MCP servers named in `[guest] mcp_servers`, and nothing else: no workspace, shell, Code Mode, job, `memory`, `skill`, or `ask_owner` tool. The session has no approver. `available_commands_update` lists no commands. [People's notes](Memory.md#notes-on-people) · [Configuration](reference/Configuration.md#guest)
 - **Instruction.** Use the guest instruction below instead of the normal one, with no memory or skills index. The channel line is "People write to you in a group chat through <client name>."
 - **Prompts.** Each `session/prompt` must carry the sender in `_meta`: `{"alyosha": {"sender": {"id": "telegram-123", "name": "Bob"}}}`. Refuse a prompt without a valid sender with an invalid-params error. Treat all text as a message: `/compact` and `/job` are not commands here.

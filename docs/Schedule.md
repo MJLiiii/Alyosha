@@ -3,7 +3,7 @@
 Alyosha can do things at a set time without being asked at that moment: "remind me Friday at 5," or "every morning at 8, check my email and summarize it." Alyosha's core has no scheduling code. A small MCP server lets the model create tasks, and the chat bridges, which are always running, start each task when it is due and deliver the result to your chat. [Chat channels](Channels.md) · [MCP Client](MCP.md) · [What Alyosha still needs](todo.md) · [Architecture overview](README.md)
 
 ```text
-model ── MCP ──► alyosha-schedule ──writes──► ~/alyosha/state/schedule.toml
+model ── MCP ──► alyosha-schedule ──writes──► /var/lib/alyosha/schedule.toml
                                                         │ read every minute
 Telegram ◄── alyosha-telegram ◄─────────────────────────┤  telegram tasks
 QQ       ◄── alyosha-qq       ◄─────────────────────────┘  qq tasks
@@ -18,7 +18,7 @@ A task has a prompt, a time, and a channel:
 - **Time.** Either one date and time, or a repeating cron expression such as `0 8 * * *` for every day at 8:00. Times use your timezone, Europe/Amsterdam, set by `timezone` in the configuration.
 - **Channel.** `telegram` or `qq`, the app whose bridge runs the task and delivers the result.
 
-All tasks live in one file in Alyosha's state folder, `~/alyosha/state/schedule.toml`. You can read and edit it by hand on the host.
+All tasks live in one file in Alyosha's state folder in the container, `/var/lib/alyosha/schedule.toml`. You can read and edit it after `alyosha shell`. [Where things live](Deployment.md#where-things-live)
 
 ## Creating tasks
 
@@ -77,11 +77,11 @@ timezone = "Europe/Amsterdam"   # top level, shared with the clock line
 command = "alyosha-schedule"
 ```
 
-The tools appear as `mcp__schedule__add`, `mcp__schedule__list`, and `mcp__schedule__remove`. The server finds `config.toml` and the task file through `HOME` and `ALYOSHA_HOME`, like Alyosha. The MCP Client passes those variables on, so the server, the bridges, and Alyosha all use the same folders. [Start servers](MCP.md#start-servers-and-register-tools) A channel is valid when its section, `[telegram]` or `[qq]`, is present. [MCP configuration](MCP.md#v1-configuration)
+The tools appear as `mcp__schedule__add`, `mcp__schedule__list`, and `mcp__schedule__remove`. The server finds `config.toml` and the task file at Alyosha's fixed paths, or through the same path variables. The MCP Client passes those variables on when they are set, so the server, the bridges, and Alyosha all use the same folders. [Start servers](MCP.md#start-servers-and-register-tools) A channel is valid when its section, `[telegram]` or `[qq]`, is present. [MCP configuration](MCP.md#v1-configuration)
 
 ### The task file
 
-`~/alyosha/state/schedule.toml`, mode `600`:
+`$ALYOSHA_STATE/schedule.toml`, which is `/var/lib/alyosha/schedule.toml` in the container, mode `600`:
 
 ```toml
 [[task]]

@@ -15,7 +15,7 @@ updated      2026-11-24
 body         The thesis lives in ~/thesis. Build it with `latexmk -pdf main.tex`.
 ```
 
-The database keeps memory consistent across the sessions that share it and puts it in the daily dump with the conversations. You do not edit memories by hand. The model keeps them, and you can ask it to change or forget one. To look at them directly, run `psql alyosha` in the container. [The database](SessionStore.md#the-database)
+The database keeps memory consistent across the sessions that share it and puts it in the daily dump with the conversations. You do not edit memories by hand. The model keeps them, and you can ask it to change or forget one. To look at them directly, run `alyosha memory list` on the host. [The host command](Deployment.md#the-host-command) [The database](SessionStore.md#the-database)
 
 The store is global. Every session sees the same memories. They hold what Alyosha knows about you. Your sessions, in your private chats, see them, and so do the sessions of group chats you list as trusted. Guest sessions in other group chats never see them; they use the notes kept for each person. [People in group chats](#people-in-group-chats)
 

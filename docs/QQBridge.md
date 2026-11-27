@@ -22,13 +22,12 @@ Facts below come from the [QQ bot documentation](https://bot.q.qq.com/wiki) as r
 app_id = "102000000"
 owner_openid = ""                             # fill in from the log, see below
 reply_chunk = 1500                            # characters per message
-secret = "..."                                # the AppSecret
 
 [qq.trusted_groups]                           # optional: groups with your powers
 friends = "<group_openid>"                    # folder name = group_openid
 ```
 
-Load it with `alyosha-config`, which refuses a file that others can read and checks every value. Refuse to start, with a clear error, if the `[qq]` section is missing. Never log the secret or an access token. [Configuration](reference/Configuration.md#qq)
+In Nix, this is `services.alyosha.settings.qq`. Load it with `alyosha-config`, which checks every value, and read the AppSecret from the secret `qq-secret`, set with `alyosha secret set qq-secret`. Refuse to start, with a clear error, if the `[qq]` section or the secret is missing. Never log the secret or an access token. [Configuration](reference/Configuration.md#qq) · [Secrets](reference/Configuration.md#secrets)
 
 QQ identifies you by a `user_openid` specific to this bot, not your QQ number. While `owner_openid` is empty, the bridge starts, answers nobody, and logs the `user_openid` of every message. Send the bot a message, copy your ID from the log, and restart.
 
@@ -63,7 +62,7 @@ Handle `GROUP_AT_MESSAGE_CREATE` dispatches too, which use the intent the bridge
 
 A group where the bot has QQ's "receive all messages" mode on sends every message as `GROUP_MESSAGE_CREATE`, @s included, with the same fields. Treat one as a mention only when `d.mentions` has an entry with `is_you` true, and remove that entry's `<@member_openid>` (and `<@id>`) tokens from `content`, which QQ removes by itself in `GROUP_AT_MESSAGE_CREATE`. Ignore the rest, logging only the group and the number of mentions. If QQ sends both events for one @, the duplicate check on the message ID drops the second. [Group message event, all messages](https://bot.q.qq.com/wiki/develop/api-v2/autogen/event/group_message_create.html) · [Group @ message event](https://bot.q.qq.com/wiki/develop/api-v2/autogen/event/group_at_message_create.html) · [Group chats design](Channels.md#group-chats)
 
-A mention in a group whose `group_openid` is in `trusted_groups` goes to the group's full session, as in the Telegram bridge: `alyosha acp --group` in `~/work/groups/<name>`, with `<nickname>: <text>` as the prompt, approvals sent to the owner's private chat after **In group <name>:**, and finished jobs given to the group's session with the reply sent to the group as a reply to its latest mention, which falls back to an active message once that window has closed. The pool never stops it for being idle. A `/yes`, `/no`, or number from the owner answers the oldest open request, whichever session it came from; `/cancel` cancels only the private session and its requests. [Trusted groups](TelegramBridge.md#trusted-groups)
+A mention in a group whose `group_openid` is in `trusted_groups` goes to the group's full session, as in the Telegram bridge: `alyosha acp --group` in `/var/lib/alyosha/work/groups/<name>`, with `<nickname>: <text>` as the prompt, approvals sent to the owner's private chat after **In group <name>:**, and finished jobs given to the group's session with the reply sent to the group as a reply to its latest mention, which falls back to an active message once that window has closed. The pool never stops it for being idle. A `/yes`, `/no`, or number from the owner answers the oldest open request, whichever session it came from; `/cancel` cancels only the private session and its requests. [Trusted groups](TelegramBridge.md#trusted-groups)
 
 Every other group message goes to the group's guest session from the shared pool, the owner's included, as the Telegram bridge does: `initialize` with `alyosha-qq`, the sender `qq-<member_openid>`, and the nickname, or `QQ user` without one. A message with attachments and no text gets **Only text messages work for now.** [Telegram group chats](TelegramBridge.md#group-chats)
 
@@ -111,7 +110,7 @@ Add a service next to `alyosha-telegram`, the same apart from its name and `Exec
 
 These run under `cargo test` with a fake QQ API, serving both HTTP and the WebSocket, and a fake ACP agent.
 
-- Start without the `[qq]` section, and with `config.toml` readable by others. Check that each refuses and no secret or token appears in output.
+- Start without the `[qq]` section, and without the `qq-secret` secret. Check that each refuses and no secret or token appears in output.
 - Start with an empty `owner_openid` and send a message. Check that nothing is relayed or sent back and the sender's `user_openid` is logged.
 - Return a token reply with `expires_in` as a string, and one with a `code`. Check that the first works and the second fails clearly.
 - Drop the WebSocket after `READY`. Check for a Resume with the last sequence number. Send op `9`. Check for a fresh Identify.
