@@ -55,7 +55,7 @@ Startup warnings say where their details are, for example *details in the log: a
 
 ## Implementation
 
-Use [`tracing`](https://docs.rs/tracing) with [`tracing-journald`](https://docs.rs/tracing-journald), which sends each event to the journal's socket with the program's identifier and its level as the priority. When the socket does not exist, as in tests and development on the host, write lines to standard error instead, each starting with the time, the level, the identifier, the process ID, and the session ID when there is one. Put this in `alyosha-config`, which every program already uses, so each program sets up logging the same way before loading the configuration. Format secrets through the secret wrapper, which prints `"<secret>"`. [Configuration crate](Configuration.md#crate)
+Use [`tracing`](https://docs.rs/tracing) with [`tracing-journald`](https://docs.rs/tracing-journald), which sends each event to the journal's socket with the program's identifier and its level as the priority, when systemd started the program with its output in the journal, which it marks with `JOURNAL_STREAM`. A bridge's `alyosha acp` child inherits the variable. Otherwise, as in tests and development on the host, write lines to standard error instead, each starting with the time, the level, the identifier, the process ID, and the session ID when there is one. Put this in `alyosha-config`, which every program already uses, so each program sets up logging the same way before loading the configuration. Format secrets through the secret wrapper, which prints `"<secret>"`. [Configuration crate](Configuration.md#crate)
 
 ## Verification
 

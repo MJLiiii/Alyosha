@@ -6,7 +6,7 @@
 //! `docs/TelegramBridge.md#group-chats`.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     path::PathBuf,
     sync::Arc,
     time::{Duration, Instant},
@@ -47,15 +47,16 @@ pub struct GroupSpawners {
     pub guest: Option<SpawnGuest>,
     /// `alyosha acp --group`; `None` turns trusted groups off.
     pub trusted: Option<SpawnGuest>,
-    /// The trusted groups' IDs.
-    pub trusted_groups: HashSet<String>,
+    /// The trusted groups: ID → name. The name is the group's working folder.
+    pub trusted_groups: HashMap<String, String>,
 }
 
 /// The group children, keyed by group.
 pub struct GuestPool {
     spawn: GroupSpawners,
     client_name: String,
-    workspace: PathBuf,
+    /// Alyosha's working folders: `groups/<name>` and `guest` are under it.
+    work_dir: PathBuf,
     guests: HashMap<String, Guest>,
     next: u64,
     events: mpsc::UnboundedSender<GuestEvent>,
@@ -66,14 +67,14 @@ impl GuestPool {
     pub fn new(
         spawn: GroupSpawners,
         client_name: &str,
-        workspace: PathBuf,
+        work_dir: PathBuf,
     ) -> (Self, mpsc::UnboundedReceiver<GuestEvent>) {
         let (events, receiver) = mpsc::unbounded_channel();
         (
             Self {
                 spawn,
                 client_name: client_name.to_owned(),
-                workspace,
+                work_dir,
                 guests: HashMap::new(),
                 next: 1,
                 events,
@@ -84,7 +85,15 @@ impl GuestPool {
 
     /// Whether `group` is a trusted group.
     pub fn is_trusted(&self, group: &str) -> bool {
-        self.spawn.trusted_groups.contains(group)
+        self.spawn.trusted_groups.contains_key(group)
+    }
+
+    /// A trusted group's name in the settings, or its ID for any other group.
+    pub fn name<'a>(&'a self, group: &'a str) -> &'a str {
+        self.spawn
+            .trusted_groups
+            .get(group)
+            .map_or(group, String::as_str)
     }
 
     /// The running child of `group`, to answer its requests.
@@ -138,15 +147,14 @@ impl GuestPool {
         } else {
             self.spawn.guest.as_ref().ok_or("group chats are off")?
         };
-        // A trusted group works in a folder of its own; a guest session
-        // ignores its workspace.
+        // A trusted group works in the folder named after it; a guest
+        // session ignores its workspace, which is the guest folder.
         let workspace = if trusted {
-            let folder = self.workspace.join("groups").join(safe_name(group));
-            std::fs::create_dir_all(&folder).map_err(|error| error.to_string())?;
-            folder
+            self.work_dir.join("groups").join(self.name(group))
         } else {
-            self.workspace.clone()
+            self.work_dir.join("guest")
         };
+        std::fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
         let (bridge, mut events) = spawn().map_err(|error| error.to_string())?;
         let number = self.next;
         self.next += 1;
@@ -255,25 +263,5 @@ impl GuestPool {
 
     pub fn is_empty(&self) -> bool {
         self.guests.is_empty()
-    }
-}
-
-/// A group ID as a folder name: QQ's `group_openid`s and Telegram's chat
-/// IDs are already safe, but nothing else gets through.
-fn safe_name(group: &str) -> String {
-    let name: String = group
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    if name.is_empty() {
-        "_".to_owned()
-    } else {
-        name
     }
 }

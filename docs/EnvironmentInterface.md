@@ -65,10 +65,10 @@ Commit by renaming the temporary file into place relative to the authorized pare
 Run each `run_command`, and each background job, in a fresh unit from the session's template, `alyosha-run-<folder>@<pid>-<n>.service`, where `<pid>` is this process's ID and `<n>` counts up from 1. The template fixes the user, mounts, and limits. [Command units](Deployment.md#command-units)
 
 1. Create `/run/alyosha-run/<pid>-<n>/`, mode `0750`, group `alyosha-work`, and write `spec.json` into it: the command, the working directory under `/workspace`, and the environment. Create an empty `output` file there.
-2. Start the unit through systemd's D-Bus API (`StartUnit`, mode `replace`), and subscribe to its property changes.
+2. Start the unit with `systemctl --no-ask-password start`. The template's `Type=exec` makes it return once the command runs, or fail with systemd's message if the unit cannot start.
 3. Inside the unit, `alyosha run-exec <instance>` reads `spec.json`, changes to the working directory, replaces its environment with the one given, and `exec`s the packaged Bash with `--noprofile --norc -c` and the command as one argument. systemd attaches standard input to `/dev/null` and standard output and error to `output`.
-4. Read `output` as it grows, for the preview and the session log. [Session logs](#session-logs)
-5. When the unit becomes inactive or failed, read `Result`, `ExecMainCode`, and `ExecMainStatus`, then reset a failed unit so its name is free. Remove the run folder.
+4. Read `output` as it grows, for the preview and the session log, and poll `systemctl show` for the unit's state, every 10 ms at first and every 200 ms at most. [Session logs](#session-logs)
+5. The template keeps a finished unit as `active (exited)` or `failed` (`RemainAfterExit=yes`), so its result stays readable. Read `Result`, `ExecMainCode`, and `ExecMainStatus`, then stop the unit and reset a failed one so its name is free. Remove the run folder.
 
 If systemd refuses the start, or the unit fails before `run-exec` starts the command, return a `ToolError` with systemd's message. This is the sandbox setup failure.
 
@@ -85,7 +85,9 @@ If systemd refuses the start, or the unit fails before `run-exec` starts the com
 
 Build the environment from nothing in this order: the dev shell's exported variables, if any; then `PATH` with the default tool directories appended after the dev shell's entries; then the cache variables, except those the dev shell already set; then `SSL_CERT_FILE` and `NIX_SSL_CERT_FILE` naming the CA bundle's store path; then `HOME=/home/alyosha` and `TMPDIR=/tmp`, which always win.
 
-The agent's files and the commands' files must stay usable by both users. The working folders belong to `alyosha-run` with the group `alyosha-work`, which holds `alyosha` too, and are set-group-ID with a default ACL that gives the group read and write. Alyosha creates files group-writable as well.
+The agent's files and the commands' files must stay usable by both users. The working folders belong to `alyosha-run` with the group `alyosha-work`, which holds `alyosha` too, and are set-group-ID, so new files take that group. The bridges and the command units run with `UMask=0007`, so new files are group-writable.
+
+Outside the container, as in tests and development on the host, `ALYOSHA_COMMANDS=direct` runs each command as a plain child process in the workspace, in a process group the deadline and Stop kill, without any isolation. Never set it in the container.
 
 #### Network
 
@@ -134,7 +136,7 @@ Issue log paths as `/session-logs/<name>`, a prefix no workspace path uses. Keep
 
 Create a temporary workspace and log store and pass their `ToolContext` to the handlers through the Tool Executor. Exercise file reads, rejected paths, atomic replacement, and access to a log from each caller scope. These checks run locally without a model account or GPROXY. [Permission test cases](reference/ToolPermissions.md#verification)
 
-Run the shell integration checks in the container, where `alyosha` may start the command units. Have a command print a workspace file path and read that path through the file handler. Check a nonzero command exit, a sandbox setup error from a refused start, and a timeout with a subprocess. For shortened output, follow the returned log reference through a direct read and verify that the reference expires at session end. A fake shell result can exercise the Agent Loop’s result handling.
+`tests/shell.rs` and `tests/jobs.rs` check statuses, output, deadlines, Stop, and jobs with `ALYOSHA_COMMANDS=direct` anywhere. The unit checks there run in the container, as `alyosha`, with `ALYOSHA_TEST_UNITS` naming a template and `ALYOSHA_TEST_WORKSPACE` its folder; `alyosha check` on the host runs the main ones. Run the shell integration checks in the container, where `alyosha` may start the command units. Have a command print a workspace file path and read that path through the file handler. Check a nonzero command exit, a sandbox setup error from a refused start, and a timeout with a subprocess. For shortened output, follow the returned log reference through a direct read and verify that the reference expires at session end. A fake shell result can exercise the Agent Loop’s result handling.
 
 - In a workspace with a flake dev shell that provides `cargo`, run `cargo --version` and `git --version`. Check that both work. Break the flake and start a new session. Check for the startup warning and that `cargo` is missing while `git` works.
 - Run `cargo fetch` in a small Rust project. Check that it downloads, that a second command finds the crates in `/home/alyosha/.cache/cargo`, and that a new session still finds them.

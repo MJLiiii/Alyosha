@@ -19,15 +19,15 @@ fn main() {
             std::process::exit(2);
         }
     };
-    let config = match alyosha_config::load_from(&paths.config_file()) {
+    let config = match alyosha_config::load_from(&paths.config_file) {
         Ok(config) => config,
         Err(error) => {
             eprintln!("alyosha-schedule: {error}");
             std::process::exit(2);
         }
     };
-    let _ = alyosha_config::logging::init("alyosha-schedule", config.timezone, &paths);
-    let schedule = Schedule::new(&paths.data_dir);
+    let _ = alyosha_config::logging::init("alyosha-schedule", config.timezone);
+    let schedule = Schedule::new(&paths.state_dir);
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
     for line in stdin.lock().lines() {

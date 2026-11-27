@@ -30,8 +30,6 @@
           rustc
           clippy
           rustfmt
-          bubblewrap
-          passt
           python3 # the fake MCP server in the tests
         ];
       };

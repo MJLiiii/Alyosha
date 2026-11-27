@@ -1,17 +1,15 @@
 //! The configuration schema and loader that every Alyosha program shares.
 //!
-//! All settings live in one strict file, `$XDG_CONFIG_HOME/alyosha/config.toml`,
-//! which the owner writes and Alyosha never changes. Reference:
-//! `docs/reference/Configuration.md`. Implementation guide:
-//! `docs/reference/Configuration.md#implementation`.
+//! All settings live in one strict file, `/etc/alyosha/config.toml`, which
+//! the container module generates from the owner's Nix settings and Alyosha
+//! never changes. It holds no secrets: each secret is a file of its own in
+//! the secrets folder. Reference: `docs/reference/Configuration.md`.
 
 use std::{
-    collections::BTreeMap,
-    ffi::OsStr,
-    fmt,
-    fs::File,
-    io::{self, Read},
-    os::unix::fs::MetadataExt,
+    collections::{BTreeMap, HashMap},
+    ffi::OsString,
+    fmt, fs,
+    io::{self},
     path::{Path, PathBuf},
 };
 
@@ -139,38 +137,45 @@ impl Default for ApprovalsConfig {
     }
 }
 
-/// `[telegram]`, needed only by `alyosha-telegram`.
+/// `[telegram]`, needed only by `alyosha-telegram`, whose token is the
+/// secret `telegram-token`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TelegramConfig {
     /// The owner's numeric Telegram user ID.
     pub owner_id: i64,
-    /// The bridge session's workspace, an absolute path.
-    pub workspace: PathBuf,
-    /// The bot token from @BotFather.
-    pub token: Secret,
-    /// Group chat IDs whose members get the owner's full powers.
+    /// Groups whose members get the owner's full powers, as name → chat ID.
+    /// The name is the group's working folder.
     #[serde(default)]
-    pub trusted_groups: Vec<i64>,
+    pub trusted_groups: BTreeMap<String, i64>,
 }
 
-/// `[qq]`, needed only by `alyosha-qq`.
+/// `[qq]`, needed only by `alyosha-qq`, whose AppSecret is the secret
+/// `qq-secret`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct QqConfig {
     pub app_id: String,
-    pub secret: Secret,
     /// The owner's `user_openid`. While empty, the bridge answers nobody.
     #[serde(default)]
     pub owner_openid: String,
-    pub workspace: PathBuf,
     /// Characters per QQ message.
     #[serde(default = "default_reply_chunk")]
     pub reply_chunk: u32,
-    /// `group_openid`s whose members get the owner's full powers.
+    /// Groups whose members get the owner's full powers, as name →
+    /// `group_openid`. The name is the group's working folder.
     #[serde(default)]
-    pub trusted_groups: Vec<String>,
+    pub trusted_groups: BTreeMap<String, String>,
 }
+
+/// The secret holding the Telegram bot token.
+pub const TELEGRAM_TOKEN: &str = "telegram-token";
+/// The secret holding the QQ bot's AppSecret.
+pub const QQ_SECRET: &str = "qq-secret";
+/// The secret holding the gateway key Alyosha sends to GPROXY.
+pub const GATEWAY_KEY: &str = "gateway-key";
+/// The secret holding GPROXY's own environment: its master key and admin keys.
+pub const GPROXY_ENV: &str = "gproxy.env";
 
 fn default_reply_chunk() -> u32 {
     1500
@@ -220,16 +225,18 @@ pub struct McpServerConfig {
     /// Tools that wait for the owner's approval.
     #[serde(default)]
     pub ask: Vec<String>,
-    /// Environment variables for the server. They often hold tokens, so each
-    /// value is a [`Secret`].
+    /// Environment variables for the server. The settings are world-readable,
+    /// so these hold no secrets.
     #[serde(default)]
-    pub env: BTreeMap<String, Secret>,
+    pub env: BTreeMap<String, String>,
+    /// Environment variables whose values are secrets: variable → secret name.
+    #[serde(default)]
+    pub secret_env: BTreeMap<String, String>,
 }
 
 /// A secret value. `Debug` and `Display` print `"<secret>"`, so a logged
-/// configuration never shows it.
-#[derive(Clone, PartialEq, Eq, Deserialize)]
-#[serde(transparent)]
+/// value never shows it.
+#[derive(Clone, PartialEq, Eq)]
 pub struct Secret(String);
 
 impl Secret {
@@ -255,18 +262,13 @@ impl fmt::Display for Secret {
     }
 }
 
-/// Why the configuration could not be loaded.
+/// Why the configuration or a secret could not be loaded.
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
-    #[error("$HOME is not set to an absolute path")]
-    NoHome,
+    #[error("{name} must be an absolute path, not {value:?}")]
+    RelativePath { name: &'static str, value: OsString },
     #[error("cannot read {}: {source}", path.display())]
     Io { path: PathBuf, source: io::Error },
-    #[error(
-        "{path} can be read by other users, but it holds secrets. Run: chmod 600 {path}",
-        path = path.display()
-    )]
-    Mode { path: PathBuf },
     #[error("{}: {message}", path.display())]
     Parse { path: PathBuf, message: String },
     #[error("{}:\n- {}", path.display(), problems.join("\n- "))]
@@ -274,94 +276,178 @@ pub enum ConfigError {
         path: PathBuf,
         problems: Vec<String>,
     },
+    #[error("the secret {name} is not set. On the host, run: alyosha secret set {name}")]
+    MissingSecret { name: String },
+    #[error("{name:?} is not a valid secret name")]
+    BadSecretName { name: String },
 }
 
-/// Alyosha's folders on the host, which follow the XDG locations and are not
-/// configurable.
+/// Alyosha's folders. Each is a fixed path in the container, which an
+/// environment variable replaces for tests and development.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Paths {
-    pub home: PathBuf,
-    /// `$XDG_CONFIG_HOME/alyosha`: `config.toml`, `gproxy.env`, `skills/`.
-    pub config_dir: PathBuf,
-    /// `$XDG_DATA_HOME/alyosha`: logs, memory, the gateway's data, caches.
-    pub data_dir: PathBuf,
+    /// `/etc/alyosha/config.toml`, or `ALYOSHA_CONFIG`.
+    pub config_file: PathBuf,
+    /// `/var/lib/alyosha-secrets`, or `ALYOSHA_SECRETS`.
+    pub secrets_dir: PathBuf,
+    /// `/var/lib/alyosha`, or `ALYOSHA_STATE`: the agent's home and state.
+    pub state_dir: PathBuf,
+    /// `/var/cache/alyosha`, or `ALYOSHA_CACHE`.
+    pub cache_dir: PathBuf,
 }
 
+/// The variables that replace the fixed paths, in the order of [`Paths`].
+pub const PATH_VARIABLES: [&str; 4] = [
+    "ALYOSHA_CONFIG",
+    "ALYOSHA_SECRETS",
+    "ALYOSHA_STATE",
+    "ALYOSHA_CACHE",
+];
+
 impl Paths {
-    /// The folders for the current user, from `$HOME` and the XDG variables.
+    /// The fixed paths, each replaced by its variable when set.
     pub fn from_env() -> Result<Self, ConfigError> {
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .filter(|home| home.is_absolute())
-            .ok_or(ConfigError::NoHome)?;
-        Ok(Self::new(
-            &home,
-            std::env::var_os("XDG_CONFIG_HOME").as_deref(),
-            std::env::var_os("XDG_DATA_HOME").as_deref(),
-        ))
+        let pick = |name: &'static str, fixed: &str| match std::env::var_os(name) {
+            None => Ok(PathBuf::from(fixed)),
+            Some(value) if Path::new(&value).is_absolute() => Ok(PathBuf::from(value)),
+            Some(value) => Err(ConfigError::RelativePath { name, value }),
+        };
+        Ok(Self {
+            config_file: pick(PATH_VARIABLES[0], "/etc/alyosha/config.toml")?,
+            secrets_dir: pick(PATH_VARIABLES[1], "/var/lib/alyosha-secrets")?,
+            state_dir: pick(PATH_VARIABLES[2], "/var/lib/alyosha")?,
+            cache_dir: pick(PATH_VARIABLES[3], "/var/cache/alyosha")?,
+        })
     }
 
-    /// An XDG variable counts only when it is an absolute path.
-    pub fn new(
-        home: &Path,
-        xdg_config_home: Option<&OsStr>,
-        xdg_data_home: Option<&OsStr>,
-    ) -> Self {
-        let pick = |value: Option<&OsStr>, fallback: &str| {
-            value
-                .map(PathBuf::from)
-                .filter(|path| path.is_absolute())
-                .unwrap_or_else(|| home.join(fallback))
-                .join("alyosha")
-        };
+    /// Every folder under one root, for tests: `config.toml`, `secrets/`,
+    /// `state/`, and `cache/`.
+    pub fn under(root: &Path) -> Self {
         Self {
-            home: home.to_owned(),
-            config_dir: pick(xdg_config_home, ".config"),
-            data_dir: pick(xdg_data_home, ".local/share"),
+            config_file: root.join("config.toml"),
+            secrets_dir: root.join("secrets"),
+            state_dir: root.join("state"),
+            cache_dir: root.join("cache"),
         }
     }
 
-    pub fn config_file(&self) -> PathBuf {
-        self.config_dir.join("config.toml")
+    /// The variables that give a child process these same paths.
+    pub fn variables(&self) -> [(&'static str, &Path); 4] {
+        [
+            (PATH_VARIABLES[0], &self.config_file),
+            (PATH_VARIABLES[1], &self.secrets_dir),
+            (PATH_VARIABLES[2], &self.state_dir),
+            (PATH_VARIABLES[3], &self.cache_dir),
+        ]
     }
+
+    /// The sessions' working folders: `owner/`, `groups/<name>/`, `guest/`.
+    pub fn work_dir(&self) -> PathBuf {
+        self.state_dir.join("work")
+    }
+
+    /// The working folder of the owner's private chats.
+    pub fn owner_work(&self) -> PathBuf {
+        self.work_dir().join("owner")
+    }
+
+    /// The working folder of a trusted group, by its name in the settings.
+    pub fn group_work(&self, name: &str) -> PathBuf {
+        self.work_dir().join("groups").join(name)
+    }
+
+    /// The working directory of guest sessions' MCP servers.
+    pub fn guest_work(&self) -> PathBuf {
+        self.work_dir().join("guest")
+    }
+
+    /// The skills directory, mounted read-only from the host's `~/.agents/skills`.
+    pub fn skills_dir(&self) -> PathBuf {
+        self.state_dir.join(".agents").join("skills")
+    }
+
+    /// The secrets in the secrets folder.
+    pub fn secrets(&self) -> Secrets {
+        Secrets {
+            dir: self.secrets_dir.clone(),
+        }
+    }
+}
+
+/// The secrets folder: one file per secret.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Secrets {
+    pub dir: PathBuf,
+}
+
+impl Secrets {
+    /// The file that holds `name`.
+    pub fn path(&self, name: &str) -> Result<PathBuf, ConfigError> {
+        if !is_secret_name(name) {
+            return Err(ConfigError::BadSecretName {
+                name: name.to_owned(),
+            });
+        }
+        Ok(self.dir.join(name))
+    }
+
+    /// Reads a secret, without the final line break a text editor adds.
+    pub fn read(&self, name: &str) -> Result<Secret, ConfigError> {
+        let path = self.path(name)?;
+        match fs::read_to_string(&path) {
+            Ok(text) => Ok(Secret(text.trim_end_matches(['\n', '\r']).to_owned())),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                Err(ConfigError::MissingSecret {
+                    name: name.to_owned(),
+                })
+            }
+            Err(source) => Err(ConfigError::Io { path, source }),
+        }
+    }
+
+    /// Whether a secret is set.
+    pub fn exists(&self, name: &str) -> bool {
+        self.path(name).is_ok_and(|path| path.exists())
+    }
+}
+
+/// A secret's name: `[a-z0-9][a-z0-9._-]{0,63}`.
+pub fn is_secret_name(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    (1..=64).contains(&bytes.len())
+        && (bytes[0].is_ascii_lowercase() || bytes[0].is_ascii_digit())
+        && bytes.iter().all(|b| {
+            b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'_' | b'-')
+        })
+}
+
+/// A trusted group's name, which is also its folder: `[a-z0-9][a-z0-9_-]{0,31}`.
+pub fn is_group_name(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    (1..=32).contains(&bytes.len())
+        && (bytes[0].is_ascii_lowercase() || bytes[0].is_ascii_digit())
+        && bytes
+            .iter()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'_' | b'-'))
 }
 
 /// Loads the configuration from its standard location.
 pub fn load() -> Result<Config, ConfigError> {
-    let paths = Paths::from_env()?;
-    load_from(&paths.config_file())
-}
-
-/// `$XDG_CONFIG_HOME/alyosha/config.toml`, or `$HOME/.config/...` when
-/// `XDG_CONFIG_HOME` is unset or not absolute.
-pub fn config_path(xdg_config_home: Option<&OsStr>, home: &Path) -> PathBuf {
-    let base = xdg_config_home
-        .map(PathBuf::from)
-        .filter(|path| path.is_absolute())
-        .unwrap_or_else(|| home.join(".config"));
-    base.join("alyosha").join("config.toml")
+    load_from(&Paths::from_env()?.config_file)
 }
 
 /// Loads the file at `path`. A missing file gives the defaults.
 pub fn load_from(path: &Path) -> Result<Config, ConfigError> {
-    let io_error = |source| ConfigError::Io {
-        path: path.to_owned(),
-        source,
-    };
-    let mut file = match File::open(path) {
-        Ok(file) => file,
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Config::default()),
-        Err(error) => return Err(io_error(error)),
+        Err(source) => {
+            return Err(ConfigError::Io {
+                path: path.to_owned(),
+                source,
+            });
+        }
     };
-    // Check the mode on the open handle, so the file checked is the file read.
-    let mode = file.metadata().map_err(io_error)?.mode();
-    if mode & 0o077 != 0 {
-        return Err(ConfigError::Mode {
-            path: path.to_owned(),
-        });
-    }
-    let mut text = String::new();
-    file.read_to_string(&mut text).map_err(io_error)?;
     parse(&text).map_err(|error| match error {
         Problem::Parse(message) => ConfigError::Parse {
             path: path.to_owned(),
@@ -427,11 +513,28 @@ fn parse(text: &str) -> Result<Config, Problem> {
     if file.approvals.timeout_minutes < 1 {
         problems.push("approvals.timeout_minutes: must be at least 1".to_owned());
     }
+    let mut group_names: HashMap<&str, &str> = HashMap::new();
     if let Some(telegram) = &file.telegram {
-        check_workspace("telegram.workspace", &telegram.workspace, &mut problems);
+        let mut ids = HashMap::new();
+        for (name, id) in &telegram.trusted_groups {
+            check_group("telegram", name, &mut group_names, &mut problems);
+            if let Some(other) = ids.insert(*id, name) {
+                problems.push(format!(
+                    "telegram.trusted_groups: {other} and {name} have the same chat ID"
+                ));
+            }
+        }
     }
     if let Some(qq) = &file.qq {
-        check_workspace("qq.workspace", &qq.workspace, &mut problems);
+        let mut ids = HashMap::new();
+        for (name, id) in &qq.trusted_groups {
+            check_group("qq", name, &mut group_names, &mut problems);
+            if let Some(other) = ids.insert(id.as_str(), name) {
+                problems.push(format!(
+                    "qq.trusted_groups: {other} and {name} have the same group_openid"
+                ));
+            }
+        }
         if !(200..=4000).contains(&qq.reply_chunk) {
             problems.push(format!(
                 "qq.reply_chunk: {} is not between 200 and 4000",
@@ -449,6 +552,13 @@ fn parse(text: &str) -> Result<Config, Problem> {
             for asked in server.ask.iter().filter(|asked| !tools.contains(asked)) {
                 problems.push(format!(
                     "mcp.servers.{name}.ask: {asked:?} is not in this server's tools"
+                ));
+            }
+        }
+        for (variable, secret) in &server.secret_env {
+            if !is_secret_name(secret) {
+                problems.push(format!(
+                    "mcp.servers.{name}.secret_env.{variable}: {secret:?} is not a valid secret name"
                 ));
             }
         }
@@ -488,9 +598,23 @@ fn is_http_url(url: &str) -> bool {
     })
 }
 
-fn check_workspace(key: &str, path: &Path, problems: &mut Vec<String>) {
-    if !path.is_absolute() {
-        problems.push(format!("{key}: {} is not an absolute path", path.display()));
+/// A trusted group's name must be valid and used once across both bridges,
+/// because it names the group's working folder.
+fn check_group<'a>(
+    bridge: &'a str,
+    name: &'a str,
+    seen: &mut HashMap<&'a str, &'a str>,
+    problems: &mut Vec<String>,
+) {
+    if !is_group_name(name) {
+        problems.push(format!(
+            "{bridge}.trusted_groups: {name:?} must match [a-z0-9][a-z0-9_-]{{0,31}}"
+        ));
+    }
+    if let Some(other) = seen.insert(name, bridge) {
+        problems.push(format!(
+            "{bridge}.trusted_groups: {name:?} is also a group of {other}; each name is a folder and must be unique"
+        ));
     }
 }
 
@@ -505,13 +629,9 @@ fn is_server_name(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, os::unix::fs::PermissionsExt};
-
     use super::*;
 
-    const HOME: &str = "/home/mjli";
-
-    /// The reference's example, with secrets filled in.
+    /// The reference's example.
     const EXAMPLE: &str = r#"
 timezone = "Europe/Amsterdam"
 
@@ -528,15 +648,16 @@ timeout_minutes = 60
 
 [telegram]
 owner_id = 123456789
-workspace = "/home/mjli/Projects/alyosha-home"
-token = "telegram-token-1234"
-trusted_groups = [-1001234567890]
+
+[telegram.trusted_groups]
+family = -1001234567890
 
 [qq]
 app_id = "102000000"
 owner_openid = "openid-5678"
-workspace = "/home/mjli/Projects/alyosha-qq"
-secret = "qq-secret-9012"
+
+[qq.trusted_groups]
+friends = "12D5F61BED16A072D96DB3D9E04A7B3D"
 
 [guest]
 mcp_servers = ["search"]
@@ -547,38 +668,16 @@ tools = ["search"]
 
 [mcp.servers.search.env]
 MODE = "stdio"
-API_TOKEN = "mcp-token-3456"
+
+[mcp.servers.search.secret_env]
+API_TOKEN = "search-token"
 "#;
 
-    /// Writes `text` as a configuration file with the given mode.
-    fn write(text: &str, mode: u32) -> (tempfile::TempDir, PathBuf) {
+    fn load_text(text: &str) -> Result<Config, ConfigError> {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         fs::write(&path, text).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
-        (dir, path)
-    }
-
-    fn load_text(text: &str) -> Result<Config, ConfigError> {
-        let (_dir, path) = write(text, 0o600);
         load_from(&path)
-    }
-
-    #[test]
-    fn the_path_follows_xdg() {
-        let home = Path::new(HOME);
-        assert_eq!(
-            config_path(None, home),
-            Path::new("/home/mjli/.config/alyosha/config.toml")
-        );
-        assert_eq!(
-            config_path(Some(OsStr::new("/xdg")), home),
-            Path::new("/xdg/alyosha/config.toml")
-        );
-        assert_eq!(
-            config_path(Some(OsStr::new("relative")), home),
-            Path::new("/home/mjli/.config/alyosha/config.toml")
-        );
     }
 
     #[test]
@@ -603,37 +702,37 @@ API_TOKEN = "mcp-token-3456"
         let config = load_text(EXAMPLE).unwrap();
         let telegram = config.telegram.as_ref().unwrap();
         assert_eq!(telegram.owner_id, 123456789);
-        assert_eq!(
-            telegram.workspace,
-            Path::new("/home/mjli/Projects/alyosha-home")
-        );
-        assert_eq!(telegram.token.expose(), "telegram-token-1234");
-        assert_eq!(telegram.trusted_groups, [-1001234567890]);
+        assert_eq!(telegram.trusted_groups["family"], -1001234567890);
         let qq = config.qq.as_ref().unwrap();
         assert_eq!(qq.app_id, "102000000");
         assert_eq!(qq.owner_openid, "openid-5678");
-        assert_eq!(qq.secret.expose(), "qq-secret-9012");
         assert_eq!(qq.reply_chunk, 1500);
-        assert!(qq.trusted_groups.is_empty());
+        assert_eq!(
+            qq.trusted_groups["friends"],
+            "12D5F61BED16A072D96DB3D9E04A7B3D"
+        );
         let search = &config.mcp.servers["search"];
         assert_eq!(search.command, "open-websearch");
         assert!(search.args.is_empty());
         assert_eq!(search.tools, Some(vec!["search".to_owned()]));
         assert!(search.ask.is_empty());
-        assert_eq!(search.env["MODE"].expose(), "stdio");
+        assert_eq!(search.env["MODE"], "stdio");
+        assert_eq!(search.secret_env["API_TOKEN"], "search-token");
         assert_eq!(config.approvals.timeout_minutes, 60);
     }
 
     #[test]
-    fn a_file_others_can_read_is_refused() {
-        let (_dir, path) = write(EXAMPLE, 0o640);
-        let error = load_from(&path).unwrap_err();
-        assert!(matches!(error, ConfigError::Mode { .. }));
-        let message = error.to_string();
-        assert!(
-            message.contains(&format!("chmod 600 {}", path.display())),
-            "{message}"
-        );
+    fn secrets_are_not_settings() {
+        for text in [
+            "[telegram]\nowner_id = 1\ntoken = \"t\"\n",
+            "[qq]\napp_id = \"1\"\nsecret = \"s\"\n",
+        ] {
+            let error = load_text(text).unwrap_err();
+            assert!(
+                matches!(error, ConfigError::Parse { .. }),
+                "{text}: {error}"
+            );
+        }
     }
 
     #[test]
@@ -657,8 +756,8 @@ timezone = "Europe/Amstredam"
 timeout_minutes = 0
 [telegram]
 owner_id = 1
-workspace = "bot"
-token = "t"
+[telegram.trusted_groups]
+"My Group" = -100
 "#,
         )
         .unwrap_err();
@@ -668,7 +767,23 @@ token = "t"
         assert_eq!(problems.len(), 3, "{problems:?}");
         assert!(problems[0].contains("Europe/Amstredam"));
         assert!(problems[1].contains("timeout_minutes"));
-        assert!(problems[2].contains("telegram.workspace"));
+        assert!(problems[2].contains("My Group"));
+    }
+
+    #[test]
+    fn group_names_are_unique_across_both_bridges() {
+        let message = load_text(
+            "[telegram]\nowner_id = 1\n[telegram.trusted_groups]\nfriends = -1\n[qq]\napp_id = \"1\"\n[qq.trusted_groups]\nfriends = \"G\"\n",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(message.contains("\"friends\""), "{message}");
+        assert!(message.contains("telegram"), "{message}");
+        let message =
+            load_text("[qq]\napp_id = \"1\"\n[qq.trusted_groups]\na = \"G\"\nb = \"G\"\n")
+                .unwrap_err()
+                .to_string();
+        assert!(message.contains("same group_openid"), "{message}");
     }
 
     #[test]
@@ -676,16 +791,13 @@ token = "t"
         for (text, needle) in [
             ("[gateway]\nurl = \"https://example.com\"\n", "gateway.url"),
             ("[gateway]\nurl = \"http://\"\n", "gateway.url"),
-            (
-                "[qq]\napp_id = \"1\"\nsecret = \"s\"\nworkspace = \"/home/mjli/Projects/q\"\nreply_chunk = 100\n",
-                "reply_chunk",
-            ),
-            (
-                "[qq]\napp_id = \"1\"\nsecret = \"s\"\nworkspace = \"relative/x\"\n",
-                "qq.workspace",
-            ),
+            ("[qq]\napp_id = \"1\"\nreply_chunk = 100\n", "reply_chunk"),
             ("[mcp.servers.Search]\ncommand = \"x\"\n", "server name"),
             ("[mcp.servers.-x]\ncommand = \"x\"\n", "server name"),
+            (
+                "[mcp.servers.x]\ncommand = \"x\"\n[mcp.servers.x.secret_env]\nA = \"../k\"\n",
+                "secret_env.A",
+            ),
         ] {
             let message = load_text(text).unwrap_err().to_string();
             assert!(message.contains(needle), "{text}: {message}");
@@ -740,11 +852,39 @@ token = "t"
     }
 
     #[test]
-    fn debug_output_hides_secrets() {
-        let printed = format!("{:?}", load_text(EXAMPLE).unwrap());
-        for secret in ["telegram-token-1234", "qq-secret-9012", "mcp-token-3456"] {
-            assert!(!printed.contains(secret), "{secret} leaked: {printed}");
-        }
-        assert!(printed.contains("<secret>"));
+    fn paths_and_their_folders() {
+        let paths = Paths::under(Path::new("/r"));
+        assert_eq!(paths.config_file, Path::new("/r/config.toml"));
+        assert_eq!(paths.owner_work(), Path::new("/r/state/work/owner"));
+        assert_eq!(
+            paths.group_work("friends"),
+            Path::new("/r/state/work/groups/friends")
+        );
+        assert_eq!(paths.guest_work(), Path::new("/r/state/work/guest"));
+        assert_eq!(paths.skills_dir(), Path::new("/r/state/.agents/skills"));
+    }
+
+    #[test]
+    fn secrets_are_files_and_never_printed() {
+        let dir = tempfile::tempdir().unwrap();
+        let secrets = Secrets {
+            dir: dir.path().to_owned(),
+        };
+        fs::write(dir.path().join("telegram-token"), "tok-1234\n").unwrap();
+        let token = secrets.read("telegram-token").unwrap();
+        assert_eq!(token.expose(), "tok-1234");
+        assert!(!format!("{token:?} {token}").contains("tok-1234"));
+        let message = secrets.read("qq-secret").unwrap_err().to_string();
+        assert!(
+            message.contains("qq-secret") && message.contains("alyosha secret set"),
+            "{message}"
+        );
+        assert!(matches!(
+            secrets.read("../telegram-token"),
+            Err(ConfigError::BadSecretName { .. })
+        ));
+        assert!(secrets.exists("telegram-token") && !secrets.exists("qq-secret"));
+        assert!(is_secret_name("browser-state.json") && !is_secret_name("A"));
+        assert!(is_group_name("friends_1") && !is_group_name("My Group"));
     }
 }

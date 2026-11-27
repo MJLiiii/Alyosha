@@ -35,14 +35,10 @@ struct Home {
 fn home() -> Home {
     let root = tempfile::tempdir().unwrap();
     let base = root.path().canonicalize().unwrap();
-    let paths = Paths::new(
-        &base,
-        Some(base.join("config").as_os_str()),
-        Some(base.join("data").as_os_str()),
-    );
+    let paths = Paths::under(&base);
     let workspace = base.join("Projects/ws");
     fs::create_dir_all(&workspace).unwrap();
-    fs::create_dir_all(&paths.data_dir).unwrap();
+    fs::create_dir_all(&paths.state_dir).unwrap();
     Home {
         _root: root,
         paths,
@@ -97,7 +93,7 @@ async fn open(
         FrontEnd {
             approver,
             channel_line: None,
-            log_file: None,
+            log_hint: None,
             on_loading_dev_shell: None,
             persistence: None,
         },
@@ -346,7 +342,7 @@ async fn memory_writes_show_a_notice_and_reach_the_next_session() {
 #[tokio::test]
 async fn skills_are_indexed_and_loaded() {
     let home = home();
-    let skill = home.paths.config_dir.join("skills/blog-release");
+    let skill = home.paths.skills_dir().join("blog-release");
     fs::create_dir_all(skill.join("scripts")).unwrap();
     fs::write(
         skill.join("SKILL.md"),
@@ -354,12 +350,8 @@ async fn skills_are_indexed_and_loaded() {
     )
     .unwrap();
     fs::write(skill.join("scripts/check.sh"), "echo ok").unwrap();
-    fs::create_dir_all(home.paths.config_dir.join("skills/Broken")).unwrap();
-    fs::write(
-        home.paths.config_dir.join("skills/Broken/SKILL.md"),
-        "no header",
-    )
-    .unwrap();
+    fs::create_dir_all(home.paths.skills_dir().join("Broken")).unwrap();
+    fs::write(home.paths.skills_dir().join("Broken/SKILL.md"), "no header").unwrap();
     let model = ScriptedModel::new();
     model.reply(vec![
         call("s", "skill", json!({"name": "blog-release"})),
@@ -460,7 +452,7 @@ fn fake_server_config(home: &Home, ask: &[&str]) -> Option<Config> {
     let mut env = std::collections::BTreeMap::new();
     env.insert(
         "FAKE_MCP_LOG".to_owned(),
-        toml_secret(&home.paths.data_dir.join("fake.log").display().to_string()),
+        home.paths.state_dir.join("fake.log").display().to_string(),
     );
     config.mcp.servers.insert(
         "fake".to_owned(),
@@ -470,6 +462,7 @@ fn fake_server_config(home: &Home, ask: &[&str]) -> Option<Config> {
             tools: None,
             ask: ask.iter().map(|name| (*name).to_owned()).collect(),
             env,
+            secret_env: Default::default(),
         },
     );
     config.mcp.servers.insert(
@@ -480,13 +473,10 @@ fn fake_server_config(home: &Home, ask: &[&str]) -> Option<Config> {
             tools: None,
             ask: Vec::new(),
             env: Default::default(),
+            secret_env: Default::default(),
         },
     );
     Some(config)
-}
-
-fn toml_secret(value: &str) -> alyosha_config::Secret {
-    alyosha_config::Secret::new(value)
 }
 
 #[tokio::test]
@@ -589,7 +579,7 @@ async fn mcp_tools_register_call_and_convert() {
             || error(&results[1].1).contains("outside")
     );
     started.driver.end().await;
-    let log_file = home.paths.data_dir.join("sessions");
+    let log_file = home.paths.cache_dir.join("sessions");
     let leftover: Vec<_> = walk(&log_file)
         .into_iter()
         .filter(|path| path.to_string_lossy().contains("mcp-"))
@@ -671,7 +661,7 @@ async fn stop_cancels_an_mcp_call_at_the_server() {
         .collect();
     assert_eq!(results, [ToolOutcome::Cancelled, ToolOutcome::Cancelled]);
     tokio::time::sleep(Duration::from_millis(200)).await;
-    let log = fs::read_to_string(home.paths.data_dir.join("fake.log")).unwrap();
+    let log = fs::read_to_string(home.paths.state_dir.join("fake.log")).unwrap();
     assert!(log.contains("call sleep\ncancelled "), "{log}");
     assert!(!log.contains("call echo"));
 }
@@ -731,7 +721,7 @@ async fn an_ask_tool_runs_only_after_approval() {
     assert!(events.contains(&SessionEvent::Notice(
         "Waiting for approval: fake.send".into()
     )));
-    let log = fs::read_to_string(home.paths.data_dir.join("fake.log")).unwrap();
+    let log = fs::read_to_string(home.paths.state_dir.join("fake.log")).unwrap();
     assert_eq!(
         log.matches("call send").count(),
         1,
@@ -777,7 +767,7 @@ async fn stop_while_waiting_for_the_owner_declines_and_stops() {
         TurnOutcome::Stopped
     );
     tokio::time::sleep(Duration::from_millis(100)).await;
-    let log = fs::read_to_string(home.paths.data_dir.join("fake.log")).unwrap_or_default();
+    let log = fs::read_to_string(home.paths.state_dir.join("fake.log")).unwrap_or_default();
     assert!(!log.contains("call send"));
 }
 
@@ -808,7 +798,10 @@ async fn a_resumed_session_closes_the_turn_a_restart_cut_off() {
     };
     let home = home();
     let store = MemoryStore::new();
-    let created = store.create("owner:telegram", &home.workspace).await.unwrap();
+    let created = store
+        .create("owner:telegram", &home.workspace)
+        .await
+        .unwrap();
     // The process died after the first of two calls had its result.
     let saved = [
         support::user(alyosha::agent_state::MessageId(4), "read both"),
@@ -833,7 +826,7 @@ async fn a_resumed_session_closes_the_turn_a_restart_cut_off() {
         FrontEnd {
             approver: None,
             channel_line: None,
-            log_file: None,
+            log_hint: None,
             on_loading_dev_shell: None,
             persistence: Some(Persistence {
                 store: store.clone() as Arc<dyn SessionStore>,

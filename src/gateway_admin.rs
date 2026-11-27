@@ -2,7 +2,10 @@
 //! the provider through its admin API.
 //!
 //! Sessions never sign in. These two commands are the only code that uses the
-//! admin key. See `docs/LLMClientGateway.md#run-gproxy-as-a-service`.
+//! admin key. They run as root in the container, from the host's `alyosha`
+//! command, and write their results as secrets: `gproxy.env`, which only root
+//! reads, and `gateway-key`, which the `alyosha` group reads. See
+//! `docs/LLMClientGateway.md#run-gproxy-as-a-service`.
 
 use std::{
     fs::{self, DirBuilder, OpenOptions},
@@ -19,23 +22,23 @@ use tokio_util::sync::CancellationToken;
 
 use crate::llm_client::{GatewayClient, ModelClient, ModelRequest, Timeouts};
 
-/// The variable `gateway login` adds to `gproxy.env`. GPROXY ignores it.
-pub const GATEWAY_KEY_VAR: &str = "ALYOSHA_GATEWAY_KEY";
+/// The group that may read the secrets Alyosha's own programs use.
+pub const SECRETS_GROUP: &str = "alyosha";
 
-/// Where the gateway's secrets and data live.
+/// Where the gateway's secrets live.
 #[derive(Debug, Clone)]
 pub struct GatewayFiles {
-    /// `$XDG_CONFIG_HOME/alyosha/gproxy.env`, mode 600.
+    /// The secret `gproxy.env`: owned by root, mode `0400`.
     pub env_file: PathBuf,
-    /// `$XDG_DATA_HOME/alyosha/gproxy`.
-    pub data_dir: PathBuf,
+    /// The secret `gateway-key`: owned by root and the `alyosha` group, mode `0440`.
+    pub key_file: PathBuf,
 }
 
 impl GatewayFiles {
     pub fn new(paths: &Paths) -> Self {
         Self {
-            env_file: paths.config_dir.join("gproxy.env"),
-            data_dir: paths.data_dir.join("gproxy"),
+            env_file: paths.secrets_dir.join(alyosha_config::GPROXY_ENV),
+            key_file: paths.secrets_dir.join(alyosha_config::GATEWAY_KEY),
         }
     }
 
@@ -46,16 +49,19 @@ impl GatewayFiles {
 
     /// The gateway key every session sends, if `gateway login` created one.
     pub fn gateway_key(&self) -> io::Result<Option<String>> {
-        Ok(lookup(&self.read_env()?, GATEWAY_KEY_VAR))
+        match fs::read_to_string(&self.key_file) {
+            Ok(text) => Ok(Some(text.trim().to_owned()).filter(|key| !key.is_empty())),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum GatewayError {
     #[error(
-        "{} already exists. A new master key cannot open the existing database. To start over, move the old data folder {} away first.",
-        .0.env_file.display(),
-        .0.data_dir.display()
+        "{} already exists. A new master key cannot open the existing database. To start over, move GPROXY's data folder, /var/lib/gproxy, away first.",
+        .0.env_file.display()
     )]
     AlreadyInitialized(Box<GatewayFiles>),
     #[error("{} is missing. Run `alyosha gateway init` and start the gproxy service first.", .0.display())]
@@ -68,8 +74,8 @@ pub enum GatewayError {
     Login(String),
 }
 
-/// Creates the data folder and `gproxy.env` with a fresh master key and the
-/// bootstrap admin credentials. Refuses if the file exists.
+/// Writes `gproxy.env` with a fresh master key and the bootstrap admin
+/// credentials. Refuses if the file exists.
 pub fn init(files: &GatewayFiles) -> Result<String, GatewayError> {
     if files.env_file.exists() {
         return Err(GatewayError::AlreadyInitialized(Box::new(files.clone())));
@@ -77,13 +83,9 @@ pub fn init(files: &GatewayFiles) -> Result<String, GatewayError> {
     if let Some(parent) = files.env_file.parent() {
         DirBuilder::new()
             .recursive(true)
-            .mode(0o700)
+            .mode(0o750)
             .create(parent)?;
     }
-    DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(&files.data_dir)?;
     let text = format!(
         "GPROXY_MASTER_KEY={}\nGPROXY_ADMIN_PASSWORD={}\nGPROXY_BOOTSTRAP_ADMIN_API_KEY={}\n",
         random_hex(32)?,
@@ -93,7 +95,7 @@ pub fn init(files: &GatewayFiles) -> Result<String, GatewayError> {
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
-        .mode(0o600)
+        .mode(0o400)
         .open(&files.env_file)
         .map_err(|error| match error.kind() {
             io::ErrorKind::AlreadyExists => {
@@ -104,9 +106,8 @@ pub fn init(files: &GatewayFiles) -> Result<String, GatewayError> {
     file.write_all(text.as_bytes())?;
     file.sync_all()?;
     Ok(format!(
-        "Wrote {} and created {}. Start the gproxy service, then run `alyosha gateway login`.",
-        files.env_file.display(),
-        files.data_dir.display()
+        "Wrote {}. Start the gproxy service, then run `alyosha gateway login`.",
+        files.env_file.display()
     ))
 }
 
@@ -184,13 +185,13 @@ pub async fn login(
         key: admin_key,
     };
 
-    let gateway_key = match lookup(&variables, GATEWAY_KEY_VAR) {
+    let gateway_key = match files.gateway_key()? {
         Some(key) => key,
         None => {
             let admin_user =
                 lookup(&variables, "GPROXY_ADMIN_USER").unwrap_or_else(|| "admin".into());
             let key = admin.create_gateway_key(&admin_user).await?;
-            append_variable(&files.env_file, GATEWAY_KEY_VAR, &key)?;
+            write_secret(&files.key_file, &key, group_id(SECRETS_GROUP))?;
             terminal.say("Created the gateway key Alyosha uses.");
             key
         }
@@ -271,23 +272,40 @@ pub fn channel(api: Api) -> &'static str {
     }
 }
 
-fn append_variable(path: &Path, name: &str, value: &str) -> io::Result<()> {
-    let mut text = fs::read_to_string(path)?;
-    if !text.is_empty() && !text.ends_with('\n') {
-        text.push('\n');
-    }
-    text.push_str(&format!("{name}={value}\n"));
-    // Replace the file atomically, keeping mode 600.
-    let staging = path.with_extension("env.new");
+/// Writes a secret atomically: owned by root and `group`, mode `0440`, or
+/// `0400` without a group.
+pub fn write_secret(path: &Path, value: &str, group: Option<u32>) -> io::Result<()> {
+    let staging = path.with_extension("new");
+    let _ = fs::remove_file(&staging);
     let mut file = OpenOptions::new()
         .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
+        .create_new(true)
+        .mode(0o400)
         .open(&staging)?;
-    file.write_all(text.as_bytes())?;
+    file.write_all(value.as_bytes())?;
+    file.write_all(b"\n")?;
     file.sync_all()?;
+    if let Some(gid) = group {
+        std::os::unix::fs::chown(&staging, None, Some(gid))?;
+        fs::set_permissions(
+            &staging,
+            std::os::unix::fs::PermissionsExt::from_mode(0o440),
+        )?;
+    }
     fs::rename(&staging, path)
+}
+
+/// The ID of a group from `/etc/group`, if it exists.
+pub fn group_id(name: &str) -> Option<u32> {
+    fs::read_to_string("/etc/group")
+        .ok()?
+        .lines()
+        .find_map(|line| {
+            let mut fields = line.split(':');
+            (fields.next()? == name)
+                .then(|| fields.nth(1)?.parse().ok())
+                .flatten()
+        })
 }
 
 struct Admin {
@@ -499,11 +517,7 @@ mod tests {
     use super::*;
 
     fn files(root: &Path) -> GatewayFiles {
-        GatewayFiles::new(&Paths::new(
-            root,
-            Some(root.join("config").as_os_str()),
-            Some(root.join("data").as_os_str()),
-        ))
+        GatewayFiles::new(&Paths::under(root))
     }
 
     #[test]
@@ -512,8 +526,7 @@ mod tests {
         let files = files(root.path());
         init(&files).unwrap();
         let mode = fs::metadata(&files.env_file).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600);
-        assert!(files.data_dir.is_dir());
+        assert_eq!(mode, 0o400);
         let variables = files.read_env().unwrap();
         let master = lookup(&variables, "GPROXY_MASTER_KEY").unwrap();
         assert_eq!(master.len(), 64);
@@ -531,14 +544,21 @@ mod tests {
     }
 
     #[test]
-    fn a_variable_is_appended_without_losing_the_mode() {
+    fn the_gateway_key_is_a_secret_of_its_own() {
         let root = tempfile::tempdir().unwrap();
         let files = files(root.path());
         init(&files).unwrap();
-        append_variable(&files.env_file, GATEWAY_KEY_VAR, "gk-123").unwrap();
+        write_secret(&files.key_file, "gk-123", None).unwrap();
         assert_eq!(files.gateway_key().unwrap().as_deref(), Some("gk-123"));
-        let mode = fs::metadata(&files.env_file).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600);
-        assert_eq!(files.read_env().unwrap().len(), 4);
+        let mode = fs::metadata(&files.key_file).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o400);
+        assert_eq!(
+            files.read_env().unwrap().len(),
+            3,
+            "gproxy.env is unchanged"
+        );
+        // A second write replaces it.
+        write_secret(&files.key_file, "gk-456", None).unwrap();
+        assert_eq!(files.gateway_key().unwrap().as_deref(), Some("gk-456"));
     }
 }

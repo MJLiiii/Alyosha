@@ -142,11 +142,11 @@ pub struct Schedule {
 pub struct Lock(#[allow(dead_code)] File);
 
 impl Schedule {
-    /// The file `schedule.toml` in `data_dir`, normally
-    /// `~/.local/share/alyosha`.
-    pub fn new(data_dir: &Path) -> Self {
+    /// The file `schedule.toml` in `state_dir`, which is
+    /// `/var/lib/alyosha` in the container.
+    pub fn new(state_dir: &Path) -> Self {
         Self {
-            dir: data_dir.to_owned(),
+            dir: state_dir.to_owned(),
         }
     }
 

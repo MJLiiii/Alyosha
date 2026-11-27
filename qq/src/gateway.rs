@@ -383,7 +383,10 @@ pub fn group_message(d: &Value) -> GroupMessage {
 /// The bridge's settings, from `[qq]`.
 pub struct Settings {
     pub owner_openid: String,
+    /// The owner's working folder.
     pub workspace: PathBuf,
+    /// Alyosha's working folders, where groups' folders are.
+    pub work_dir: PathBuf,
     pub reply_chunk: usize,
     pub schedule: Schedule,
     pub timezone: Tz,
@@ -458,7 +461,7 @@ pub async fn run(
     let (mut pool, mut guest_events) = GuestPool::new(
         settings.groups.clone(),
         "alyosha-qq",
-        settings.workspace.clone(),
+        settings.work_dir.clone(),
     );
     // Each open group prompt's group and the reply context of its mention.
     let mut group_replies: HashMap<String, (String, ReplyTo)> = HashMap::new();
@@ -640,7 +643,7 @@ pub async fn run(
                     Event::Permission(permission) if pool.is_trusted(&group) => {
                         let options: Vec<String> = permission.options.iter().map(|(_, name)| name.clone()).collect();
                         let text = permission_text(&permission.title, &permission.body, &options, chunk);
-                        let text = format!("In group {group}:\n\n{text}");
+                        let text = format!("In group {}:\n\n{text}", pool.name(&group));
                         if deliver(&owner, &[text], &mut ReplyTo::scheduled()).await.is_none() {
                             requests.push(OpenRequest { group: Some(group.clone()), permission, options });
                         } else if let Some(asker) = pool.bridge(&group) {

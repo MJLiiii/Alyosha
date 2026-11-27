@@ -1,22 +1,28 @@
-//! The shell sandbox: each command runs in a fresh Bubblewrap sandbox inside
-//! its own network namespace from `pasta`.
+//! Shell commands: each runs in a systemd unit of its own, started from the
+//! session's template, as the user `alyosha-run`.
 //!
-//! `pasta` gives the command outgoing internet without the container's
-//! loopback, where GPROXY listens. It closes inherited descriptors, so a small
-//! trusted wrapper inside its namespace opens Bubblewrap's status file before
-//! starting `bwrap`. See
-//! `docs/EnvironmentInterface.md#bubblewrap-launch-contract`.
+//! The container module declares one template per working folder, which fixes
+//! the user, mounts, limits, and network rules. Alyosha writes the command's
+//! description into a run folder, starts the unit, reads its output file as it
+//! grows, and reads systemd's result when it ends. See
+//! `docs/EnvironmentInterface.md#command-launch` and
+//! `docs/Deployment.md#command-units`.
 
 use std::{
     collections::BTreeMap,
-    fs::{self, DirBuilder},
-    os::unix::fs::DirBuilderExt,
+    fs::{self, DirBuilder, File, OpenOptions},
+    io::Read,
+    os::unix::fs::{DirBuilderExt, OpenOptionsExt},
     path::{Path, PathBuf},
     process::Stdio,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
 
+use serde::{Deserialize, Serialize};
 use tokio::{io::AsyncReadExt, process::Command};
 use tokio_util::sync::CancellationToken;
 
@@ -49,58 +55,52 @@ pub struct CommandOutput {
     pub output: Vec<u8>,
 }
 
-/// The programs the sandbox needs, as Nix store paths.
+/// Where commands run.
 #[derive(Debug, Clone)]
-pub struct SandboxPrograms {
-    pub bwrap: PathBuf,
-    pub pasta: PathBuf,
-    pub bash: PathBuf,
+pub enum Runner {
+    /// Commands are unavailable, for the reason given.
+    Unavailable(String),
+    /// Each command runs in a fresh unit from `template`, such as
+    /// `alyosha-run-owner`, with its run folder under `runs_dir`.
+    Units { template: String, runs_dir: PathBuf },
+    /// A plain child process in the workspace, without any isolation. Only
+    /// for tests and development outside the container, chosen with
+    /// `ALYOSHA_COMMANDS=direct`.
+    Direct,
 }
 
-/// How commands reach DNS.
-#[derive(Debug, Clone, Default)]
-pub enum Dns {
-    /// The host's `resolv.conf` names a non-loopback server; bind it as is.
-    #[default]
-    Host,
-    /// The host resolves through a loopback server such as systemd-resolved:
-    /// forward only DNS queries from a fixed address to it.
-    Forward { host: String },
+impl Default for Runner {
+    fn default() -> Self {
+        Self::Unavailable("this session runs no commands".into())
+    }
 }
 
-/// The address inside the sandbox that `pasta` forwards to the host's DNS.
-pub const DNS_FORWARD_ADDRESS: &str = "169.254.0.53";
+/// The variable that chooses [`Runner::Direct`].
+pub const DIRECT_VARIABLE: &str = "ALYOSHA_COMMANDS";
 
-/// The session's sandbox settings.
+/// The folder the container module creates for run folders.
+pub const RUNS_DIR: &str = "/run/alyosha-run";
+
+/// The session's command settings.
 #[derive(Debug, Clone, Default)]
 pub struct SandboxConfig {
-    /// `None` when the sandbox programs were not found: commands fail with a
-    /// tool error.
-    pub programs: Option<SandboxPrograms>,
+    pub runner: Runner,
+    /// The packaged Bash, as a store path.
+    pub bash: Option<PathBuf>,
     /// The directories of the default tools: Bash, coreutils, findutils, Git,
     /// and ripgrep.
     pub default_path: Vec<PathBuf>,
     /// Exported variables of the workspace's dev shell.
     pub dev_shell: Vec<(String, String)>,
-    /// The persistent cache bound at `/home/alyosha/.cache`.
-    pub cache_dir: PathBuf,
-    /// A private folder for status files and the generated `resolv.conf`.
-    pub private_dir: PathBuf,
-    pub dns: Dns,
     /// The CA bundle's real path in the Nix store, if found.
     pub ca_bundle: Option<PathBuf>,
 }
 
 impl SandboxConfig {
-    /// Finds the sandbox programs and default tools on `PATH`, which Alyosha's
-    /// package sets to their store paths.
-    pub fn discover(cache_dir: PathBuf, private_dir: PathBuf) -> Self {
+    /// Finds Bash and the default tools on `PATH`, which Alyosha's package sets
+    /// to their store paths, and the CA bundle.
+    pub fn discover(runner: Runner) -> Self {
         let find = |name: &str| which(name).and_then(|path| path.canonicalize().ok());
-        // pasta picks its mode from the name it runs under, so keep its link.
-        let programs = match (find("bwrap"), which("pasta"), find("bash")) {
-            (Some(bwrap), Some(pasta), Some(bash)) => Some(SandboxPrograms { bwrap, pasta, bash }),
-            _ => None,
-        };
         let mut default_path = Vec::new();
         for tool in ["bash", "ls", "find", "git", "rg"] {
             if let Some(dir) = find(tool).and_then(|path| path.parent().map(Path::to_owned))
@@ -117,14 +117,44 @@ impl SandboxConfig {
         .find_map(|path| Path::new(path).canonicalize().ok())
         .filter(|path| path.starts_with("/nix/store"));
         Self {
-            programs,
+            runner,
+            bash: find("bash"),
             default_path,
             dev_shell: Vec::new(),
-            cache_dir,
-            private_dir,
-            dns: host_dns(&fs::read_to_string("/etc/resolv.conf").unwrap_or_default()),
             ca_bundle,
         }
+    }
+}
+
+/// The runner for a session in `workspace`: the unit template of the working
+/// folder it is, or [`Runner::Direct`] when `ALYOSHA_COMMANDS=direct`.
+pub fn runner_for(work_dir: &Path, workspace: &Path) -> Runner {
+    if std::env::var(DIRECT_VARIABLE).as_deref() == Ok("direct") {
+        return Runner::Direct;
+    }
+    match template_for(work_dir, workspace) {
+        Some(template) => Runner::Units {
+            template,
+            runs_dir: PathBuf::from(RUNS_DIR),
+        },
+        None => Runner::Unavailable(format!(
+            "commands run only in Alyosha's working folders under {}",
+            work_dir.display()
+        )),
+    }
+}
+
+/// `alyosha-run-owner` for `<work>/owner`, `alyosha-run-group-<name>` for
+/// `<work>/groups/<name>`, and nothing for any other folder.
+pub fn template_for(work_dir: &Path, workspace: &Path) -> Option<String> {
+    let relative = workspace.strip_prefix(work_dir).ok()?;
+    let parts: Vec<&str> = relative.iter().filter_map(|part| part.to_str()).collect();
+    match parts.as_slice() {
+        ["owner"] => Some("alyosha-run-owner".into()),
+        ["groups", name] if alyosha_config::is_group_name(name) => {
+            Some(format!("alyosha-run-group-{name}"))
+        }
+        _ => None,
     }
 }
 
@@ -134,24 +164,6 @@ fn which(name: &str) -> Option<PathBuf> {
             .map(|dir| dir.join(name))
             .find(|candidate| candidate.is_file())
     })
-}
-
-/// Reads the host's nameservers. Loopback servers cannot be reached from the
-/// sandbox's own loopback, so DNS is forwarded to them.
-pub fn host_dns(resolv_conf: &str) -> Dns {
-    let servers: Vec<&str> = resolv_conf
-        .lines()
-        .filter_map(|line| line.trim().strip_prefix("nameserver"))
-        .map(str::trim)
-        .collect();
-    let loopback = |server: &&str| server.starts_with("127.") || *server == "::1";
-    if servers.iter().any(|server| !loopback(server)) || servers.is_empty() {
-        Dns::Host
-    } else {
-        Dns::Forward {
-            host: servers[0].to_owned(),
-        }
-    }
 }
 
 /// The variables a dev shell may not set.
@@ -251,13 +263,23 @@ pub fn parse_dev_env(json: &[u8]) -> Result<Vec<(String, String)>, String> {
     Ok(variables)
 }
 
-/// What one sandboxed command needs from the session.
+/// What one command needs from the session.
 pub struct ShellLaunch<'a> {
     pub config: &'a SandboxConfig,
     pub workspace: &'a Path,
     /// The working directory, relative to the workspace.
     pub cwd: &'a Path,
     pub skills_root: Option<&'a Path>,
+}
+
+/// What a unit's `alyosha run-exec` reads from its run folder.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandSpec {
+    pub command: String,
+    /// The working directory inside the unit, under `/workspace`.
+    pub cwd: PathBuf,
+    pub env: BTreeMap<String, String>,
+    pub bash: PathBuf,
 }
 
 impl ShellLaunch<'_> {
@@ -295,128 +317,17 @@ impl ShellLaunch<'_> {
         env
     }
 
-    /// The full launch: `pasta`, the status wrapper, then `bwrap`.
-    fn command(
-        &self,
-        programs: &SandboxPrograms,
-        status_file: &Path,
-        shell_command: &str,
-    ) -> std::io::Result<Command> {
-        let config = self.config;
-        DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(&config.cache_dir)?;
-        let mut pasta_args: Vec<String> = [
-            "--config-net",
-            "--quiet",
-            "--no-map-gw",
-            "-t",
-            "none",
-            "-u",
-            "none",
-            "-T",
-            "none",
-            "-U",
-            "none",
-        ]
-        .map(String::from)
-        .to_vec();
-        let mut bwrap_args: Vec<String> = Vec::new();
-        let mut push = |args: &[&str]| bwrap_args.extend(args.iter().map(|arg| (*arg).to_owned()));
-        let uid = rustix::process::getuid().as_raw().to_string();
-        let gid = rustix::process::getgid().as_raw().to_string();
-        push(&[
-            "--unshare-user",
-            "--unshare-pid",
-            "--unshare-ipc",
-            "--new-session",
-            "--die-with-parent",
-        ]);
-        push(&["--uid", &uid, "--gid", &gid]);
-        push(&["--ro-bind", "/nix/store", "/nix/store"]);
-        push(&[
-            "--bind",
-            &self.workspace.display().to_string(),
-            "/workspace",
-        ]);
-        if let Some(skills) = self.skills_root {
-            push(&["--ro-bind", &skills.display().to_string(), "/skills"]);
-        }
-        push(&["--tmpfs", "/tmp", "--dir", "/home/alyosha"]);
-        push(&[
-            "--bind",
-            &config.cache_dir.display().to_string(),
-            "/home/alyosha/.cache",
-        ]);
-        push(&["--dev", "/dev", "--proc", "/proc"]);
-        match &config.dns {
-            Dns::Host => push(&["--ro-bind-try", "/etc/resolv.conf", "/etc/resolv.conf"]),
-            Dns::Forward { host } => {
-                let resolv = config.private_dir.join("resolv.conf");
-                fs::write(&resolv, format!("nameserver {DNS_FORWARD_ADDRESS}\n"))?;
-                pasta_args.extend([
-                    "--dns-forward".into(),
-                    DNS_FORWARD_ADDRESS.into(),
-                    "--dns-host".into(),
-                    host.clone(),
-                ]);
-                push(&[
-                    "--ro-bind",
-                    &resolv.display().to_string(),
-                    "/etc/resolv.conf",
-                ]);
-            }
-        }
-        if let Some(bundle) = &config.ca_bundle {
-            push(&[
-                "--ro-bind",
-                &bundle.display().to_string(),
-                "/etc/ssl/certs/ca-certificates.crt",
-            ]);
-        }
-        let cwd = Path::new("/workspace").join(self.cwd);
-        push(&["--chdir", &cwd.display().to_string(), "--clearenv"]);
-        for (name, value) in self.environment() {
-            push(&["--setenv", &name, &value]);
-        }
-        push(&["--json-status-fd", "3", "--"]);
-        push(&[
-            &programs.bash.display().to_string(),
-            "--noprofile",
-            "--norc",
-            "-c",
-            shell_command,
-        ]);
-
-        let mut command = Command::new(&programs.pasta);
-        command
-            .args(&pasta_args)
-            .arg("--")
-            .arg(&programs.bash)
-            .args([
-                "--noprofile",
-                "--norc",
-                "-c",
-                "exec 3>\"$0\" && exec \"$@\"",
-            ])
-            .arg(status_file)
-            .arg(&programs.bwrap)
-            .args(&bwrap_args)
-            .env_clear()
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .process_group(0)
-            .kill_on_drop(true);
-        // SAFETY: setpriority is async-signal-safe and touches no memory.
-        unsafe {
-            command.pre_exec(|| {
-                rustix::process::setpriority_process(None, 10)?;
-                Ok(())
-            });
-        }
-        Ok(command)
+    fn spec(&self, command: &str) -> Result<CommandSpec, LaunchFailure> {
+        Ok(CommandSpec {
+            command: command.to_owned(),
+            cwd: Path::new("/workspace").join(self.cwd),
+            env: self.environment(),
+            bash: self
+                .config
+                .bash
+                .clone()
+                .ok_or_else(|| LaunchFailure("bash was not found on PATH".into()))?,
+        })
     }
 }
 
@@ -431,8 +342,8 @@ impl OutputSink for Vec<u8> {
     }
 }
 
-/// Runs one command in a fresh sandbox, with a deadline that covers setup.
-/// Stop and the deadline kill the whole sandbox and return the output so far.
+/// Runs one command in a fresh unit, with a deadline that covers its start.
+/// Stop and the deadline stop the whole unit and return the output so far.
 pub async fn run_shell(
     launch: &ShellLaunch<'_>,
     command: &str,
@@ -444,21 +355,13 @@ pub async fn run_shell(
     let output = std::mem::take(&mut *sink.lock().unwrap());
     match status {
         Ok(status) => Ok(CommandOutput { status, output }),
-        Err(LaunchFailure(message)) => {
-            let diagnostic = String::from_utf8_lossy(&output);
-            let last = diagnostic
-                .lines()
-                .rev()
-                .find(|line| !line.trim().is_empty())
-                .unwrap_or(&message);
-            Err(ToolError::failed(format!(
-                "The sandbox could not start: {last}"
-            )))
-        }
+        Err(LaunchFailure(message)) => Err(ToolError::failed(format!(
+            "The sandbox could not start: {message}"
+        ))),
     }
 }
 
-/// The sandbox did not run the command.
+/// The command did not start.
 #[derive(Debug)]
 pub struct LaunchFailure(pub String);
 
@@ -471,25 +374,308 @@ pub async fn run_shell_into<S: OutputSink + ?Sized + 'static>(
     sink: Arc<Mutex<S>>,
 ) -> Result<ShellStatus, LaunchFailure> {
     let deadline = tokio::time::Instant::now() + timeout;
-    let Some(programs) = &launch.config.programs else {
-        return Err(LaunchFailure(
-            "the shell sandbox is unavailable: bwrap, pasta, or bash was not found".into(),
-        ));
-    };
-    DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(&launch.config.private_dir)
-        .map_err(|error| LaunchFailure(error.to_string()))?;
-    let status_file = launch
-        .config
-        .private_dir
-        .join(format!("status-{}.json", super::random_suffix()));
-    let mut child = launch
-        .command(programs, &status_file, command)
-        .and_then(|mut command| command.spawn())
-        .map_err(|error| LaunchFailure(error.to_string()))?;
+    if !launch.workspace.is_dir() {
+        return Err(LaunchFailure(format!(
+            "the workspace {} does not exist",
+            launch.workspace.display()
+        )));
+    }
+    match &launch.config.runner {
+        Runner::Unavailable(reason) => Err(LaunchFailure(reason.clone())),
+        Runner::Units { template, runs_dir } => {
+            let spec = launch.spec(command)?;
+            run_unit(template, runs_dir, &spec, deadline, cancel, sink).await
+        }
+        Runner::Direct => run_direct(launch, command, deadline, cancel, sink).await,
+    }
+}
 
+static RUNS: AtomicU64 = AtomicU64::new(0);
+
+/// A unit's instance name: this process's ID and a counter.
+fn next_instance() -> String {
+    format!(
+        "{}-{}",
+        std::process::id(),
+        RUNS.fetch_add(1, Ordering::Relaxed) + 1
+    )
+}
+
+async fn systemctl(args: &[&str]) -> Result<String, String> {
+    let output = Command::new("systemctl")
+        .arg("--no-ask-password")
+        .args(args)
+        .stdin(Stdio::null())
+        .output()
+        .await
+        .map_err(|error| format!("could not run systemctl: {error}"))?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(stderr
+            .lines()
+            .rev()
+            .find(|line| !line.trim().is_empty())
+            .unwrap_or("systemctl failed")
+            .trim()
+            .to_owned())
+    }
+}
+
+/// The unit's state, from `systemctl show`.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct UnitState {
+    pub active: String,
+    pub sub: String,
+    pub result: String,
+    /// `exited`, `killed`, or `dumped`, as numbers 1, 2, and 3.
+    pub main_code: i32,
+    pub main_status: i32,
+}
+
+impl UnitState {
+    pub fn parse(text: &str) -> Self {
+        let mut state = Self::default();
+        for line in text.lines() {
+            let Some((key, value)) = line.split_once('=') else {
+                continue;
+            };
+            match key {
+                "ActiveState" => state.active = value.to_owned(),
+                "SubState" => state.sub = value.to_owned(),
+                "Result" => state.result = value.to_owned(),
+                "ExecMainCode" => state.main_code = value.parse().unwrap_or_default(),
+                "ExecMainStatus" => state.main_status = value.parse().unwrap_or_default(),
+                _ => {}
+            }
+        }
+        state
+    }
+
+    /// The template keeps a finished unit as `active (exited)` or `failed`,
+    /// so its result can be read.
+    pub fn finished(&self) -> bool {
+        self.active == "failed" || self.sub == "exited" || self.active == "inactive"
+    }
+
+    /// The command's status, as a shell reports it.
+    pub fn status(&self) -> i32 {
+        match self.main_code {
+            2 | 3 => 128 + self.main_status,
+            _ => self.main_status,
+        }
+    }
+}
+
+async fn unit_state(unit: &str) -> Result<UnitState, String> {
+    systemctl(&[
+        "show",
+        "--property=ActiveState,SubState,Result,ExecMainCode,ExecMainStatus",
+        unit,
+    ])
+    .await
+    .map(|text| UnitState::parse(&text))
+}
+
+/// Copies what the unit added to its output file into the sink.
+fn drain<S: OutputSink + ?Sized>(file: &mut File, sink: &Mutex<S>) {
+    let mut buffer = Vec::new();
+    if file.read_to_end(&mut buffer).is_ok() && !buffer.is_empty() {
+        sink.lock().unwrap().write(&buffer);
+    }
+}
+
+async fn run_unit<S: OutputSink + ?Sized + 'static>(
+    template: &str,
+    runs_dir: &Path,
+    spec: &CommandSpec,
+    deadline: tokio::time::Instant,
+    cancel: &CancellationToken,
+    sink: Arc<Mutex<S>>,
+) -> Result<ShellStatus, LaunchFailure> {
+    let instance = next_instance();
+    let unit = format!("{template}@{instance}.service");
+    let folder = runs_dir.join(&instance);
+    let failure = |error: std::io::Error| LaunchFailure(error.to_string());
+    DirBuilder::new()
+        .mode(0o750)
+        .create(&folder)
+        .map_err(failure)?;
+    let cleanup = || {
+        let _ = fs::remove_dir_all(&folder);
+    };
+    let prepared = (|| {
+        fs::write(
+            folder.join("spec.json"),
+            serde_json::to_vec(spec).expect("a spec serializes"),
+        )?;
+        OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .mode(0o640)
+            .open(folder.join("output"))
+    })();
+    if let Err(error) = prepared {
+        cleanup();
+        return Err(failure(error));
+    }
+    if let Err(message) = systemctl(&["start", &unit]).await {
+        let _ = systemctl(&["reset-failed", &unit]).await;
+        cleanup();
+        return Err(LaunchFailure(message));
+    }
+    let mut output = match File::open(folder.join("output")) {
+        Ok(file) => file,
+        Err(error) => {
+            let _ = systemctl(&["stop", &unit]).await;
+            cleanup();
+            return Err(failure(error));
+        }
+    };
+    let mut interval = Duration::from_millis(10);
+    let ended = loop {
+        drain(&mut output, &sink);
+        match unit_state(&unit).await {
+            Ok(state) if state.finished() => break Ok(state),
+            Ok(_) => {}
+            Err(message) => break Err(message),
+        }
+        tokio::select! {
+            () = tokio::time::sleep(interval) => {}
+            () = tokio::time::sleep_until(deadline) => {
+                let _ = systemctl(&["stop", &unit]).await;
+                drain(&mut output, &sink);
+                let _ = systemctl(&["reset-failed", &unit]).await;
+                cleanup();
+                return Ok(ShellStatus::TimedOut);
+            }
+            () = cancel.cancelled() => {
+                let _ = systemctl(&["stop", &unit]).await;
+                drain(&mut output, &sink);
+                let _ = systemctl(&["reset-failed", &unit]).await;
+                cleanup();
+                return Ok(ShellStatus::Stopped);
+            }
+        }
+        interval = (interval * 2).min(Duration::from_millis(200));
+    };
+    drain(&mut output, &sink);
+    let _ = systemctl(&["stop", &unit]).await;
+    let _ = systemctl(&["reset-failed", &unit]).await;
+    cleanup();
+    let state = ended.map_err(LaunchFailure)?;
+    if state.result == "oom-kill" {
+        sink.lock()
+            .unwrap()
+            .write(b"\n[The command was stopped: it passed its memory limit.]\n");
+        return Ok(ShellStatus::Exited(137));
+    }
+    if state.main_code == 0 {
+        return Err(LaunchFailure(format!(
+            "the unit ended before the command started ({})",
+            state.result
+        )));
+    }
+    Ok(ShellStatus::Exited(state.status()))
+}
+
+/// Inside a unit: reads the run folder's description and replaces this process
+/// with the command. Returns only on failure.
+pub fn run_exec(runs_dir: &Path, instance: &str) -> std::io::Error {
+    use std::os::unix::process::CommandExt;
+    if instance.contains('/') || instance.starts_with('.') {
+        return std::io::Error::other(format!("{instance:?} is not a run"));
+    }
+    let spec: CommandSpec = match fs::read(runs_dir.join(instance).join("spec.json"))
+        .and_then(|bytes| serde_json::from_slice(&bytes).map_err(std::io::Error::other))
+    {
+        Ok(spec) => spec,
+        Err(error) => return error,
+    };
+    std::process::Command::new(&spec.bash)
+        .args(["--noprofile", "--norc", "-c", &spec.command])
+        .current_dir(&spec.cwd)
+        .env_clear()
+        .envs(&spec.env)
+        .exec()
+}
+
+/// Stops the units and removes the run folders of `alyosha acp` processes that
+/// no longer run, such as one that crashed with a job running.
+pub async fn stop_leftover_units(runs_dir: &Path) {
+    let alive = |instance: &str| {
+        instance
+            .split('-')
+            .next()
+            .is_some_and(|pid| Path::new("/proc").join(pid).exists())
+    };
+    if let Ok(list) = systemctl(&[
+        "list-units",
+        "--all",
+        "--plain",
+        "--no-legend",
+        "--no-pager",
+        "alyosha-run-*@*.service",
+    ])
+    .await
+    {
+        for unit in list
+            .lines()
+            .filter_map(|line| line.split_whitespace().next())
+        {
+            let instance = unit
+                .split_once('@')
+                .map(|(_, rest)| rest.trim_end_matches(".service"))
+                .unwrap_or_default();
+            if !alive(instance) {
+                tracing::info!(unit, "stopping a leftover command unit");
+                let _ = systemctl(&["stop", unit]).await;
+                let _ = systemctl(&["reset-failed", unit]).await;
+            }
+        }
+    }
+    for entry in fs::read_dir(runs_dir).into_iter().flatten().flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !alive(&name) {
+            let _ = fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
+/// [`Runner::Direct`]: Bash as a plain child process in the workspace, in a
+/// process group of its own that the deadline and Stop kill.
+async fn run_direct<S: OutputSink + ?Sized + 'static>(
+    launch: &ShellLaunch<'_>,
+    command: &str,
+    deadline: tokio::time::Instant,
+    cancel: &CancellationToken,
+    sink: Arc<Mutex<S>>,
+) -> Result<ShellStatus, LaunchFailure> {
+    let bash = launch
+        .config
+        .bash
+        .clone()
+        .ok_or_else(|| LaunchFailure("bash was not found on PATH".into()))?;
+    let mut env = launch.environment();
+    env.insert("HOME".into(), launch.workspace.display().to_string());
+    env.insert("TMPDIR".into(), std::env::temp_dir().display().to_string());
+    for name in ["XDG_CACHE_HOME", "CARGO_HOME", "npm_config_cache"] {
+        env.remove(name);
+    }
+    let mut child = Command::new(bash)
+        .args(["--noprofile", "--norc", "-c", command])
+        .current_dir(launch.workspace.join(launch.cwd))
+        .env_clear()
+        .envs(&env)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0)
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|error| LaunchFailure(error.to_string()))?;
     let mut readers = Vec::new();
     for mut stream in [
         child
@@ -515,60 +701,37 @@ pub async fn run_shell_into<S: OutputSink + ?Sized + 'static>(
             }
         }));
     }
-
     let pid = child.id();
-    let ended = tokio::select! {
-        status = child.wait() => {
-            status.map_err(|error| LaunchFailure(error.to_string()))?;
-            None
-        }
-        () = tokio::time::sleep_until(deadline) => Some(ShellStatus::TimedOut),
-        () = cancel.cancelled() => Some(ShellStatus::Stopped),
+    let (status, ended) = tokio::select! {
+        status = child.wait() => (Some(status.map_err(|error| LaunchFailure(error.to_string()))?), None),
+        () = tokio::time::sleep_until(deadline) => (None, Some(ShellStatus::TimedOut)),
+        () = cancel.cancelled() => (None, Some(ShellStatus::Stopped)),
     };
+    if let Some(pid) = pid.and_then(|pid| rustix::process::Pid::from_raw(pid as i32)) {
+        let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+    }
     if ended.is_some() {
-        if let Some(pid) = pid.and_then(|pid| rustix::process::Pid::from_raw(pid as i32)) {
-            let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
-        }
         let _ = child.wait().await;
     }
-    // The sandbox's processes are gone, so the pipes close; don't wait forever
-    // on a descriptor something else still holds.
     for reader in readers {
         let _ = tokio::time::timeout(Duration::from_secs(2), reader).await;
     }
-    let record = fs::read_to_string(&status_file).unwrap_or_default();
-    let _ = fs::remove_file(&status_file);
-    if let Some(status) = ended {
-        return Ok(status);
+    if let Some(ended) = ended {
+        return Ok(ended);
     }
-    exit_code(&record)
-        .map(ShellStatus::Exited)
-        .ok_or_else(|| LaunchFailure("no message".into()))
-}
-
-/// The command's exit code from Bubblewrap's status records.
-fn exit_code(records: &str) -> Option<i32> {
-    records.lines().find_map(|line| {
-        let value: serde_json::Value = serde_json::from_str(line).ok()?;
-        value["exit-code"].as_i64().map(|code| code as i32)
-    })
+    use std::os::unix::process::ExitStatusExt;
+    let status = status.expect("set when the child exited");
+    Ok(ShellStatus::Exited(
+        status
+            .code()
+            .or_else(|| status.signal().map(|signal| 128 + signal))
+            .unwrap_or(1),
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn dns_is_forwarded_only_for_loopback_resolvers() {
-        assert!(
-            matches!(host_dns("nameserver 127.0.0.53\noptions edns0\n"), Dns::Forward { host } if host == "127.0.0.53")
-        );
-        assert!(matches!(
-            host_dns("nameserver 10.0.0.1\nnameserver 127.0.0.1\n"),
-            Dns::Host
-        ));
-        assert!(matches!(host_dns(""), Dns::Host));
-    }
 
     #[test]
     fn nix_errors_keep_the_error_line_and_its_hint() {
@@ -608,12 +771,13 @@ mod tests {
                 ("PATH".into(), "/nix/store/x-cargo/bin".into()),
                 ("CARGO_HOME".into(), "/custom".into()),
             ],
+            ca_bundle: Some("/nix/store/c-ca/ca.crt".into()),
             ..SandboxConfig::default()
         };
         let launch = ShellLaunch {
             config: &config,
             workspace: Path::new("/w"),
-            cwd: Path::new(""),
+            cwd: Path::new("sub"),
             skills_root: None,
         };
         let env = launch.environment();
@@ -623,16 +787,55 @@ mod tests {
         );
         assert_eq!(env["CARGO_HOME"], "/custom", "the dev shell's value wins");
         assert_eq!(env["XDG_CACHE_HOME"], "/home/alyosha/.cache");
+        assert_eq!(env["SSL_CERT_FILE"], "/nix/store/c-ca/ca.crt");
         assert_eq!(env["HOME"], "/home/alyosha");
         assert_eq!(env["TMPDIR"], "/tmp");
+        let with_bash = SandboxConfig {
+            bash: Some("/nix/store/b-bash/bin/bash".into()),
+            ..config.clone()
+        };
+        let launch = ShellLaunch {
+            config: &with_bash,
+            workspace: Path::new("/w"),
+            cwd: Path::new("sub"),
+            skills_root: None,
+        };
+        assert_eq!(launch.spec("ls").unwrap().cwd, Path::new("/workspace/sub"));
     }
 
     #[test]
-    fn exit_codes_come_from_the_status_records() {
+    fn each_working_folder_has_its_template() {
+        let work = Path::new("/var/lib/alyosha/work");
         assert_eq!(
-            exit_code("{\"child-pid\": 2}\n{ \"exit-code\": 7 }\n"),
-            Some(7)
+            template_for(work, &work.join("owner")).as_deref(),
+            Some("alyosha-run-owner")
         );
-        assert_eq!(exit_code("{\"child-pid\": 2}\n"), None);
+        assert_eq!(
+            template_for(work, &work.join("groups/friends")).as_deref(),
+            Some("alyosha-run-group-friends")
+        );
+        for other in ["guest", "groups/Bad Name", "owner/sub", "elsewhere"] {
+            assert_eq!(template_for(work, &work.join(other)), None, "{other}");
+        }
+        assert_eq!(template_for(work, Path::new("/tmp/x")), None);
+    }
+
+    #[test]
+    fn unit_states_give_the_shell_status() {
+        let state = UnitState::parse(
+            "ActiveState=failed\nSubState=failed\nResult=exit-code\nExecMainCode=1\nExecMainStatus=7\n",
+        );
+        assert!(state.finished());
+        assert_eq!(state.status(), 7);
+        let state = UnitState::parse(
+            "ActiveState=failed\nSubState=failed\nResult=signal\nExecMainCode=2\nExecMainStatus=15\n",
+        );
+        assert_eq!(state.status(), 143);
+        let running = UnitState::parse("ActiveState=active\nSubState=running\nExecMainCode=0\n");
+        assert!(!running.finished());
+        let done = UnitState::parse(
+            "ActiveState=active\nSubState=exited\nResult=success\nExecMainCode=1\nExecMainStatus=0\n",
+        );
+        assert!(done.finished() && done.status() == 0);
     }
 }

@@ -15,7 +15,7 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let config = match alyosha_config::load_from(&paths.config_file()) {
+    let config = match alyosha_config::load_from(&paths.config_file) {
         Ok(config) => config,
         Err(error) => {
             eprintln!("alyosha-qq: {error}");
@@ -24,12 +24,24 @@ fn main() -> ExitCode {
     };
     let Some(qq) = config.qq.clone() else {
         eprintln!(
-            "alyosha-qq: {} has no [qq] section with app_id, secret, and workspace.",
-            paths.config_file().display()
+            "alyosha-qq: {} has no [qq] section with app_id.",
+            paths.config_file.display()
         );
         return ExitCode::from(2);
     };
-    let _ = alyosha_config::logging::init("alyosha-qq", config.timezone, &paths);
+    let secret = match paths.secrets().read(alyosha_config::QQ_SECRET) {
+        Ok(secret) => secret,
+        Err(error) => {
+            eprintln!("alyosha-qq: {error}");
+            return ExitCode::from(2);
+        }
+    };
+    let workspace = paths.owner_work();
+    if let Err(error) = std::fs::create_dir_all(&workspace) {
+        eprintln!("alyosha-qq: cannot create {}: {error}", workspace.display());
+        return ExitCode::from(2);
+    }
+    let _ = alyosha_config::logging::init("alyosha-qq", config.timezone);
     if qq.owner_openid.is_empty() {
         tracing_note();
     }
@@ -43,7 +55,7 @@ fn main() -> ExitCode {
             &api_base,
             &token_url,
             &qq.app_id,
-            qq.secret.expose(),
+            secret.expose(),
         ));
         if let Err(error) = api.token().await {
             eprintln!("alyosha-qq: {error}");
@@ -61,9 +73,10 @@ fn main() -> ExitCode {
         let gateway = tokio::spawn(async move { listen(gateway_api, messages_sender).await });
         let settings = Settings {
             owner_openid: qq.owner_openid,
-            workspace: qq.workspace,
+            workspace,
+            work_dir: paths.work_dir(),
             reply_chunk: qq.reply_chunk as usize,
-            schedule: Schedule::new(&paths.data_dir),
+            schedule: Schedule::new(&paths.state_dir),
             timezone: config.timezone,
             groups: GroupSpawners {
                 guest: Some(Arc::new(|| {
@@ -72,7 +85,11 @@ fn main() -> ExitCode {
                 trusted: Some(Arc::new(|| {
                     Bridge::spawn_with(std::path::Path::new("alyosha"), &["acp", "--group"])
                 })),
-                trusted_groups: qq.trusted_groups.iter().cloned().collect(),
+                trusted_groups: qq
+                    .trusted_groups
+                    .iter()
+                    .map(|(name, id)| (id.clone(), name.clone()))
+                    .collect(),
             },
         };
         tokio::select! {

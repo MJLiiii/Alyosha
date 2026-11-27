@@ -316,12 +316,13 @@ async fn start() -> Harness {
     let settings = Settings {
         owner_id: OWNER,
         workspace: root.path().to_owned(),
+        work_dir: root.path().to_owned(),
         schedule: Schedule::new(root.path()),
         timezone: chrono_tz::Europe::Amsterdam,
         groups: alyosha_bridge::guests::GroupSpawners {
             guest: Some(spawner(guests.clone())),
             trusted: Some(spawner(trusted.clone())),
-            trusted_groups: [TRUSTED.to_string()].into(),
+            trusted_groups: [(TRUSTED.to_string(), "friends".to_string())].into(),
         },
     };
     let task = tokio::spawn(run(Api::new(&url, "TOKEN"), bridge, events, settings));
@@ -612,11 +613,7 @@ async fn trusted_groups_get_a_full_session_that_asks_the_owner() {
         .find(|message| message["method"] == "session/new")
         .cloned()
         .unwrap();
-    let folder = harness
-        ._root
-        .path()
-        .join("groups")
-        .join(TRUSTED.to_string());
+    let folder = harness._root.path().join("groups").join("friends");
     assert_eq!(new["params"]["cwd"], folder.display().to_string());
     assert!(folder.is_dir());
     let prompt = trusted
@@ -636,8 +633,7 @@ async fn trusted_groups_get_a_full_session_that_asks_the_owner() {
     wait_for(|| {
         api.calls("sendMessage").iter().any(|body| {
             body["chat_id"] == OWNER
-                && body["text"]
-                    == format!("In group {TRUSTED}:\n\nApprove? google.send\n\nto: anna")
+                && body["text"] == "In group friends:\n\nApprove? google.send\n\nto: anna"
         })
     })
     .await;

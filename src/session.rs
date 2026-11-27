@@ -22,14 +22,11 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     BoxFuture,
-    agent_loop::{
-        DEFAULT_INSTRUCTION, Persistence, SessionDriver, SessionEvent, SessionSetup,
-    },
+    agent_loop::{DEFAULT_INSTRUCTION, Persistence, SessionDriver, SessionEvent, SessionSetup},
     approvals::{self, Approver},
     clock::{Clock, SystemClock},
     context_manager::RouteLimits,
     environment::{Environment, SessionLogs, shell},
-    gateway_admin::GatewayFiles,
     jobs::{self, JobEnvironment},
     llm_client::{GatewayClient, ModelClient, ModelError, ModelReply, ModelRequest, Timeouts},
     mcp::McpManager,
@@ -53,8 +50,8 @@ pub struct FrontEnd {
     pub approver: Option<Arc<dyn Approver>>,
     /// In ACP mode, the line naming the chat bridge.
     pub channel_line: Option<String>,
-    /// The log file that startup warnings name.
-    pub log_file: Option<PathBuf>,
+    /// Where startup warnings say the details are.
+    pub log_hint: Option<&'static str>,
     /// Shows **Loading dev shell…** while the dev shell loads.
     pub on_loading_dev_shell: Option<Box<dyn Fn(bool) + Send + Sync>>,
     /// Where the session's history is saved. Without it, history lives
@@ -164,14 +161,14 @@ impl ModelClient for NotSignedIn {
     }
 }
 
-/// The client every session uses: GPROXY with the gateway key from
-/// `gproxy.env`. Sessions never sign in.
+/// The client every session uses: GPROXY with the secret `gateway-key`.
+/// Sessions never sign in.
 pub fn model_client(config: &Config, paths: &Paths) -> Arc<dyn ModelClient> {
-    match GatewayFiles::new(paths).gateway_key() {
-        Ok(Some(key)) => Arc::new(
+    match paths.secrets().read(alyosha_config::GATEWAY_KEY) {
+        Ok(key) => Arc::new(
             GatewayClient::new(
                 &config.gateway.url,
-                &key,
+                key.expose(),
                 config.model.api,
                 Timeouts::default(),
             )
@@ -211,26 +208,26 @@ pub async fn start_with_clock(
     let workspace = resolve_workspace(workspace)?;
     let mut warnings = Vec::new();
     let details = front_end
-        .log_file
-        .as_ref()
-        .map(|path| format!(", details in {}", path.display()))
+        .log_hint
+        .map(|hint| format!(", details in {hint}"))
         .unwrap_or_default();
 
-    // Private per-session folders: logs, status files, the generated resolv.conf.
-    let session_dir = paths.data_dir.join("sessions").join(format!(
+    // The session's private folder holds its logs.
+    let sessions = paths.cache_dir.join("sessions");
+    remove_stale_session_folders(&sessions);
+    let session_dir = sessions.join(format!(
         "{}-{}",
         std::process::id(),
         crate::environment::random_suffix()
     ));
     let logs = Arc::new(SessionLogs::new(session_dir.join("logs")));
-    let mut sandbox = shell::SandboxConfig::discover(
-        paths.data_dir.join("shell-cache"),
-        session_dir.join("private"),
-    );
-    if sandbox.programs.is_none() {
-        warnings.push(format!(
-            "The shell sandbox is unavailable: bwrap, pasta, or bash was not found{details}"
-        ));
+    let work_dir = paths
+        .work_dir()
+        .canonicalize()
+        .unwrap_or_else(|_| paths.work_dir());
+    let mut sandbox = shell::SandboxConfig::discover(shell::runner_for(&work_dir, &workspace));
+    if let shell::Runner::Unavailable(reason) = &sandbox.runner {
+        warnings.push(format!("Shell commands are unavailable: {reason}"));
     }
     if workspace.join("flake.nix").is_file() {
         if let Some(loading) = &front_end.on_loading_dev_shell {
@@ -247,7 +244,7 @@ pub async fn start_with_clock(
         }
     }
 
-    let skills_root = paths.config_dir.join("skills");
+    let skills_root = paths.skills_dir();
     let environment = Environment::new(
         &workspace,
         Some(skills_root.clone()),
@@ -256,7 +253,7 @@ pub async fn start_with_clock(
     )?;
     let timezone = config.timezone;
     let memory = MemoryStore::open(
-        &paths.data_dir.join("memory"),
+        &paths.state_dir.join("memory"),
         "owner",
         Arc::new(move || Utc::now().with_timezone(&timezone).date_naive()),
     );
@@ -278,7 +275,7 @@ pub async fn start_with_clock(
         ));
     }
 
-    let (mcp, mcp_warnings) = McpManager::start(&config.mcp, &workspace).await;
+    let (mcp, mcp_warnings) = McpManager::start(&config.mcp, &workspace, &paths.secrets()).await;
     let mut registry = ToolRegistry::new();
     registry.register(read_file_tool())?;
     registry.register(write_file_tool())?;
@@ -311,7 +308,7 @@ pub async fn start_with_clock(
     let system_instruction =
         normal_instruction(&memory, &skills, front_end.channel_line.as_deref());
     let rebuild_instruction: Arc<dyn Fn() -> String + Send + Sync> = {
-        let memory_dir = paths.data_dir.join("memory");
+        let memory_dir = paths.state_dir.join("memory");
         let skills_root = skills_root.clone();
         let channel_line = front_end.channel_line.clone();
         Arc::new(move || {
@@ -379,7 +376,7 @@ pub async fn start_with_clock(
 
 /// Opens a guest session for a group chat: only `user_memory` and the MCP
 /// servers `[guest]` lists, no workspace, sandbox, memory index, skills,
-/// jobs, or approver. Its MCP servers run in `<data>/guest`.
+/// jobs, or approver. Its MCP servers run in the guest working folder.
 /// See `docs/Channels.md#guest-mode`.
 pub async fn start_guest(
     config: &Config,
@@ -389,14 +386,14 @@ pub async fn start_guest(
     clock: Arc<dyn Clock>,
     persistence: Option<Persistence>,
 ) -> Result<Started, StartupError> {
-    let folder = paths.data_dir.join("guest");
+    let folder = paths.guest_work();
     std::fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
         .create(&folder)?;
     let mut warnings = Vec::new();
     let servers = config.mcp.only(&config.guest.mcp_servers);
-    let (mcp, mcp_warnings) = McpManager::start(&servers, &folder).await;
+    let (mcp, mcp_warnings) = McpManager::start(&servers, &folder, &paths.secrets()).await;
     let mut registry = ToolRegistry::new();
     registry.register(user_memory_tool())?;
     let mut problems = mcp_warnings;
@@ -425,7 +422,7 @@ pub async fn start_guest(
     let services = SessionServices {
         mcp: Some(mcp),
         users: Some(UserNotes::open(
-            &paths.data_dir.join("memory"),
+            &paths.state_dir.join("memory"),
             Arc::new(move || Utc::now().with_timezone(&timezone).date_naive()),
         )),
         ..SessionServices::default()
@@ -455,4 +452,22 @@ pub async fn start_guest(
         model: config.model.name.clone(),
         warnings,
     })
+}
+
+/// Removes the private folders of processes that no longer run, which a crash
+/// left behind. Each folder is named `<process ID>-<random>`.
+pub fn remove_stale_session_folders(sessions: &Path) {
+    for entry in std::fs::read_dir(sessions).into_iter().flatten().flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(pid) = name
+            .split('-')
+            .next()
+            .filter(|pid| pid.parse::<u32>().is_ok())
+        else {
+            continue;
+        };
+        if !Path::new("/proc").join(pid).exists() {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
 }

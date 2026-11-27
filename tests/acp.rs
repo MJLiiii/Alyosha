@@ -55,11 +55,7 @@ impl Client {
     async fn start_as(model: Arc<ScriptedModel>, mode: Mode) -> Self {
         let root = tempfile::tempdir().unwrap();
         let base = root.path().canonicalize().unwrap();
-        let paths = Paths::new(
-            &base,
-            Some(base.join("config").as_os_str()),
-            Some(base.join("data").as_os_str()),
-        );
+        let paths = Paths::under(&base);
         let workspace = base.join("Projects/ws");
         fs::create_dir_all(&workspace).unwrap();
         fs::write(workspace.join("a.txt"), "alpha").unwrap();
@@ -203,7 +199,7 @@ fn spawn_server(
             model.clone() as Arc<dyn alyosha::llm_client::ModelClient>
         }),
         clock: clock.clone(),
-        log_file: None,
+        log_hint: None,
         store: store.clone() as Arc<dyn SessionStore>,
         mode,
     };
@@ -386,7 +382,7 @@ async fn guest_sessions_keep_notes_for_each_sender_only() {
         .path()
         .canonicalize()
         .unwrap()
-        .join("data/alyosha/memory/users");
+        .join("state/memory/users");
     let bob = fs::read_to_string(users.join("telegram-1.md")).unwrap();
     assert!(
         bob.starts_with("---\nname: Bob\n") && bob.ends_with("Likes tea."),
@@ -412,7 +408,7 @@ async fn a_turn_reports_tool_calls_then_the_reply() {
     // A startup warning, such as a missing sandbox here, comes before the reply.
     let shown: Vec<String> = updates(&messages)
         .into_iter()
-        .filter(|update| !update.contains("sandbox is unavailable"))
+        .filter(|update| !update.contains("commands are unavailable"))
         .collect();
     assert_eq!(
         shown,

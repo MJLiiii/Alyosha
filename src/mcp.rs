@@ -18,7 +18,7 @@ use std::{
     time::Duration,
 };
 
-use alyosha_config::{McpConfig, McpServerConfig};
+use alyosha_config::{McpConfig, McpServerConfig, Secrets};
 use serde_json::{Value, json};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
@@ -77,10 +77,17 @@ impl std::fmt::Debug for McpManager {
 impl McpManager {
     /// Starts every server concurrently. A server that fails to start, or a
     /// tool that cannot be registered, is a warning.
-    pub async fn start(config: &McpConfig, workspace: &Path) -> (Self, Vec<String>) {
+    pub async fn start(
+        config: &McpConfig,
+        workspace: &Path,
+        secrets: &Secrets,
+    ) -> (Self, Vec<String>) {
         let starts = config.servers.iter().map(|(name, server)| async move {
-            let result =
-                tokio::time::timeout(STARTUP_LIMIT, start_server(name, server, workspace)).await;
+            let result = tokio::time::timeout(
+                STARTUP_LIMIT,
+                start_server(name, server, workspace, secrets),
+            )
+            .await;
             (name, server, result)
         });
         let mut manager = Self::default();
@@ -204,30 +211,44 @@ impl McpManager {
     }
 }
 
-/// The environment a server gets: `PATH`, `HOME`, and the XDG folders when
-/// set, plus its configured `env`.
-fn server_environment(config: &McpServerConfig) -> BTreeMap<String, String> {
+/// The environment a server gets: `PATH`, `HOME`, Alyosha's path variables
+/// and the XDG folders when set, its configured `env`, and the secrets its
+/// `secret_env` names. A secret that is not set keeps the server from
+/// starting.
+fn server_environment(
+    config: &McpServerConfig,
+    secrets: &Secrets,
+) -> Result<BTreeMap<String, String>, String> {
     let mut env = BTreeMap::new();
-    for name in ["PATH", "HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME"] {
+    let inherited = ["PATH", "HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME"]
+        .into_iter()
+        .chain(alyosha_config::PATH_VARIABLES);
+    for name in inherited {
         if let Ok(value) = std::env::var(name) {
             env.insert(name.to_owned(), value);
         }
     }
     for (name, value) in &config.env {
+        env.insert(name.clone(), value.clone());
+    }
+    for (name, secret) in &config.secret_env {
+        let value = secrets.read(secret).map_err(|error| error.to_string())?;
         env.insert(name.clone(), value.expose().to_owned());
     }
-    env
+    Ok(env)
 }
 
 async fn start_server(
     name: &str,
     config: &McpServerConfig,
     workspace: &Path,
+    secrets: &Secrets,
 ) -> Result<(Arc<Server>, Vec<Value>), String> {
+    let env = server_environment(config, secrets)?;
     let mut child = Command::new(&config.command)
         .args(&config.args)
         .env_clear()
-        .envs(server_environment(config))
+        .envs(env)
         .current_dir(workspace)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

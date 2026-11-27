@@ -200,7 +200,10 @@ impl Api {
 /// The bridge's settings, from `[telegram]`.
 pub struct Settings {
     pub owner_id: i64,
+    /// The owner's working folder.
     pub workspace: PathBuf,
+    /// Alyosha's working folders, where groups' folders are.
+    pub work_dir: PathBuf,
     pub schedule: Schedule,
     pub timezone: Tz,
     /// Starts groups' sessions, and names the trusted groups.
@@ -406,7 +409,7 @@ pub async fn run(
     let (mut pool, mut guest_events) = GuestPool::new(
         settings.groups.clone(),
         "alyosha-telegram",
-        settings.workspace.clone(),
+        settings.work_dir.clone(),
     );
     // Each open group prompt's chat and the message it answers, if any.
     let mut group_replies: HashMap<String, (i64, Option<i64>)> = HashMap::new();
@@ -609,7 +612,7 @@ pub async fn run(
                         let number = next_request;
                         next_request += 1;
                         let request = permission.request;
-                        match ask_owner(&api, chat, number, Some(&group), permission).await {
+                        match ask_owner(&api, chat, number, Some((&group, pool.name(&group))), permission).await {
                             Some(open) => { requests.insert(number, open); }
                             None => if let Some(asker) = pool.bridge(&group) { asker.answer(request, None); },
                         }
@@ -667,7 +670,7 @@ async fn ask_owner(
     api: &Api,
     chat: i64,
     number: u32,
-    group: Option<&str>,
+    group: Option<(&str, &str)>,
     permission: Permission,
 ) -> Option<OpenRequest> {
     let mut text = if permission.body.is_empty() {
@@ -675,9 +678,10 @@ async fn ask_owner(
     } else {
         format!("{}\n\n{}", permission.title, permission.body)
     };
-    if let Some(group) = group {
-        text = format!("In group {group}:\n\n{text}");
+    if let Some((_, name)) = group {
+        text = format!("In group {name}:\n\n{text}");
     }
+    let group = group.map(|(id, _)| id);
     let rows: Vec<Value> = permission
         .options
         .iter()

@@ -8,7 +8,7 @@
 
 use std::{
     collections::{HashMap, VecDeque},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         Arc, Mutex, PoisonError,
         atomic::{AtomicU64, Ordering},
@@ -50,8 +50,8 @@ pub struct ServeOptions {
     /// The client for a session.
     pub model: ModelFactory,
     pub clock: Arc<dyn Clock>,
-    /// The log file that startup warnings name.
-    pub log_file: Option<PathBuf>,
+    /// Where startup warnings say the details are.
+    pub log_hint: Option<&'static str>,
     /// Where sessions are saved and found again.
     pub store: Arc<dyn SessionStore>,
     /// Whose session this process serves.
@@ -574,7 +574,7 @@ impl Agent {
                     open_requests: self.open_requests.clone(),
                 })),
                 channel_line: self.channel_line(),
-                log_file: self.options.log_file.clone(),
+                log_hint: self.options.log_hint,
                 on_loading_dev_shell: None,
                 persistence: Some(persistence),
             },
@@ -769,7 +769,7 @@ pub fn run(mode: Mode) -> u8 {
             return 2;
         }
     };
-    let config = match alyosha_config::load_from(&paths.config_file()) {
+    let config = match alyosha_config::load_from(&paths.config_file) {
         Ok(config) => config,
         Err(error) => {
             eprintln!("alyosha acp: {error}");
@@ -781,8 +781,15 @@ pub fn run(mode: Mode) -> u8 {
         Mode::Guest => "alyosha-acp-guest",
         Mode::Group => "alyosha-acp-group",
     };
-    let log_file = alyosha_config::logging::init(program, config.timezone, &paths).ok();
+    let log_hint = alyosha_config::logging::init(program, config.timezone)
+        .ok()
+        .map(alyosha_config::logging::LogTarget::hint);
     let runtime = tokio::runtime::Runtime::new().expect("a Tokio runtime starts");
+    if std::env::var(crate::environment::shell::DIRECT_VARIABLE).as_deref() != Ok("direct") {
+        runtime.block_on(crate::environment::shell::stop_leftover_units(Path::new(
+            crate::environment::shell::RUNS_DIR,
+        )));
+    }
     let store = match runtime.block_on(PgStore::connect_default()) {
         Ok(store) => store,
         Err(error) => {
@@ -795,15 +802,14 @@ pub fn run(mode: Mode) -> u8 {
     let options = ServeOptions {
         paths: paths.clone(),
         load_config: Arc::new(move || {
-            alyosha_config::load_from(&config_paths.config_file())
-                .map_err(|error| error.to_string())
+            alyosha_config::load_from(&config_paths.config_file).map_err(|error| error.to_string())
         }),
         model: {
             let paths = paths.clone();
             Arc::new(move |config: &Config| session::model_client(config, &paths))
         },
         clock: Arc::new(crate::clock::SystemClock),
-        log_file,
+        log_hint,
         store,
         mode,
     };

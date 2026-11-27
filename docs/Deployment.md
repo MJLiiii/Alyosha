@@ -66,7 +66,7 @@ On the host, `alyosha` is a small program of the flake's module that manages the
 
 | Command | What it does |
 | --- | --- |
-| `alyosha status` | The container, each service, the last backup, and whether the provider sign-in still works |
+| `alyosha status` | The container's services, the loopback rule, the secrets that are set, and the last backup |
 | `alyosha logs [telegram\|qq\|gproxy\|db] [-f]` | The service's journal, as `journalctl -M alyosha -u …` |
 | `alyosha secret set <name>` | Reads a secret from the terminal without echo, or from standard input, writes it with the right owner and mode, and restarts the services that use it |
 | `alyosha secret list` | The names of the secrets that are set, never their values |
@@ -75,7 +75,7 @@ On the host, `alyosha` is a small program of the flake's module that manages the
 | `alyosha backup now` · `alyosha backup list` · `alyosha backup restore <file>` | Start a dump, list dumps, restore one into an emptied database |
 | `alyosha memory list` | Your memories' names, dates, and descriptions, read-only |
 | `alyosha shell` | A shell as `alyosha` in its state folder, to look at the working folders |
-| `alyosha check` | The container checks from [Verification](#verification) that need no model account |
+| `alyosha check` | Runs `alyosha check-units` in the container as `alyosha`: the command-unit checks from [Verification](#verification) that need no model account |
 | `alyosha commands --json` | Every command with its arguments, for scripts and coding agents |
 
 ## Network
@@ -151,7 +151,7 @@ services.alyosha = {
 | Piece | Setting |
 | --- | --- |
 | Users | `alyosha` (home `/var/lib/alyosha`), `alyosha-run`, and `gproxy`, all system users without a login shell. The group `alyosha-work` holds `alyosha` and `alyosha-run`. |
-| Folders | tmpfiles rules create `/var/lib/alyosha-secrets` (root:alyosha, `0750`), `/var/lib/alyosha/work/owner` and `work/groups/<name>` for each trusted group (alyosha-run:alyosha-work, `2770`, with a default ACL giving the group read and write), `work/guest` (alyosha, `0700`), `/var/cache/alyosha/shell` (alyosha-run, `0700`), `/var/cache/alyosha/sessions` (alyosha, `0700`), and `/run/alyosha-run` (alyosha:alyosha-work, `0750`). |
+| Folders | tmpfiles rules create `/var/lib/alyosha-secrets` (root:alyosha, `0750`), `/var/lib/alyosha/work/owner` and `work/groups/<name>` for each trusted group (alyosha-run:alyosha-work, `2770`; the bridges and the command units run with `UMask=0007`, so new files stay group-writable), `work/guest` (alyosha, `0700`), `/var/cache/alyosha/shell` (alyosha-run, `0700`), `/var/cache/alyosha/sessions` (alyosha, `0700`), and `/run/alyosha-run` (alyosha:alyosha-work, `0750`). |
 | `gproxy.service` | `User=gproxy`, `StateDirectory=gproxy`, `EnvironmentFile=/var/lib/alyosha-secrets/gproxy.env`, which systemd reads as root. Skipped until the file exists. [Run GPROXY as a service](LLMClientGateway.md#run-gproxy-as-a-service) |
 | PostgreSQL | As in [Durable sessions](SessionStore.md#container), with the role and database owner `alyosha`. |
 | The bridges | `alyosha-telegram.service` and `alyosha-qq.service`, `User=alyosha`, standard output and error to the journal. They require the database and start after GPROXY. |
@@ -171,6 +171,8 @@ Slice=alyosha-run.slice
 ExecStart=/run/current-system/sw/bin/alyosha run-exec %i
 StandardOutput=truncate:/run/alyosha-run/%i/output
 StandardError=inherit
+# Keep a finished unit, so its result can be read.
+RemainAfterExit=yes
 WorkingDirectory=/workspace
 BindPaths=/var/lib/alyosha/work/owner:/workspace
 BindPaths=/var/cache/alyosha/shell:/home/alyosha/.cache
@@ -182,7 +184,6 @@ PrivatePIDs=yes
 PrivateTmp=yes
 PrivateIPC=yes
 ProtectSystem=strict
-ProtectHome=no
 NoNewPrivileges=yes
 RestrictNamespaces=yes
 RestrictSUIDSGID=yes
@@ -192,6 +193,7 @@ MemorySwapMax=0
 TasksMax=4096
 RuntimeMaxSec=24h
 Nice=10
+UMask=0007
 KillMode=control-group
 ```
 

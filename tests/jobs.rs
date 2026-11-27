@@ -1,6 +1,7 @@
-//! Background jobs and `run_command` in a real session with the real sandbox.
-//! They need `bwrap`, `pasta`, and `bash` on `PATH`; without them each check
-//! is skipped. See `docs/Jobs.md#verification`.
+//! Background jobs and `run_command` in a real session. Commands run as
+//! plain child processes (`ALYOSHA_COMMANDS=direct`), so these checks cover
+//! the tools and jobs, not the command units' isolation, which the container
+//! checks cover. They need `bash` on `PATH`. See `docs/Jobs.md#verification`.
 
 mod support;
 
@@ -28,17 +29,15 @@ fn home() -> Option<Home> {
         std::env::var_os("PATH")
             .is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join(name).is_file()))
     };
-    if !(has("bwrap") && has("pasta") && has("bash")) {
-        eprintln!("skipped: bwrap, pasta, or bash is not on PATH");
+    if !has("bash") {
+        eprintln!("skipped: bash is not on PATH");
         return None;
     }
+    // SAFETY: every test sets the same value, before any session starts.
+    unsafe { std::env::set_var("ALYOSHA_COMMANDS", "direct") };
     let root = tempfile::tempdir().unwrap();
     let base = root.path().canonicalize().unwrap();
-    let paths = Paths::new(
-        &base,
-        Some(base.join("config").as_os_str()),
-        Some(base.join("data").as_os_str()),
-    );
+    let paths = Paths::under(&base);
     let workspace = base.join("Projects/ws");
     fs::create_dir_all(&workspace).unwrap();
     Some(Home {
@@ -57,7 +56,7 @@ async fn open(home: &Home, model: Arc<ScriptedModel>) -> Started {
         FrontEnd {
             approver: None,
             channel_line: None,
-            log_file: None,
+            log_hint: None,
             on_loading_dev_shell: None,
             persistence: None,
         },
@@ -143,7 +142,10 @@ async fn run_command_reports_status_and_keeps_long_output() {
     );
     assert_eq!(
         results[3].1,
-        ToolOutcome::Success("/workspace/out.txt\n\n\n[status: 0]".into())
+        ToolOutcome::Success(format!(
+            "{}/out.txt\n\n\n[status: 0]",
+            home.workspace.display()
+        ))
     );
 }
 

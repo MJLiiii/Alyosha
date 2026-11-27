@@ -9,8 +9,6 @@
   makeWrapper,
   pkg-config,
   aws-lc,
-  bubblewrap,
-  passt,
   bashInteractive,
   coreutils,
   findutils,
@@ -43,8 +41,6 @@ rustPlatform.buildRustPackage {
   postInstall = ''
     wrapProgram $out/bin/alyosha --prefix PATH : ${
       lib.makeBinPath [
-        bubblewrap
-        passt
         bashInteractive
         coreutils
         findutils

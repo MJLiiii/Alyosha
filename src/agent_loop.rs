@@ -288,16 +288,14 @@ impl SessionDriver {
     /// Queues one of the owner's messages behind any earlier ones and returns
     /// its ID.
     pub fn submit(&self, text: impl Into<String>) -> MessageId {
-        self.session
-            .enqueue(text.into(), None)
+        self.session.enqueue(text.into(), None)
     }
 
     /// Queues a group member's message in a guest session. When its turn
     /// starts, the sender becomes the speaker whose notes `user_memory`
     /// writes, and the opening entry carries their notes.
     pub fn submit_from(&self, text: impl Into<String>, sender: Sender) -> MessageId {
-        self.session
-            .enqueue(text.into(), Some(sender))
+        self.session.enqueue(text.into(), Some(sender))
     }
 
     /// Signals Stop to the active turn or command. Queued messages stay
