@@ -88,6 +88,8 @@ let
   # checks. Everything it does needs root, so it asks for sudo itself.
   hostCommand = pkgs.writeShellApplication {
     name = "alyosha";
+    # The folders listed hold only names Alyosha checks, so `ls` is fine.
+    excludeShellChecks = [ "SC2012" ];
     runtimeInputs = [
       pkgs.systemd
       pkgs.coreutils
