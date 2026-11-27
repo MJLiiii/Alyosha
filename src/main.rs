@@ -172,18 +172,26 @@ fn check_units() -> ExitCode {
         ),
         Err(error) => check("a command's unit starts", false, error.to_string()),
     }
-    let probe = "id -un; pwd; ls /proc | grep -c '^[0-9]'; \
-                 for path in /var/lib/alyosha-secrets /var/lib/gproxy /run/postgresql \
-                   /nix/var/nix/daemon-socket /var/lib/alyosha/work/groups; do \
-                   test -e $path && echo visible:$path; done; \
-                 (exec 3<>/dev/tcp/127.0.0.1/18787) 2>/dev/null && echo reached:gproxy; \
-                 (exec 3<>/dev/tcp/10.233.1.1/22) 2>/dev/null && echo reached:host; \
+    // The default tools are Bash, coreutils, findutils, Git, and ripgrep.
+    // A path that InaccessiblePaths= hides still exists, so try to read it.
+    // The host drops connections it refuses, so each connection has a limit.
+    let probe = "id -un; pwd; ls -d /proc/[0-9]* | wc -l; \
                  (timeout 5 bash -c 'exec 3<>/dev/tcp/1.1.1.1/443') 2>/dev/null || echo offline; \
+                 for path in /var/lib/alyosha-secrets /var/lib/gproxy /run/postgresql \
+                   /nix/var/nix/daemon-socket /var/lib/alyosha/work/groups /var/backup/alyosha; do \
+                   ls $path >/dev/null 2>&1 && echo visible:$path; done; \
+                 (timeout 3 bash -c 'exec 3<>/dev/tcp/127.0.0.1/18787') 2>/dev/null && echo reached:gproxy; \
+                 (timeout 3 bash -c 'exec 3<>/dev/tcp/10.233.1.1/22') 2>/dev/null && echo reached:host; \
                  echo written > check-units.txt";
     match run(probe, 60) {
         Ok(output) => {
             let text = String::from_utf8_lossy(&output.output).into_owned();
             let lines: Vec<&str> = text.lines().collect();
+            check(
+                "the probe finishes",
+                output.status == ShellStatus::Exited(0),
+                format!("{:?}: {text}", output.status),
+            );
             check(
                 "a command runs as alyosha-run in /workspace",
                 lines.first() == Some(&"alyosha-run") && lines.get(1) == Some(&"/workspace"),
