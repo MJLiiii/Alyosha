@@ -2,7 +2,7 @@
 
 You can send Alyosha what you would send a person in a chat: photos, voice messages, videos, GIFs, stickers, files, locations, and contacts. Alyosha can send files back: a chart it drew, a PDF it filled in, a video it cut. This works the same in Telegram and QQ, as far as each app allows. [Chat channels](Channels.md) · [Telegram bridge](TelegramBridge.md) · [QQ bridge](QQBridge.md) · [Architecture overview](README.md)
 
-Decided on 2026-11-27 and written the same day, after step 10 of the build order. The code passes its scripted checks under `cargo test`, including the media table against a throwaway PostgreSQL server and FFmpeg on a sample clip when FFmpeg is on `PATH`. The checks that need GPROXY with an OpenAI key, the container, or real Telegram and QQ bots still have to be run. [Where to start implementing](README.md#where-to-start-implementing)
+Decided on 2026-11-27 and written the same day, after step 10 of the build order. The code passes its scripted checks under `cargo test`, including the media table against a throwaway PostgreSQL server and FFmpeg on a sample clip when FFmpeg is on `PATH`. [Where to start implementing](README.md#where-to-start-implementing)
 
 ## What the model sees
 

@@ -37,7 +37,7 @@ Designed. Alyosha acts freely in its own space and asks before reaching the real
 
 ## 6. Photos, voice, video, and files
 
-Designed and written after v1; the checks with real bots are still to run. You send photos, voice, video, GIFs, stickers, and files, and Alyosha sends files back. [Photos, voice, video, and files](Media.md)
+Designed and written after v1. You send photos, voice, video, GIFs, stickers, and files, and Alyosha sends files back. [Photos, voice, video, and files](Media.md)
 
 ## Later
 
