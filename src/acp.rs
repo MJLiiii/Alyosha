@@ -30,6 +30,7 @@ use crate::{
     approvals::{Approver, OwnerAnswer, OwnerRequest},
     clock::Clock,
     llm_client::ModelClient,
+    memory::MemoryTables,
     session::{self, FrontEnd},
     session_store::{PgStore, SessionStore, StoreError},
     user_notes::valid_user_id,
@@ -54,6 +55,8 @@ pub struct ServeOptions {
     pub log_hint: Option<&'static str>,
     /// Where sessions are saved and found again.
     pub store: Arc<dyn SessionStore>,
+    /// The memory and people's notes tables.
+    pub memory: Arc<dyn MemoryTables>,
     /// Whose session this process serves.
     pub mode: Mode,
 }
@@ -519,6 +522,7 @@ impl Agent {
                 self.channel_line(),
                 self.options.clock.clone(),
                 Some(persistence),
+                self.options.memory.clone(),
             )
             .await
             .map(|mut started| {
@@ -577,6 +581,7 @@ impl Agent {
                 log_hint: self.options.log_hint,
                 on_loading_dev_shell: None,
                 persistence: Some(persistence),
+                memory: self.options.memory.clone(),
             },
             self.options.clock.clone(),
         )
@@ -790,8 +795,14 @@ pub fn run(mode: Mode) -> u8 {
             crate::environment::shell::RUNS_DIR,
         )));
     }
-    let store = match runtime.block_on(PgStore::connect_default()) {
+    let memory_folder = crate::memory_import::old_folder(&paths.state_dir);
+    let store = match runtime.block_on(PgStore::connect_default(&memory_folder)) {
         Ok(store) => store,
+        Err(StoreError::Import(message)) => {
+            tracing::error!(error = %message, "could not import the memory files");
+            eprintln!("alyosha acp: {message}");
+            return 1;
+        }
         Err(error) => {
             tracing::error!(error = %error, "could not reach the session database");
             eprintln!("alyosha acp: {}", database_error(&error));
@@ -810,6 +821,7 @@ pub fn run(mode: Mode) -> u8 {
         },
         clock: Arc::new(crate::clock::SystemClock),
         log_hint,
+        memory: store.clone(),
         store,
         mode,
     };

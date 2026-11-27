@@ -19,6 +19,7 @@ use tokio::sync::{Notify, mpsc};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
+    BoxFuture,
     agent_state::{
         ActiveTurn, ActiveWork, AgentState, CallId, ContextCheckpoint, HistoryEntry, MessageId,
         MessageOrigin, Sender, ToolCall, ToolOutcome, ToolResultEntry, TurnOutcome, TurnPhase,
@@ -70,8 +71,12 @@ pub struct SessionSetup {
     pub persistence: Option<Persistence>,
     /// Builds the normal system instruction again, with fresh memory and
     /// skills indexes, after each compaction.
-    pub rebuild_instruction: Option<Arc<dyn Fn() -> String + Send + Sync>>,
+    pub rebuild_instruction: Option<RebuildInstruction>,
 }
+
+/// Builds the system instruction again. `None` keeps the current one, as
+/// when the memory store cannot be read.
+pub type RebuildInstruction = Arc<dyn Fn() -> BoxFuture<'static, Option<String>> + Send + Sync>;
 
 /// A session's store and its saved state.
 pub struct Persistence {
@@ -185,7 +190,7 @@ struct Session {
     client: Arc<dyn ModelClient>,
     /// The request settings; the system instruction changes at compaction.
     settings: Mutex<RequestSettings>,
-    rebuild_instruction: Option<Arc<dyn Fn() -> String + Send + Sync>>,
+    rebuild_instruction: Option<RebuildInstruction>,
     /// Where each entry and checkpoint is saved before it takes effect.
     store: Option<(Arc<dyn SessionStore>, SessionId)>,
     /// The sequence number of `history[0]`.
@@ -656,8 +661,9 @@ impl Session {
                 environment.logs.remove(&path);
             }
         }
-        if let Some(rebuild) = &self.rebuild_instruction {
-            let instruction = rebuild();
+        if let Some(rebuild) = &self.rebuild_instruction
+            && let Some(instruction) = rebuild().await
+        {
             self.settings
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
@@ -682,7 +688,7 @@ impl Session {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = message.sender.clone();
         let body = match (&message.sender, &self.services.users) {
-            (Some(sender), Some(users)) => users.opening(sender, &message.text),
+            (Some(sender), Some(users)) => users.opening(sender, &message.text).await,
             _ => message.text.clone(),
         };
         let opening = UserEntry {

@@ -2,7 +2,8 @@
 //! it is committed, so a restarted process can resume a session by its key.
 //!
 //! `PgStore` keeps them in PostgreSQL. `MemoryStore` keeps them in memory
-//! for the scripted tests.
+//! for the scripted tests. `PgStore` also holds the memory tables, whose
+//! migration imports the memory files of earlier builds.
 //!
 //! Design: `docs/SessionStore.md`. Implementation guide:
 //! `docs/SessionStore.md#implementation`.
@@ -15,11 +16,12 @@ use std::{
 
 use chrono::{DateTime, Utc};
 use serde_json::Value;
-use tokio_postgres::{Client, NoTls};
+use tokio_postgres::{Client, NoTls, Row};
 
 use crate::{
     BoxFuture,
     agent_state::{CallId, HistoryEntry, ToolOutcome, ToolResultEntry},
+    memory::{MemoryRow, MemoryTables, NotesRow},
 };
 
 /// The format version every stored entry carries.
@@ -36,7 +38,12 @@ pub const INTERRUPTED_LINE: &str = "The turn in progress was stopped, and messag
 pub const BUSY: &str = "This session is open in another Alyosha process.";
 
 /// The migrations, in order. Each runs once, in one transaction.
-const MIGRATIONS: &[&str] = &[include_str!("../migrations/001_sessions.sql")];
+const MIGRATIONS: &[&str] = &[
+    include_str!("../migrations/001_sessions.sql"),
+    include_str!("../migrations/002_memory.sql"),
+];
+/// The migration that also imports the old memory files.
+const MEMORY_MIGRATION: i32 = 2;
 
 /// A stored session's database ID.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -51,6 +58,10 @@ pub enum StoreError {
     /// The database could not be reached or refused the request.
     #[error("{0}")]
     Failed(String),
+    /// The old memory files could not be imported; the message names each
+    /// file and why.
+    #[error("{0}")]
+    Import(String),
 }
 
 impl From<tokio_postgres::Error> for StoreError {
@@ -424,16 +435,17 @@ pub struct PgStore {
 
 impl PgStore {
     /// Connects to `ALYOSHA_DATABASE`, or the container's database, and
-    /// brings the schema up to date.
-    pub async fn connect_default() -> Result<Arc<Self>, StoreError> {
+    /// brings the schema up to date, importing the old memory files from
+    /// `memory_folder` if it reaches migration 2.
+    pub async fn connect_default(memory_folder: &Path) -> Result<Arc<Self>, StoreError> {
         let target =
             std::env::var("ALYOSHA_DATABASE").unwrap_or_else(|_| DEFAULT_DATABASE.to_owned());
-        Self::connect(&target).await.map(Arc::new)
+        Self::connect(&target, memory_folder).await.map(Arc::new)
     }
 
     /// Connects with a libpq-style connection string. Without a user, it
     /// connects as `USER`, which peer authentication maps to its own role.
-    pub async fn connect(target: &str) -> Result<Self, StoreError> {
+    pub async fn connect(target: &str, memory_folder: &Path) -> Result<Self, StoreError> {
         let mut config: tokio_postgres::Config = target
             .parse()
             .map_err(|error: tokio_postgres::Error| StoreError::Failed(error.to_string()))?;
@@ -449,8 +461,17 @@ impl PgStore {
                 tracing::error!(error = %error, "the session database connection failed");
             }
         });
-        migrate(&mut client).await?;
+        migrate(&mut client, memory_folder).await?;
         Ok(Self { client })
+    }
+
+    /// How many people have notes.
+    pub async fn count_notes(&self) -> Result<i64, StoreError> {
+        Ok(self
+            .client
+            .query_one("select count(*) from user_notes", &[])
+            .await?
+            .get(0))
     }
 
     async fn try_lock(&self, id: i64) -> Result<(), StoreError> {
@@ -467,8 +488,9 @@ impl PgStore {
 }
 
 /// Applies every migration newer than the database, under a lock so that
-/// two processes starting together migrate once.
-async fn migrate(client: &mut Client) -> Result<(), StoreError> {
+/// two processes starting together migrate once. Migration 2 also imports
+/// the old memory files in its transaction.
+async fn migrate(client: &mut Client, memory_folder: &Path) -> Result<(), StoreError> {
     client.execute("select pg_advisory_lock(0)", &[]).await?;
     let result = async {
         client
@@ -488,6 +510,9 @@ async fn migrate(client: &mut Client) -> Result<(), StoreError> {
             let version = index as i32 + 1;
             let transaction = client.transaction().await?;
             transaction.batch_execute(sql).await?;
+            if version == MEMORY_MIGRATION {
+                crate::memory_import::import(&transaction, memory_folder).await?;
+            }
             transaction
                 .execute("insert into schema_version (version) values ($1)", &[&version])
                 .await?;
@@ -501,6 +526,162 @@ async fn migrate(client: &mut Client) -> Result<(), StoreError> {
     result?;
     unlocked?;
     Ok(())
+}
+
+/// A `memories` row selected as name, description, body, updated, version.
+pub(crate) fn memory_row(row: &Row) -> MemoryRow {
+    MemoryRow {
+        name: row.get(0),
+        description: row.get(1),
+        body: row.get(2),
+        updated: row.get(3),
+        version: row.get(4),
+    }
+}
+
+/// A `user_notes` row selected as person, name, notes, updated, version.
+pub(crate) fn notes_row(row: &Row) -> NotesRow {
+    NotesRow {
+        person: row.get(0),
+        name: row.get(1),
+        notes: row.get(2),
+        updated: row.get(3),
+        version: row.get(4),
+    }
+}
+
+fn text_error(error: tokio_postgres::Error) -> String {
+    error.to_string()
+}
+
+impl MemoryTables for PgStore {
+    fn memories(&self) -> BoxFuture<'_, Result<Vec<MemoryRow>, String>> {
+        Box::pin(async move {
+            let rows = self
+                .client
+                .query(
+                    "select name, description, body, updated, version from memories",
+                    &[],
+                )
+                .await
+                .map_err(text_error)?;
+            Ok(rows.iter().map(memory_row).collect())
+        })
+    }
+
+    fn memory<'a>(&'a self, name: &'a str) -> BoxFuture<'a, Result<Option<MemoryRow>, String>> {
+        Box::pin(async move {
+            let row = self
+                .client
+                .query_opt(
+                    "select name, description, body, updated, version from memories where name = $1",
+                    &[&name],
+                )
+                .await
+                .map_err(text_error)?;
+            Ok(row.as_ref().map(memory_row))
+        })
+    }
+
+    fn insert_memory<'a>(&'a self, row: &'a MemoryRow) -> BoxFuture<'a, Result<bool, String>> {
+        Box::pin(async move {
+            let inserted = self
+                .client
+                .execute(
+                    "insert into memories (name, description, body, updated) values ($1, $2, $3, $4)
+                     on conflict (name) do nothing",
+                    &[&row.name, &row.description, &row.body, &row.updated],
+                )
+                .await
+                .map_err(text_error)?;
+            Ok(inserted == 1)
+        })
+    }
+
+    fn update_memory<'a>(
+        &'a self,
+        row: &'a MemoryRow,
+        seen: i64,
+    ) -> BoxFuture<'a, Result<Option<i64>, String>> {
+        Box::pin(async move {
+            let updated = self
+                .client
+                .query_opt(
+                    "update memories set description = $2, body = $3, updated = $4, version = version + 1
+                     where name = $1 and version = $5 returning version",
+                    &[&row.name, &row.description, &row.body, &row.updated, &seen],
+                )
+                .await
+                .map_err(text_error)?;
+            Ok(updated.map(|row| row.get(0)))
+        })
+    }
+
+    fn delete_memory<'a>(
+        &'a self,
+        name: &'a str,
+        seen: i64,
+    ) -> BoxFuture<'a, Result<bool, String>> {
+        Box::pin(async move {
+            let deleted = self
+                .client
+                .execute(
+                    "delete from memories where name = $1 and version = $2",
+                    &[&name, &seen],
+                )
+                .await
+                .map_err(text_error)?;
+            Ok(deleted == 1)
+        })
+    }
+
+    fn notes<'a>(&'a self, person: &'a str) -> BoxFuture<'a, Result<Option<NotesRow>, String>> {
+        Box::pin(async move {
+            let row = self
+                .client
+                .query_opt(
+                    "select person, name, notes, updated, version from user_notes where person = $1",
+                    &[&person],
+                )
+                .await
+                .map_err(text_error)?;
+            Ok(row.as_ref().map(notes_row))
+        })
+    }
+
+    fn insert_notes<'a>(&'a self, row: &'a NotesRow) -> BoxFuture<'a, Result<bool, String>> {
+        Box::pin(async move {
+            let inserted = self
+                .client
+                .execute(
+                    "insert into user_notes (person, name, notes, updated) values ($1, $2, $3, $4)
+                     on conflict (person) do nothing",
+                    &[&row.person, &row.name, &row.notes, &row.updated],
+                )
+                .await
+                .map_err(text_error)?;
+            Ok(inserted == 1)
+        })
+    }
+
+    fn update_notes<'a>(
+        &'a self,
+        row: &'a NotesRow,
+        seen: i64,
+    ) -> BoxFuture<'a, Result<Option<i64>, String>> {
+        Box::pin(async move {
+            let updated = self
+                .client
+                .query_opt(
+                    "update user_notes set name = $2, notes = $3, updated = $4, version = version + 1
+                     where person = $1 and version = $5 returning version",
+                    &[&row.person, &row.name, &row.notes, &row.updated, &seen],
+                )
+                .await
+                .map_err(text_error)?;
+            Ok(updated.map(|row| row.get(0)))
+        })
+    }
 }
 
 impl SessionStore for PgStore {

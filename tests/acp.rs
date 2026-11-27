@@ -13,6 +13,7 @@ use alyosha::{
     acp::{Mode, ServeOptions, serve},
     clock::Clock,
     llm_client::ModelError,
+    memory::{InMemoryTables, MemoryTables},
     session_store::{MemoryStore, RESUMED_LINE, SessionStore},
 };
 use alyosha_config::{Config, Paths};
@@ -35,6 +36,7 @@ struct Client {
     _root: Arc<tempfile::TempDir>,
     paths: Paths,
     store: Arc<MemoryStore>,
+    memory: Arc<InMemoryTables>,
     mode: Mode,
     workspace: String,
     projects: std::path::PathBuf,
@@ -63,11 +65,13 @@ impl Client {
             Utc.with_ymd_and_hms(2026, 11, 25, 9, 2, 0).unwrap(),
         )));
         let store = MemoryStore::new();
-        let (server, writer, read) = spawn_server(&paths, &store, model, mode, &clock);
+        let memory = InMemoryTables::new();
+        let (server, writer, read) = spawn_server(&paths, &store, &memory, model, mode, &clock);
         Self {
             _root: Arc::new(root),
             paths,
             store,
+            memory,
             mode,
             workspace: workspace.display().to_string(),
             projects: base.join("Projects"),
@@ -84,8 +88,14 @@ impl Client {
     /// new one on the same store, as after a restart.
     async fn reconnect(&mut self, model: Arc<ScriptedModel>) {
         self.writer.shutdown().await.unwrap();
-        let (server, writer, read) =
-            spawn_server(&self.paths, &self.store, model, self.mode, &self.clock);
+        let (server, writer, read) = spawn_server(
+            &self.paths,
+            &self.store,
+            &self.memory,
+            model,
+            self.mode,
+            &self.clock,
+        );
         let old = std::mem::replace(&mut self.server, server);
         tokio::time::timeout(Duration::from_secs(10), old)
             .await
@@ -182,6 +192,7 @@ impl Client {
 fn spawn_server(
     paths: &Paths,
     store: &Arc<MemoryStore>,
+    memory: &Arc<InMemoryTables>,
     model: Arc<ScriptedModel>,
     mode: Mode,
     clock: &Arc<MovableClock>,
@@ -201,6 +212,7 @@ fn spawn_server(
         clock: clock.clone(),
         log_hint: None,
         store: store.clone() as Arc<dyn SessionStore>,
+        memory: memory.clone() as Arc<dyn MemoryTables>,
         mode,
     };
     let server = tokio::spawn(serve(their_read, their_write, options));
@@ -377,18 +389,16 @@ async fn guest_sessions_keep_notes_for_each_sender_only() {
         again.contains("Likes tea.\n\nBob: what do I like?"),
         "{again}"
     );
-    let users = client
-        ._root
-        .path()
-        .canonicalize()
-        .unwrap()
-        .join("state/memory/users");
-    let bob = fs::read_to_string(users.join("telegram-1.md")).unwrap();
-    assert!(
-        bob.starts_with("---\nname: Bob\n") && bob.ends_with("Likes tea."),
-        "{bob}"
+    let notes = client.memory.all_notes();
+    assert_eq!(notes.len(), 1, "only the speaker's notes: {notes:?}");
+    assert_eq!(
+        (
+            notes[0].person.as_str(),
+            notes[0].name.as_str(),
+            notes[0].notes.as_str()
+        ),
+        ("telegram-1", "Bob", "Likes tea.")
     );
-    assert!(!users.join("telegram-2.md").exists());
 }
 
 #[tokio::test]
@@ -684,4 +694,121 @@ async fn trusted_group_sessions_are_full_sessions_with_their_own_channel_line() 
         ),
         "{instruction}"
     );
+}
+
+/// Puts an owner memory and a person's notes, each holding a marker, into
+/// the client's tables.
+fn put_markers(client: &Client) {
+    let day = chrono::NaiveDate::from_ymd_opt(2026, 11, 24).unwrap();
+    client.memory.put_memory(alyosha::memory::MemoryRow {
+        name: "marker".into(),
+        description: "The owner's marker".into(),
+        body: "OWNER-7f3c".into(),
+        updated: day,
+        version: 1,
+    });
+    client.memory.put_notes(alyosha::memory::NotesRow {
+        person: "telegram-1".into(),
+        name: "Bob".into(),
+        notes: "GUEST-2c9d".into(),
+        updated: day,
+        version: 1,
+    });
+}
+
+fn tool_names(request: &alyosha::llm_client::ModelRequest) -> Vec<String> {
+    request.tools.iter().map(|tool| tool.name.clone()).collect()
+}
+
+#[tokio::test]
+async fn owner_and_guest_sessions_each_see_only_their_store() {
+    // The owner reads the memory; the guest's notes never reach the model.
+    let model = ScriptedModel::new();
+    model.reply(vec![call("l", "memory", json!({"command": "list"}))]);
+    model.reply(vec![call(
+        "r",
+        "memory",
+        json!({"command": "read", "name": "marker"}),
+    )]);
+    model.reply(vec![text("Done.")]);
+    let mut owner = Client::start(model.clone()).await;
+    put_markers(&owner);
+    owner.initialize(Some("alyosha-telegram")).await;
+    let session = owner.new_session().await;
+    let id = owner.prompt(&session, "What do you remember?").await;
+    owner.until_response(id).await;
+    let requests = model.requests();
+    assert_eq!(requests.len(), 3);
+    let tools = tool_names(&requests[0]);
+    assert!(tools.iter().any(|tool| tool == "memory"), "{tools:?}");
+    assert!(!tools.iter().any(|tool| tool == "user_memory"), "{tools:?}");
+    assert!(
+        requests[0]
+            .system_instruction
+            .contains("- marker (2026-11-24): The owner's marker")
+    );
+    assert!(
+        format!("{:?}", requests[2]).contains("OWNER-7f3c"),
+        "the read reached the model"
+    );
+    for request in &requests {
+        assert!(!format!("{request:?}").contains("GUEST-2c9d"));
+    }
+
+    // The guest writes the speaker's notes; the owner's memory never shows.
+    let model = ScriptedModel::new();
+    model.reply(vec![call(
+        "n",
+        "user_memory",
+        json!({"notes": "GUEST-2c9d. Likes tea."}),
+    )]);
+    model.reply(vec![text("Noted.")]);
+    let mut guest = Client::start_as(model.clone(), Mode::Guest).await;
+    put_markers(&guest);
+    guest.initialize(Some("alyosha-telegram")).await;
+    let session = guest.new_session().await;
+    let id = guest
+        .request(
+            "session/prompt",
+            json!({"sessionId": session, "prompt": [{"type": "text", "text": "I like tea"}], "_meta": {"alyosha": {"sender": {"id": "telegram-1", "name": "Bob"}}}}),
+        )
+        .await;
+    guest.until_response(id).await;
+    let requests = model.requests();
+    assert_eq!(tool_names(&requests[0]), ["user_memory"]);
+    assert!(!requests[0].system_instruction.contains("## Memory"));
+    assert!(
+        last_user_text(&requests[0]).contains("GUEST-2c9d"),
+        "the speaker's notes are shown"
+    );
+    for request in &requests {
+        let text = format!("{request:?}");
+        assert!(
+            !text.contains("OWNER-7f3c") && !text.contains("marker ("),
+            "{text}"
+        );
+    }
+    let notes = guest.memory.all_notes();
+    assert_eq!(notes[0].notes, "GUEST-2c9d. Likes tea.");
+    assert_eq!(notes[0].version, 2, "the shown version guarded the write");
+
+    // A trusted group is the owner: the index, `memory`, no `user_memory`.
+    let model = ScriptedModel::new();
+    model.reply(vec![text("Hi.")]);
+    let mut group = Client::start_as(model.clone(), Mode::Group).await;
+    put_markers(&group);
+    group.initialize(Some("alyosha-qq")).await;
+    let session = group.new_session().await;
+    let id = group.prompt(&session, "Bob: hi").await;
+    group.until_response(id).await;
+    let requests = model.requests();
+    let tools = tool_names(&requests[0]);
+    assert!(tools.iter().any(|tool| tool == "memory"), "{tools:?}");
+    assert!(!tools.iter().any(|tool| tool == "user_memory"), "{tools:?}");
+    assert!(
+        requests[0]
+            .system_instruction
+            .contains("- marker (2026-11-24)")
+    );
+    assert!(!format!("{:?}", requests[0]).contains("GUEST-2c9d"));
 }

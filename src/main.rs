@@ -22,7 +22,8 @@ Usage:
   alyosha config check FILE
                           Check a configuration file, as the container module does
   alyosha run-exec RUN    Inside a command's unit: run the command its run folder holds
-  alyosha check-units     As `alyosha` in the container: check the command units";
+  alyosha check-units     As `alyosha` in the container: check the command units
+  alyosha memory-list     As `alyosha` in the container: list the memories in the database";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -40,6 +41,7 @@ fn main() -> ExitCode {
         ["acp", "--group"] => ExitCode::from(alyosha::acp::run(Mode::Group)),
         ["config", "check", file] => config_check(Path::new(file)),
         ["check-units"] => check_units(),
+        ["memory-list"] => memory_list(),
         ["run-exec", instance] => {
             let error = alyosha::environment::shell::run_exec(
                 Path::new(alyosha::environment::shell::RUNS_DIR),
@@ -63,6 +65,39 @@ fn fail(message: &str) -> ExitCode {
 
 fn paths() -> Result<Paths, ExitCode> {
     Paths::from_env().map_err(|error| fail(&error.to_string()))
+}
+
+/// `alyosha memory list` on the host: the memories in the session database,
+/// then how many memories and people's notes it holds. Connecting applies
+/// pending migrations, as a bridge starting would.
+fn memory_list() -> ExitCode {
+    use alyosha::{
+        memory::{MemoryTables, host_list},
+        memory_import::old_folder,
+        session_store::{PgStore, StoreError},
+    };
+    let paths = match paths() {
+        Ok(paths) => paths,
+        Err(code) => return code,
+    };
+    let runtime = tokio::runtime::Runtime::new().expect("a Tokio runtime starts");
+    runtime.block_on(async {
+        let store = match PgStore::connect_default(&old_folder(&paths.state_dir)).await {
+            Ok(store) => store,
+            Err(StoreError::Import(message)) => return fail(&message),
+            Err(error) => return fail(&alyosha::acp::database_error(&error)),
+        };
+        let rows = match store.memories().await {
+            Ok(rows) => rows,
+            Err(error) => return fail(&error),
+        };
+        let people = match store.count_notes().await {
+            Ok(people) => people,
+            Err(error) => return fail(&error.to_string()),
+        };
+        print!("{}", host_list(&rows, people));
+        ExitCode::SUCCESS
+    })
 }
 
 fn gateway_init() -> ExitCode {

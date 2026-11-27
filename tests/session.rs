@@ -18,6 +18,7 @@ use alyosha::{
     agent_state::{HistoryEntry, ToolOutcome, TurnOutcome, TurnPhase},
     approvals::{Approver, OwnerAnswer, OwnerRequest},
     clock::FixedClock,
+    memory::InMemoryTables,
     session::{self, FrontEnd, Started},
 };
 use alyosha_config::{Config, McpServerConfig, Paths};
@@ -30,6 +31,8 @@ struct Home {
     _root: tempfile::TempDir,
     paths: Paths,
     workspace: PathBuf,
+    /// Shared by every session opened in this home.
+    memory: Arc<InMemoryTables>,
 }
 
 fn home() -> Home {
@@ -43,6 +46,7 @@ fn home() -> Home {
         _root: root,
         paths,
         workspace,
+        memory: InMemoryTables::new(),
     }
 }
 
@@ -96,6 +100,7 @@ async fn open(
             log_hint: None,
             on_loading_dev_shell: None,
             persistence: None,
+            memory: home.memory.clone(),
         },
         Arc::new(FixedClock(
             Utc.with_ymd_and_hms(2026, 11, 25, 9, 2, 0).unwrap(),
@@ -833,6 +838,7 @@ async fn a_resumed_session_closes_the_turn_a_restart_cut_off() {
                 stored,
                 resumed: true,
             }),
+            memory: home.memory.clone(),
         },
         Arc::new(FixedClock(
             Utc.with_ymd_and_hms(2026, 11, 25, 9, 2, 0).unwrap(),

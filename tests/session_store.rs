@@ -54,10 +54,11 @@ fn start(
     });
     if let Some(rebuilds) = rebuilds {
         setup.rebuild_instruction = Some(Arc::new(move || {
-            format!(
+            let instruction = format!(
                 "instruction {}",
                 rebuilds.fetch_add(1, Ordering::SeqCst) + 1
-            )
+            );
+            Box::pin(async move { Some(instruction) })
         }));
     }
     SessionDriver::start(setup)

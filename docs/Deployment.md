@@ -73,7 +73,7 @@ On the host, `alyosha` is a small program of the flake's module that manages the
 | `alyosha secret remove <name>` | Removes one and restarts its services |
 | `alyosha gateway init` · `alyosha gateway login` | GPROXY's first setup and provider sign-in, run as root in the container [Run GPROXY as a service](LLMClientGateway.md#run-gproxy-as-a-service) |
 | `alyosha backup now` · `alyosha backup list` · `alyosha backup restore <file>` | Start a dump, list dumps, restore one into an emptied database |
-| `alyosha memory list` | Your memories' names, dates, and descriptions, read-only |
+| `alyosha memory list` | Your memories' names, dates, and descriptions, then how many memories and people's notes the database holds, read-only. It runs `alyosha memory-list` in the container as `alyosha`. [The host's list](Memory.md#the-hosts-list) |
 | `alyosha shell` | A shell as `alyosha` in its state folder, to look at the working folders |
 | `alyosha check` | Runs `alyosha check-units` in the container as `alyosha`: the command-unit checks from [Verification](#verification) that need no model account |
 | `alyosha commands --json` | Every command with its arguments, for scripts and coding agents |
@@ -223,6 +223,37 @@ Earlier versions of the module ran Alyosha as the owner and mounted `~/work`, `~
 5. Move skills to `~/.agents/skills`.
 6. Start the bridges, and ask Alyosha to remember the one memory again.
 7. Delete `~/work`, `~/.config/alyosha`, and `~/.local/share/alyosha` on the host, and the owner's old folders in the container.
+
+### Move memory into the database
+
+Builds before the database version kept memories and people's notes as files in `/var/lib/alyosha/memory` in the container. The first start of the new build imports them into the database and checks the copy. [Import the old files](Memory.md#import-the-old-files) Move once:
+
+1. Before rebuilding, save what the files hold:
+
+   ```bash
+   alyosha memory list > ~/memory-before.txt
+   ```
+
+   ```bash
+   sudo ls /var/lib/nixos-containers/alyosha/var/lib/alyosha/memory/users | wc -l
+   ```
+
+   The first gives one line per memory, the second the number of people with notes.
+2. Rebuild with `sudo nixos-rebuild switch`. The first bridge to start imports the files.
+3. If `alyosha status` shows the bridges failing, `alyosha logs telegram` names each file that could not be imported and why. Fix or move each one with `alyosha shell`, then `sudo systemctl -M alyosha restart alyosha-telegram alyosha-qq`. Nothing was imported in the failed attempt, so the next start imports everything.
+4. Run `alyosha memory list`. Check that its last line counts as many memories as `~/memory-before.txt` has lines and as many people as step 1 counted, and that the same names appear.
+5. From your private chat, ask "What do you remember about me?" and check that the answer uses your memories. In a group chat that is not trusted, ask the same and check that it knows nothing of them.
+6. Delete the old folder and the saved list:
+
+   ```bash
+   sudo rm -r /var/lib/nixos-containers/alyosha/var/lib/alyosha/memory
+   ```
+
+   ```bash
+   rm ~/memory-before.txt
+   ```
+
+   Until then an earlier build can still be started on the files, but it misses anything remembered since the move.
 
 ### Verification
 

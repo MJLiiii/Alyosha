@@ -22,7 +22,10 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     BoxFuture,
-    agent_loop::{DEFAULT_INSTRUCTION, Persistence, SessionDriver, SessionEvent, SessionSetup},
+    agent_loop::{
+        DEFAULT_INSTRUCTION, Persistence, RebuildInstruction, SessionDriver, SessionEvent,
+        SessionSetup,
+    },
     approvals::{self, Approver},
     clock::{Clock, SystemClock},
     context_manager::RouteLimits,
@@ -30,7 +33,7 @@ use crate::{
     jobs::{self, JobEnvironment},
     llm_client::{GatewayClient, ModelClient, ModelError, ModelReply, ModelRequest, Timeouts},
     mcp::McpManager,
-    memory::{self, MemoryStore},
+    memory::{self, MemoryStore, MemoryTables},
     session_store::{self, INTERRUPTED_LINE, RESUMED_LINE},
     skills::{self, SkillStore},
     tools::{
@@ -57,6 +60,8 @@ pub struct FrontEnd {
     /// Where the session's history is saved. Without it, history lives
     /// only in memory.
     pub persistence: Option<Persistence>,
+    /// The memory tables: the session database's, or in memory for tests.
+    pub memory: Arc<dyn MemoryTables>,
 }
 
 /// A started session.
@@ -115,14 +120,14 @@ async fn prepare_persistence(
 
 /// The normal system instruction: the default, the memory and skills
 /// sections, and the channel line.
-fn normal_instruction(
-    memory: &MemoryStore,
+async fn normal_instruction(
+    memory: &dyn MemoryTables,
     skills: &SkillStore,
     channel_line: Option<&str>,
-) -> String {
+) -> Result<String, String> {
     let mut instruction = format!(
         "{DEFAULT_INSTRUCTION}\n\n{}\n{}",
-        memory::instruction_section(&memory.index()),
+        memory::instruction_section(&memory::index(memory).await?),
         skills::instruction_section(&skills.index())
     );
     if let Some(line) = channel_line {
@@ -130,7 +135,7 @@ fn normal_instruction(
         instruction.push_str(line);
         instruction.push('\n');
     }
-    instruction
+    Ok(instruction)
 }
 
 /// Resolves a workspace: any existing folder, without symlinks.
@@ -253,19 +258,10 @@ pub async fn start_with_clock(
     )?;
     let timezone = config.timezone;
     let memory = MemoryStore::open(
-        &paths.state_dir.join("memory"),
-        "owner",
+        front_end.memory.clone(),
         Arc::new(move || Utc::now().with_timezone(&timezone).date_naive()),
     );
     let skills = SkillStore::open(&skills_root);
-    let memory_index = memory.index();
-    if !memory_index.unreadable.is_empty() {
-        warnings.push(format!(
-            "{} memory files could not be read: {}",
-            memory_index.unreadable.len(),
-            memory_index.unreadable.join(", ")
-        ));
-    }
     let skill_index = skills.index();
     if !skill_index.invalid.is_empty() {
         warnings.push(format!(
@@ -305,23 +301,33 @@ pub async fn start_with_clock(
         ));
     }
 
-    let system_instruction =
-        normal_instruction(&memory, &skills, front_end.channel_line.as_deref());
-    let rebuild_instruction: Arc<dyn Fn() -> String + Send + Sync> = {
-        let memory_dir = paths.state_dir.join("memory");
+    let system_instruction = normal_instruction(
+        front_end.memory.as_ref(),
+        &skills,
+        front_end.channel_line.as_deref(),
+    )
+    .await
+    .map_err(|error| StartupError::Store(format!("the memory store failed: {error}")))?;
+    let rebuild_instruction: RebuildInstruction = {
+        let tables = front_end.memory.clone();
         let skills_root = skills_root.clone();
         let channel_line = front_end.channel_line.clone();
         Arc::new(move || {
-            let memory = MemoryStore::open(
-                &memory_dir,
-                "owner",
-                Arc::new(move || Utc::now().with_timezone(&timezone).date_naive()),
-            );
-            normal_instruction(
-                &memory,
-                &SkillStore::open(&skills_root),
-                channel_line.as_deref(),
-            )
+            let tables = tables.clone();
+            let skills_root = skills_root.clone();
+            let channel_line = channel_line.clone();
+            Box::pin(async move {
+                normal_instruction(
+                    tables.as_ref(),
+                    &SkillStore::open(&skills_root),
+                    channel_line.as_deref(),
+                )
+                .await
+                .inspect_err(|error| {
+                    tracing::warn!(error = %error, "the memory index could not be rebuilt");
+                })
+                .ok()
+            })
         })
     };
     let persistence = prepare_persistence(front_end.persistence, &mut warnings).await?;
@@ -376,7 +382,8 @@ pub async fn start_with_clock(
 
 /// Opens a guest session for a group chat: only `user_memory` and the MCP
 /// servers `[guest]` lists, no workspace, sandbox, memory index, skills,
-/// jobs, or approver. Its MCP servers run in the guest working folder.
+/// jobs, or approver. Its MCP servers run in the guest working folder. It
+/// opens the people's notes in `memory` and never the owner's memories.
 /// See `docs/Channels.md#guest-mode`.
 pub async fn start_guest(
     config: &Config,
@@ -385,6 +392,7 @@ pub async fn start_guest(
     channel_line: Option<String>,
     clock: Arc<dyn Clock>,
     persistence: Option<Persistence>,
+    memory: Arc<dyn MemoryTables>,
 ) -> Result<Started, StartupError> {
     let folder = paths.guest_work();
     std::fs::DirBuilder::new()
@@ -422,7 +430,7 @@ pub async fn start_guest(
     let services = SessionServices {
         mcp: Some(mcp),
         users: Some(UserNotes::open(
-            &paths.state_dir.join("memory"),
+            memory,
             Arc::new(move || Utc::now().with_timezone(&timezone).date_naive()),
         )),
         ..SessionServices::default()

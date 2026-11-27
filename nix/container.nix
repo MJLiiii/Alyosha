@@ -114,7 +114,7 @@ let
         alyosha gateway login                 Sign in to the model provider
         alyosha backup now|list               Dump the session database, or list the dumps
         alyosha backup restore FILE           Load a dump into an emptied database
-        alyosha memory list                   Your memories, read-only
+        alyosha memory list                   Your memories and how many people have notes, read-only
         alyosha shell                         A shell as the agent's user, in its state folder
         alyosha check                         The container checks that need no model account
         alyosha commands --json               Every command, for scripts and coding agents
@@ -217,10 +217,7 @@ let
           ;;
         memory)
           if [ "''${2:-}" != list ]; then usage; exit 2; fi
-          for file in ${root}${state}/memory/owner/*.md; do
-            [ -e "$file" ] || continue
-            echo "$(basename "$file" .md): $(grep -m1 '^description:' "$file" | cut -d: -f2- | sed 's/^ //')"
-          done
+          in_container --uid=alyosha ${alyosha}/bin/alyosha memory-list
           ;;
         shell)
           exec machinectl shell -q --setenv=TERM="''${TERM:-xterm-256color}" alyosha@alyosha \

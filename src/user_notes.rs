@@ -1,19 +1,23 @@
-//! Notes on the people who talk to Alyosha in group chats: one Markdown file
-//! per person, keyed by platform and user ID, in `memory/users/`.
+//! Notes on the people who talk to Alyosha in group chats: one row of
+//! `user_notes` per person, keyed by platform and user ID.
 //!
 //! Only guest sessions open this store. Each message reaches the model with
 //! its sender's notes in front of it, and the `user_memory` tool rewrites the
 //! notes of the person whose message the turn answers, never anyone else's.
-//! See `docs/Memory.md#peoples-notes`.
+//! The write is guarded by the version shown with the message.
+//! See `docs/Memory.md#notes-on-people`.
 
-use std::path::Path;
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex, PoisonError},
+};
 
 use chrono::NaiveDate;
 use serde_json::{Value, json};
 
 use crate::{
     agent_state::Sender,
-    memory::{MemoryStore, Today, WriteKind, credential_pattern},
+    memory::{MemoryTables, NotesRow, Today, WriteKind, credential_pattern},
     tools::{RegisteredTool, Scope, ToolContext, ToolDefinition, ToolError, ToolOutput, handler},
 };
 
@@ -28,6 +32,18 @@ pub struct Notes {
     pub name: String,
     pub updated: NaiveDate,
     pub text: String,
+    pub version: i64,
+}
+
+impl From<NotesRow> for Notes {
+    fn from(row: NotesRow) -> Self {
+        Self {
+            name: row.name,
+            updated: row.updated,
+            text: row.notes,
+            version: row.version,
+        }
+    }
 }
 
 /// Whether `id` is a platform, a hyphen, and a platform ID:
@@ -60,27 +76,32 @@ pub fn clean_name(name: &str) -> String {
     }
 }
 
-/// The `users` directory of the memory store.
+/// A guest session's view of the notes: the tables and, for each person
+/// whose message it has answered, the version of the notes it showed.
 pub struct UserNotes {
-    store: MemoryStore,
+    tables: Arc<dyn MemoryTables>,
     today: Today,
+    /// `None` when the person had no notes.
+    seen: Mutex<HashMap<String, Option<i64>>>,
 }
 
 impl std::fmt::Debug for UserNotes {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("UserNotes")
-            .field("store", &self.store)
-            .finish_non_exhaustive()
+        f.debug_struct("UserNotes").finish_non_exhaustive()
     }
 }
 
 impl UserNotes {
-    /// `<root>/users`. A missing directory holds no notes.
-    pub fn open(root: &Path, today: Today) -> Self {
+    pub fn open(tables: Arc<dyn MemoryTables>, today: Today) -> Self {
         Self {
-            store: MemoryStore::open(root, "users", today.clone()),
+            tables,
             today,
+            seen: Mutex::default(),
         }
+    }
+
+    fn seen(&self) -> std::sync::MutexGuard<'_, HashMap<String, Option<i64>>> {
+        self.seen.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     fn check(id: &str) -> Result<(), ToolError> {
@@ -91,15 +112,20 @@ impl UserNotes {
         }
     }
 
-    /// The person's notes, or `None` if there are none or the file has no
-    /// valid header.
-    pub fn read(&self, id: &str) -> Result<Option<Notes>, ToolError> {
+    /// The person's notes, or `None` if there are none.
+    pub async fn read(&self, id: &str) -> Result<Option<Notes>, ToolError> {
         Self::check(id)?;
-        Ok(self.store.read_raw(id)?.as_deref().and_then(parse_notes))
+        Ok(self
+            .tables
+            .notes(id)
+            .await
+            .map_err(|error| ToolError::failed(format!("The notes could not be read: {error}")))?
+            .map(Notes::from))
     }
 
-    /// Replaces the person's notes and records their current name.
-    pub fn write(&self, id: &str, name: &str, notes: &str) -> Result<WriteKind, ToolError> {
+    /// Replaces the person's notes and records their current name, if they
+    /// have not changed since this session showed them.
+    pub async fn write(&self, id: &str, name: &str, notes: &str) -> Result<WriteKind, ToolError> {
         Self::check(id)?;
         if notes.len() > NOTES_LIMIT {
             return Err(ToolError::failed(format!(
@@ -111,32 +137,62 @@ impl UserNotes {
                 "This looks like a secret ({pattern}). Notes must not hold secrets."
             )));
         }
-        let kind = if self.store.read_raw(id)?.is_some() {
-            WriteKind::Updated
-        } else {
-            WriteKind::Created
+        let failed =
+            |error: String| ToolError::failed(format!("The notes could not be saved: {error}"));
+        let row = NotesRow {
+            person: id.to_owned(),
+            name: clean_name(name),
+            notes: notes.trim_end().to_owned(),
+            updated: (self.today)(),
+            version: 1,
         };
-        let text = format!(
-            "---\nname: {}\nupdated: {}\n---\n{}",
-            clean_name(name),
-            (self.today)(),
-            notes.trim_end()
-        );
-        self.store.store(id, text.as_bytes())?;
-        Ok(kind)
+        let seen = self.seen().get(id).copied().flatten();
+        let written = match seen {
+            Some(seen) => self
+                .tables
+                .update_notes(&row, seen)
+                .await
+                .map_err(failed)?
+                .map(|version| (WriteKind::Updated, version)),
+            None => self
+                .tables
+                .insert_notes(&row)
+                .await
+                .map_err(failed)?
+                .then_some((WriteKind::Created, 1)),
+        };
+        if let Some((kind, version)) = written {
+            self.seen().insert(id.to_owned(), Some(version));
+            return Ok(kind);
+        }
+        // Changed elsewhere: show the newer notes, and let the next write
+        // replace them.
+        let current = self.read(id).await?;
+        self.seen()
+            .insert(id.to_owned(), current.as_ref().map(|notes| notes.version));
+        let text = current.map_or_else(|| "(none)".to_owned(), |notes| notes.text);
+        Err(ToolError::failed(format!(
+            "These notes changed in another chat since this message arrived. They now read:\n{text}\nWrite them again, keeping what matters from both."
+        )))
     }
 
     /// What goes in front of a message from `sender`: their notes, then the
-    /// message as `<name>: <text>`.
-    pub fn opening(&self, sender: &Sender, text: &str) -> String {
-        let notes = match self.read(&sender.id) {
-            Ok(Some(notes)) if !notes.text.trim().is_empty() => format!(
-                "Notes on this person ({}, updated {}):\n{}",
-                sender.id,
-                notes.updated,
-                notes.text.trim_end()
-            ),
-            Ok(_) => format!("Notes on this person ({}): No notes yet.", sender.id),
+    /// message as `<name>: <text>`. Records the version shown.
+    pub async fn opening(&self, sender: &Sender, text: &str) -> String {
+        let notes = match self.read(&sender.id).await {
+            Ok(notes) => {
+                self.seen()
+                    .insert(sender.id.clone(), notes.as_ref().map(|notes| notes.version));
+                match notes {
+                    Some(notes) if !notes.text.trim().is_empty() => format!(
+                        "Notes on this person ({}, updated {}):\n{}",
+                        sender.id,
+                        notes.updated,
+                        notes.text.trim_end()
+                    ),
+                    _ => format!("Notes on this person ({}): No notes yet.", sender.id),
+                }
+            }
             Err(error) => {
                 tracing::warn!(user = %sender.id, error = %error, "notes could not be read");
                 format!("Notes on this person ({}): unreadable.", sender.id)
@@ -144,27 +200,6 @@ impl UserNotes {
         };
         format!("{notes}\n\n{}: {text}", clean_name(&sender.name))
     }
-}
-
-fn parse_notes(text: &str) -> Option<Notes> {
-    let rest = text.strip_prefix("---\n")?;
-    let (header, body) = rest
-        .split_once("\n---\n")
-        .or_else(|| rest.strip_suffix("\n---").map(|h| (h, "")))?;
-    let mut name = None;
-    let mut updated = None;
-    for line in header.lines() {
-        if let Some(value) = line.strip_prefix("name:") {
-            name = Some(value.trim().to_owned());
-        } else if let Some(value) = line.strip_prefix("updated:") {
-            updated = value.trim().parse::<NaiveDate>().ok();
-        }
-    }
-    Some(Notes {
-        name: name?,
-        updated: updated?,
-        text: body.to_owned(),
-    })
 }
 
 /// The guest session's instruction, before the channel line.
@@ -198,7 +233,7 @@ pub fn user_memory_tool() -> RegisteredTool {
                 .speaker()
                 .ok_or_else(|| ToolError::failed("This message has no sender to keep notes on."))?;
             let notes = arguments["notes"].as_str().unwrap_or_default();
-            store.write(&speaker.id, &speaker.name, notes)?;
+            store.write(&speaker.id, &speaker.name, notes).await?;
             Ok(ToolOutput::text("saved")
                 .with_notice(format!("Remembered: {}", clean_name(&speaker.name))))
         }),
@@ -207,13 +242,12 @@ pub fn user_memory_tool() -> RegisteredTool {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use super::*;
+    use crate::memory::InMemoryTables;
 
-    fn store(root: &Path) -> UserNotes {
+    fn store(tables: &Arc<InMemoryTables>) -> UserNotes {
         let day = NaiveDate::from_ymd_opt(2026, 11, 25).unwrap();
-        UserNotes::open(root, Arc::new(move || day))
+        UserNotes::open(tables.clone(), Arc::new(move || day))
     }
 
     fn bob() -> Sender {
@@ -241,56 +275,82 @@ mod tests {
         assert!(!valid_user_id(&format!("qq-{}", "a".repeat(65))));
     }
 
-    #[test]
-    fn notes_are_written_read_and_shown_before_the_message() {
-        let root = tempfile::tempdir().unwrap();
-        let notes = store(root.path());
-        assert_eq!(notes.read("telegram-123").unwrap(), None);
+    #[tokio::test]
+    async fn notes_are_written_read_and_shown_before_the_message() {
+        let tables = InMemoryTables::new();
+        let notes = store(&tables);
+        assert_eq!(notes.read("telegram-123").await.unwrap(), None);
         assert_eq!(
-            notes.opening(&bob(), "hi"),
+            notes.opening(&bob(), "hi").await,
             "Notes on this person (telegram-123): No notes yet.\n\nBob: hi"
         );
         assert_eq!(
             notes
-                .write("telegram-123", "Bob\nupdated: 1999-01-01", "Likes tea.")
+                .write("telegram-123", "Bob\nupdated: 1999-01-01", "Likes tea.\n")
+                .await
                 .unwrap(),
             WriteKind::Created
         );
-        let read = notes.read("telegram-123").unwrap().unwrap();
+        let read = notes.read("telegram-123").await.unwrap().unwrap();
         assert_eq!(read.name, "Bob updated: 1999-01-01", "one line");
         assert_eq!(read.updated, NaiveDate::from_ymd_opt(2026, 11, 25).unwrap());
         assert_eq!(read.text, "Likes tea.");
         assert_eq!(
-            notes.opening(&bob(), "hi"),
+            notes.opening(&bob(), "hi").await,
             "Notes on this person (telegram-123, updated 2026-11-25):\nLikes tea.\n\nBob: hi"
         );
         assert_eq!(
-            notes.write("telegram-123", "Bob", "x").unwrap(),
+            notes.write("telegram-123", "Bob", "x").await.unwrap(),
             WriteKind::Updated
-        );
-        let file = root.path().join("users/telegram-123.md");
-        use std::os::unix::fs::PermissionsExt;
-        assert_eq!(
-            std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
-            0o600
         );
     }
 
-    #[test]
-    fn oversized_secret_and_invalid_writes_are_refused() {
-        let root = tempfile::tempdir().unwrap();
-        let notes = store(root.path());
+    #[tokio::test]
+    async fn a_change_from_another_chat_fails_with_the_newer_notes() {
+        let tables = InMemoryTables::new();
+        let here = store(&tables);
+        let there = store(&tables);
+        here.opening(&bob(), "hi").await;
+        there.opening(&bob(), "hello").await;
+        there
+            .write("telegram-123", "Bob", "Studies physics.")
+            .await
+            .unwrap();
+
+        let error = here
+            .write("telegram-123", "Bob", "Likes tea.")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Studies physics."), "{error}");
+        assert_eq!(
+            here.read("telegram-123").await.unwrap().unwrap().text,
+            "Studies physics."
+        );
+        // The error showed the newer notes, so a merged write succeeds.
+        here.write("telegram-123", "Bob", "Studies physics. Likes tea.")
+            .await
+            .unwrap();
+        assert_eq!(tables.all_notes()[0].version, 2);
+    }
+
+    #[tokio::test]
+    async fn oversized_secret_and_invalid_writes_are_refused() {
+        let tables = InMemoryTables::new();
+        let notes = store(&tables);
         assert!(
             notes
                 .write("telegram-1", "A", &"x".repeat(NOTES_LIMIT + 1))
+                .await
                 .is_err()
         );
         assert!(
             notes
                 .write("telegram-1", "A", "key sk-abcdefghijklmnopqrstuvwxyz")
+                .await
                 .is_err()
         );
-        assert!(notes.write("../x", "A", "hi").is_err());
-        assert!(!root.path().join("users").exists());
+        assert!(notes.write("../x", "A", "hi").await.is_err());
+        assert!(tables.all_notes().is_empty());
     }
 }

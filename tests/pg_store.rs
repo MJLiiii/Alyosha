@@ -4,9 +4,11 @@
 //! `docs/SessionStore.md#verification`.
 
 use std::{
+    fs,
     path::{Path, PathBuf},
     process::Command,
-    time::Duration,
+    sync::Arc,
+    time::{Duration, SystemTime},
 };
 
 use alyosha::{
@@ -14,9 +16,15 @@ use alyosha::{
         AssistantEntry, AssistantPart, HistoryEntry, MessageId, MessageOrigin, Replay, ToolCall,
         ToolOutcome, ToolResultEntry, UserEntry,
     },
+    memory::{MemoryStore, MemoryTables},
     session_store::{PgStore, SessionStore, StoreError},
+    user_notes::UserNotes,
 };
+use chrono::NaiveDate;
 use serde_json::json;
+
+/// A memory folder that does not exist: nothing to import.
+const NO_FOLDER: &str = "/nonexistent/alyosha-memory";
 
 /// A running cluster, stopped when dropped.
 struct Cluster {
@@ -149,25 +157,32 @@ async fn pg_store_saves_loads_and_locks() {
     // Two processes starting together migrate once.
     cluster.create_database("migrate");
     let target = cluster.target("migrate");
-    let (first, second) = tokio::join!(PgStore::connect(&target), PgStore::connect(&target));
+    let (first, second) = tokio::join!(
+        PgStore::connect(&target, Path::new(NO_FOLDER)),
+        PgStore::connect(&target, Path::new(NO_FOLDER))
+    );
     first.unwrap();
     second.unwrap();
     assert_eq!(
         cluster.psql(
             "migrate",
-            "select string_agg(version::text, ',') from schema_version"
+            "select string_agg(version::text, ',' order by version) from schema_version"
         ),
-        "1"
+        "1,2"
     );
     cluster.psql("migrate", "insert into schema_version values (99)");
-    let Err(StoreError::Failed(error)) = PgStore::connect(&cluster.target("migrate")).await else {
+    let Err(StoreError::Failed(error)) =
+        PgStore::connect(&cluster.target("migrate"), Path::new(NO_FOLDER)).await
+    else {
         panic!("a newer database is refused");
     };
     assert!(error.contains("newer"), "{error}");
 
     // Append, checkpoint, and resume.
     cluster.create_database("alyosha");
-    let store = PgStore::connect(&cluster.target("alyosha")).await.unwrap();
+    let store = PgStore::connect(&cluster.target("alyosha"), Path::new(NO_FOLDER))
+        .await
+        .unwrap();
     let created = store
         .create("owner:telegram", Path::new("/w"))
         .await
@@ -205,7 +220,9 @@ async fn pg_store_saves_loads_and_locks() {
     );
 
     // Another process cannot open a held session.
-    let other = PgStore::connect(&cluster.target("alyosha")).await.unwrap();
+    let other = PgStore::connect(&cluster.target("alyosha"), Path::new(NO_FOLDER))
+        .await
+        .unwrap();
     assert_eq!(
         other.load_current("owner:telegram").await.unwrap_err(),
         StoreError::Busy
@@ -235,4 +252,296 @@ async fn pg_store_saves_loads_and_locks() {
     let current = other.load_current("owner:telegram").await.unwrap().unwrap();
     assert_eq!(current.id, newer.id);
     assert!(current.entries.is_empty());
+}
+
+fn put(root: &Path, path: &str, text: &str) {
+    let path = root.join(path);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(path, text).unwrap();
+}
+
+/// A state folder whose `memory` holds what an earlier build wrote.
+fn old_files() -> tempfile::TempDir {
+    let state = tempfile::tempdir().unwrap();
+    let memory = state.path().join("memory");
+    put(
+        &memory,
+        "owner/thesis-repo.md",
+        "---\ndescription: Thesis repository location\nupdated: 2026-11-20\n---\nIn ~/thesis.\nBuild with latexmk.\n\n",
+    );
+    put(
+        &memory,
+        "owner/editor.md",
+        "---\ndescription: The owner uses Helix\nupdated: 2026-11-24\n---\nHelix, not Vim.",
+    );
+    put(&memory, "owner/notes.txt", "not a memory");
+    put(
+        &memory,
+        "users/telegram-1.md",
+        "---\nname: Bob\nupdated: 2026-11-25\n---\nLikes tea.",
+    );
+    put(
+        &memory,
+        "users/qq-6F0A.md",
+        "---\nname: 小明\nupdated: 2026-11-26\n---\nPrefers Chinese.",
+    );
+    state
+}
+
+/// Each file's bytes and modification time.
+fn snapshot(folder: &Path) -> Vec<(PathBuf, Vec<u8>, SystemTime)> {
+    let mut files = Vec::new();
+    for sub in ["owner", "users"] {
+        for entry in fs::read_dir(folder.join(sub)).unwrap().flatten() {
+            let meta = entry.metadata().unwrap();
+            files.push((
+                entry.path(),
+                fs::read(entry.path()).unwrap(),
+                meta.modified().unwrap(),
+            ));
+        }
+    }
+    files.sort();
+    files
+}
+
+#[tokio::test]
+async fn memory_files_are_imported_once_and_checked() {
+    let Some(cluster) = Cluster::start() else {
+        return;
+    };
+
+    // Without a folder: empty tables at version 2.
+    cluster.create_database("empty");
+    PgStore::connect(&cluster.target("empty"), Path::new(NO_FOLDER))
+        .await
+        .unwrap();
+    assert_eq!(
+        cluster.psql("empty", "select max(version) from schema_version"),
+        "2"
+    );
+    assert_eq!(
+        cluster.psql(
+            "empty",
+            "select (select count(*) from memories) + (select count(*) from user_notes)"
+        ),
+        "0"
+    );
+
+    // Two processes start together: one import, equal to the files.
+    let state = old_files();
+    let folder = state.path().join("memory");
+    let before = snapshot(&folder);
+    cluster.create_database("imported");
+    let target = cluster.target("imported");
+    let (first, second) = tokio::join!(
+        PgStore::connect(&target, &folder),
+        PgStore::connect(&target, &folder)
+    );
+    first.unwrap();
+    let store = second.unwrap();
+    assert_eq!(
+        cluster.psql(
+            "imported",
+            "select string_agg(name || '|' || description || '|' || updated || '|' || version, ';' order by name) from memories"
+        ),
+        "editor|The owner uses Helix|2026-11-24|1;thesis-repo|Thesis repository location|2026-11-20|1"
+    );
+    assert_eq!(
+        cluster.psql(
+            "imported",
+            "select string_agg(person || '|' || name || '|' || notes || '|' || updated || '|' || version, ';' order by person) from user_notes"
+        ),
+        "qq-6F0A|小明|Prefers Chinese.|2026-11-26|1;telegram-1|Bob|Likes tea.|2026-11-25|1"
+    );
+    assert_eq!(
+        store.memory("thesis-repo").await.unwrap().unwrap().body,
+        "In ~/thesis.\nBuild with latexmk.\n\n"
+    );
+    assert_eq!(snapshot(&folder), before, "the files are untouched");
+
+    // A later start imports nothing, even after a file changed.
+    put(
+        &folder,
+        "owner/editor.md",
+        "---\ndescription: Changed\nupdated: 2026-11-27\n---\nZed.",
+    );
+    let again = PgStore::connect(&target, &folder).await.unwrap();
+    assert_eq!(
+        again.memory("editor").await.unwrap().unwrap().body,
+        "Helix, not Vim."
+    );
+
+    // The host's list.
+    let output = Command::new(env!("CARGO_BIN_EXE_alyosha"))
+        .arg("memory-list")
+        .env("ALYOSHA_DATABASE", &target)
+        .env("ALYOSHA_STATE", state.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "editor (2026-11-24): The owner uses Helix\nthesis-repo (2026-11-20): Thesis repository location\n2 memories · 2 people with notes\n"
+    );
+
+    // A dump restored into an emptied database imports nothing again.
+    cluster.create_database("restored");
+    let restore = Command::new("sh")
+        .arg("-c")
+        .arg(format!(
+            "pg_dump -h '{socket}' imported | psql -q -h '{socket}' -d restored",
+            socket = cluster.socket.display()
+        ))
+        .output()
+        .unwrap();
+    assert!(restore.status.success(), "{restore:?}");
+    let dump = Command::new("pg_dump")
+        .arg("-h")
+        .arg(&cluster.socket)
+        .arg("imported")
+        .output()
+        .unwrap();
+    let dump = String::from_utf8(dump.stdout).unwrap();
+    assert!(
+        dump.contains("thesis-repo") && dump.contains("telegram-1"),
+        "the dump holds the rows"
+    );
+    let restored = PgStore::connect(&cluster.target("restored"), &folder)
+        .await
+        .unwrap();
+    assert_eq!(restored.memories().await.unwrap().len(), 2);
+    assert_eq!(
+        restored.memory("editor").await.unwrap().unwrap().body,
+        "Helix, not Vim."
+    );
+
+    // A bad file fails the whole import, naming the file and why.
+    for (index, (path, text, reason)) in [
+        (
+            "owner/Bad.md",
+            Some("---\ndescription: x\nupdated: 2026-11-20\n---\n"),
+            "owner/Bad.md: not a valid memory name",
+        ),
+        ("owner/link.md", None, "owner/link.md: a symlink"),
+        (
+            "users/telegram-3.md",
+            Some("---\nname: Eve\n---\nx"),
+            "users/telegram-3.md: no date",
+        ),
+        (
+            "owner/empty.md",
+            Some("---\ndescription:\nupdated: 2026-11-20\n---\n"),
+            "owner/empty.md: an empty description",
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let state = old_files();
+        let folder = state.path().join("memory");
+        match text {
+            Some(text) => put(&folder, path, text),
+            None => std::os::unix::fs::symlink(folder.join("owner/editor.md"), folder.join(path))
+                .unwrap(),
+        }
+        let database = format!("bad{index}");
+        cluster.create_database(&database);
+        let target = cluster.target(&database);
+        let Err(StoreError::Import(message)) = PgStore::connect(&target, &folder).await else {
+            panic!("{path} fails the import");
+        };
+        assert!(
+            message.starts_with("Could not import memory from "),
+            "{message}"
+        );
+        assert!(message.ends_with(&format!(":\n{reason}")), "{message}");
+        assert_eq!(
+            cluster.psql(&database, "select max(version) from schema_version"),
+            "1"
+        );
+        assert_eq!(
+            cluster.psql(&database, "select to_regclass('memories') is null"),
+            "t"
+        );
+        fs::remove_file(folder.join(path)).unwrap();
+        let store = PgStore::connect(&target, &folder).await.unwrap();
+        assert_eq!(store.memories().await.unwrap().len(), 2, "{path}");
+        assert_eq!(store.count_notes().await.unwrap(), 2, "{path}");
+    }
+}
+
+#[tokio::test]
+async fn memory_versions_hold_across_connections() {
+    let Some(cluster) = Cluster::start() else {
+        return;
+    };
+    cluster.create_database("alyosha");
+    let target = cluster.target("alyosha");
+    let a_tables: Arc<dyn MemoryTables> = Arc::new(
+        PgStore::connect(&target, Path::new(NO_FOLDER))
+            .await
+            .unwrap(),
+    );
+    let b_tables: Arc<dyn MemoryTables> = Arc::new(
+        PgStore::connect(&target, Path::new(NO_FOLDER))
+            .await
+            .unwrap(),
+    );
+    let day = NaiveDate::from_ymd_opt(2026, 11, 25).unwrap();
+    let today = Arc::new(move || day);
+    let a = MemoryStore::open(a_tables.clone(), today.clone());
+    let b = MemoryStore::open(b_tables.clone(), today.clone());
+
+    a.write("thesis-repo", "Where", "A").await.unwrap();
+    a.read("thesis-repo").await.unwrap();
+    b.read("thesis-repo").await.unwrap();
+    b.write("thesis-repo", "Where", "B").await.unwrap();
+    let error = a.write("thesis-repo", "Where", "A2").await.unwrap_err();
+    assert!(
+        error.to_string().contains("changed since you read it"),
+        "{error}"
+    );
+    assert!(a.delete("thesis-repo").await.is_err());
+    assert!(a.read("thesis-repo").await.unwrap().ends_with("\nB"));
+    a.write("thesis-repo", "Where", "A2").await.unwrap();
+    assert_eq!(
+        cluster.psql("alyosha", "select body || version from memories"),
+        "A23"
+    );
+    // A new session, like a resumed one, reads before it writes.
+    let resumed = MemoryStore::open(b_tables.clone(), today.clone());
+    assert!(resumed.write("thesis-repo", "Where", "C").await.is_err());
+    resumed.read("thesis-repo").await.unwrap();
+    resumed.delete("thesis-repo").await.unwrap();
+    assert_eq!(
+        cluster.psql("alyosha", "select count(*) from memories"),
+        "0"
+    );
+
+    // People's notes: a change in another chat returns the newer notes.
+    let bob = alyosha::agent_state::Sender {
+        id: "telegram-2".into(),
+        name: "Bob".into(),
+    };
+    let here = UserNotes::open(a_tables, today.clone());
+    let there = UserNotes::open(b_tables, today);
+    here.opening(&bob, "hi").await;
+    there.opening(&bob, "hello").await;
+    there
+        .write("telegram-2", "Bob", "Studies physics.")
+        .await
+        .unwrap();
+    let error = here
+        .write("telegram-2", "Bob", "Likes tea.")
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("Studies physics."), "{error}");
+    here.write("telegram-2", "Bob", "Studies physics. Likes tea.")
+        .await
+        .unwrap();
+    assert_eq!(
+        cluster.psql("alyosha", "select notes || '|' || version from user_notes"),
+        "Studies physics. Likes tea.|2"
+    );
 }

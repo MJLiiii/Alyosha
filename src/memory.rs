@@ -1,31 +1,219 @@
-//! Memory: curated facts kept across sessions in one global store of Markdown
-//! files.
+//! Memory: curated facts kept across sessions in one global store in the
+//! session database.
 //!
 //! The model writes them freely through the `memory` tool and each write shows
-//! in the status area. The index goes into the system instruction once per
-//! session. See `docs/Memory.md#implementation`.
+//! in the status area. A version check keeps two sessions from overwriting
+//! each other. The index goes into the system instruction once per session.
+//! See `docs/Memory.md#implementation`.
+//!
+//! `MemoryTables` is the storage: `PgStore` keeps the rows in PostgreSQL, and
+//! `InMemoryTables` keeps them in memory for the scripted tests.
 
 use std::{
-    fs::{self, DirBuilder, File},
-    io::{Read, Write},
-    os::{fd::OwnedFd, unix::fs::DirBuilderExt},
-    path::{Path, PathBuf},
-    sync::Arc,
+    collections::{BTreeMap, HashMap},
+    sync::{Arc, Mutex, PoisonError},
 };
 
 use chrono::NaiveDate;
-use rustix::fs::{AtFlags, Mode, OFlags};
 use serde_json::{Value, json};
 
-use crate::tools::{
-    RegisteredTool, Scope, ToolContext, ToolDefinition, ToolError, ToolOutput, handler,
+use crate::{
+    BoxFuture,
+    tools::{RegisteredTool, Scope, ToolContext, ToolDefinition, ToolError, ToolOutput, handler},
 };
 
 pub const DESCRIPTION_LIMIT: usize = 160;
 pub const BODY_LIMIT: usize = 4 * 1024;
 pub const INDEX_BUDGET: usize = 4 * 1024;
 
-/// One readable memory.
+/// One row of `memories`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryRow {
+    pub name: String,
+    pub description: String,
+    pub body: String,
+    pub updated: NaiveDate,
+    pub version: i64,
+}
+
+/// One row of `user_notes`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotesRow {
+    pub person: String,
+    pub name: String,
+    pub notes: String,
+    pub updated: NaiveDate,
+    pub version: i64,
+}
+
+/// The `memories` and `user_notes` tables. Each write is one statement
+/// guarded by a version.
+pub trait MemoryTables: Send + Sync {
+    /// Every memory, in no particular order.
+    fn memories(&self) -> BoxFuture<'_, Result<Vec<MemoryRow>, String>>;
+    fn memory<'a>(&'a self, name: &'a str) -> BoxFuture<'a, Result<Option<MemoryRow>, String>>;
+    /// Inserts the row at version 1 unless the name exists. Returns whether
+    /// it did.
+    fn insert_memory<'a>(&'a self, row: &'a MemoryRow) -> BoxFuture<'a, Result<bool, String>>;
+    /// Replaces the row's description, body, and date if its version is
+    /// `seen`, and returns the new version.
+    fn update_memory<'a>(
+        &'a self,
+        row: &'a MemoryRow,
+        seen: i64,
+    ) -> BoxFuture<'a, Result<Option<i64>, String>>;
+    /// Deletes the row if its version is `seen`. Returns whether it did.
+    fn delete_memory<'a>(&'a self, name: &'a str, seen: i64)
+    -> BoxFuture<'a, Result<bool, String>>;
+    fn notes<'a>(&'a self, person: &'a str) -> BoxFuture<'a, Result<Option<NotesRow>, String>>;
+    /// Inserts the row at version 1 unless the person has notes.
+    fn insert_notes<'a>(&'a self, row: &'a NotesRow) -> BoxFuture<'a, Result<bool, String>>;
+    /// Replaces the name, notes, and date if the version is `seen`, and
+    /// returns the new version.
+    fn update_notes<'a>(
+        &'a self,
+        row: &'a NotesRow,
+        seen: i64,
+    ) -> BoxFuture<'a, Result<Option<i64>, String>>;
+}
+
+/// The tables in memory, for tests.
+#[derive(Default)]
+pub struct InMemoryTables {
+    inner: Mutex<InMemoryInner>,
+}
+
+#[derive(Default)]
+struct InMemoryInner {
+    memories: BTreeMap<String, MemoryRow>,
+    notes: BTreeMap<String, NotesRow>,
+}
+
+impl InMemoryTables {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, InMemoryInner> {
+        self.inner.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Puts a row in directly, as another process or a test setup would.
+    pub fn put_memory(&self, row: MemoryRow) {
+        self.lock().memories.insert(row.name.clone(), row);
+    }
+
+    /// Puts a person's notes in directly.
+    pub fn put_notes(&self, row: NotesRow) {
+        self.lock().notes.insert(row.person.clone(), row);
+    }
+
+    /// Every person's notes, for checks.
+    pub fn all_notes(&self) -> Vec<NotesRow> {
+        self.lock().notes.values().cloned().collect()
+    }
+}
+
+impl MemoryTables for InMemoryTables {
+    fn memories(&self) -> BoxFuture<'_, Result<Vec<MemoryRow>, String>> {
+        Box::pin(async move { Ok(self.lock().memories.values().cloned().collect()) })
+    }
+
+    fn memory<'a>(&'a self, name: &'a str) -> BoxFuture<'a, Result<Option<MemoryRow>, String>> {
+        Box::pin(async move { Ok(self.lock().memories.get(name).cloned()) })
+    }
+
+    fn insert_memory<'a>(&'a self, row: &'a MemoryRow) -> BoxFuture<'a, Result<bool, String>> {
+        Box::pin(async move {
+            let mut inner = self.lock();
+            if inner.memories.contains_key(&row.name) {
+                return Ok(false);
+            }
+            let mut row = row.clone();
+            row.version = 1;
+            inner.memories.insert(row.name.clone(), row);
+            Ok(true)
+        })
+    }
+
+    fn update_memory<'a>(
+        &'a self,
+        row: &'a MemoryRow,
+        seen: i64,
+    ) -> BoxFuture<'a, Result<Option<i64>, String>> {
+        Box::pin(async move {
+            let mut inner = self.lock();
+            match inner.memories.get_mut(&row.name) {
+                Some(stored) if stored.version == seen => {
+                    stored.description = row.description.clone();
+                    stored.body = row.body.clone();
+                    stored.updated = row.updated;
+                    stored.version += 1;
+                    Ok(Some(stored.version))
+                }
+                _ => Ok(None),
+            }
+        })
+    }
+
+    fn delete_memory<'a>(
+        &'a self,
+        name: &'a str,
+        seen: i64,
+    ) -> BoxFuture<'a, Result<bool, String>> {
+        Box::pin(async move {
+            let mut inner = self.lock();
+            if inner
+                .memories
+                .get(name)
+                .is_some_and(|row| row.version == seen)
+            {
+                inner.memories.remove(name);
+                return Ok(true);
+            }
+            Ok(false)
+        })
+    }
+
+    fn notes<'a>(&'a self, person: &'a str) -> BoxFuture<'a, Result<Option<NotesRow>, String>> {
+        Box::pin(async move { Ok(self.lock().notes.get(person).cloned()) })
+    }
+
+    fn insert_notes<'a>(&'a self, row: &'a NotesRow) -> BoxFuture<'a, Result<bool, String>> {
+        Box::pin(async move {
+            let mut inner = self.lock();
+            if inner.notes.contains_key(&row.person) {
+                return Ok(false);
+            }
+            let mut row = row.clone();
+            row.version = 1;
+            inner.notes.insert(row.person.clone(), row);
+            Ok(true)
+        })
+    }
+
+    fn update_notes<'a>(
+        &'a self,
+        row: &'a NotesRow,
+        seen: i64,
+    ) -> BoxFuture<'a, Result<Option<i64>, String>> {
+        Box::pin(async move {
+            let mut inner = self.lock();
+            match inner.notes.get_mut(&row.person) {
+                Some(stored) if stored.version == seen => {
+                    stored.name = row.name.clone();
+                    stored.notes = row.notes.clone();
+                    stored.updated = row.updated;
+                    stored.version += 1;
+                    Ok(Some(stored.version))
+                }
+                _ => Ok(None),
+            }
+        })
+    }
+}
+
+/// One memory as the index and `list` show it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryEntry {
     pub name: String,
@@ -33,12 +221,21 @@ pub struct MemoryEntry {
     pub updated: NaiveDate,
 }
 
+impl From<&MemoryRow> for MemoryEntry {
+    fn from(row: &MemoryRow) -> Self {
+        Self {
+            name: row.name.clone(),
+            description: row.description.clone(),
+            updated: row.updated,
+        }
+    }
+}
+
 /// The index for the system instruction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryIndex {
     pub text: String,
     pub omitted: usize,
-    pub unreadable: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,20 +247,6 @@ pub enum WriteKind {
 /// Where today's date comes from, in the owner's timezone.
 pub type Today = Arc<dyn Fn() -> NaiveDate + Send + Sync>;
 
-/// One scope of the memory store.
-pub struct MemoryStore {
-    dir: PathBuf,
-    today: Today,
-}
-
-impl std::fmt::Debug for MemoryStore {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("MemoryStore")
-            .field("dir", &self.dir)
-            .finish_non_exhaustive()
-    }
-}
-
 /// Whether a name is valid: `[a-z0-9][a-z0-9-]{0,63}`.
 pub fn valid_name(name: &str) -> bool {
     let bytes = name.as_bytes();
@@ -74,116 +257,100 @@ pub fn valid_name(name: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-')
 }
 
+fn storage_error(error: String) -> ToolError {
+    ToolError::failed(format!("The memory store failed: {error}"))
+}
+
+/// The entries, newest first, then by name.
+fn sorted_entries(rows: &[MemoryRow]) -> Vec<MemoryEntry> {
+    let mut entries: Vec<MemoryEntry> = rows.iter().map(MemoryEntry::from).collect();
+    entries.sort_by(|a, b| b.updated.cmp(&a.updated).then_with(|| a.name.cmp(&b.name)));
+    entries
+}
+
+/// The index of the memories in `tables`.
+pub async fn index(tables: &dyn MemoryTables) -> Result<MemoryIndex, String> {
+    let entries = sorted_entries(&tables.memories().await?);
+    let (text, omitted) = index_text(&entries);
+    Ok(MemoryIndex { text, omitted })
+}
+
+/// What `alyosha memory list` prints: one line per memory, sorted by name,
+/// then the counts.
+pub fn host_list(rows: &[MemoryRow], people: i64) -> String {
+    let mut rows: Vec<&MemoryRow> = rows.iter().collect();
+    rows.sort_by(|a, b| a.name.cmp(&b.name));
+    let mut text: String = rows
+        .iter()
+        .map(|row| format!("{} ({}): {}\n", row.name, row.updated, row.description))
+        .collect();
+    let memories = if rows.len() == 1 {
+        "memory"
+    } else {
+        "memories"
+    };
+    let people_word = if people == 1 { "person" } else { "people" };
+    text.push_str(&format!(
+        "{} {memories} · {people} {people_word} with notes\n",
+        rows.len()
+    ));
+    text
+}
+
+/// A session's view of the memory store: the tables and the version of each
+/// memory this session read or wrote.
+pub struct MemoryStore {
+    tables: Arc<dyn MemoryTables>,
+    today: Today,
+    seen: Mutex<HashMap<String, i64>>,
+}
+
+impl std::fmt::Debug for MemoryStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MemoryStore").finish_non_exhaustive()
+    }
+}
+
 impl MemoryStore {
-    /// The `scope` directory under `root`. A missing directory is an empty
-    /// store.
-    pub fn open(root: &Path, scope: &str, today: Today) -> Self {
+    pub fn open(tables: Arc<dyn MemoryTables>, today: Today) -> Self {
         Self {
-            dir: root.join(scope),
+            tables,
             today,
+            seen: Mutex::default(),
         }
     }
 
-    fn dir_fd(&self) -> Option<OwnedFd> {
-        rustix::fs::open(
-            &self.dir,
-            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
-            Mode::empty(),
-        )
-        .ok()
+    fn seen(&self) -> std::sync::MutexGuard<'_, HashMap<String, i64>> {
+        self.seen.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    pub(crate) fn read_raw(&self, name: &str) -> Result<Option<String>, ToolError> {
-        let Some(dir) = self.dir_fd() else {
-            return Ok(None);
-        };
-        let file = rustix::fs::openat(
-            &dir,
-            format!("{name}.md"),
-            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
-            Mode::empty(),
-        );
-        match file {
-            Ok(fd) => {
-                let mut file = File::from(fd);
-                if !file.metadata().is_ok_and(|meta| meta.is_file()) {
-                    return Err(ToolError::failed(format!(
-                        "Memory {name} is not a regular file."
-                    )));
-                }
-                let mut text = String::new();
-                file.read_to_string(&mut text).map_err(|error| {
-                    ToolError::failed(format!("Could not read memory {name}: {error}"))
-                })?;
-                Ok(Some(text))
-            }
-            Err(rustix::io::Errno::NOENT) => Ok(None),
-            Err(rustix::io::Errno::LOOP) => {
-                Err(ToolError::failed(format!("Memory {name} is a symlink.")))
-            }
-            Err(errno) => Err(ToolError::failed(format!(
-                "Could not read memory {name}: {errno}"
-            ))),
-        }
+    pub async fn index(&self) -> Result<MemoryIndex, String> {
+        index(self.tables.as_ref()).await
     }
 
-    /// Every readable entry, and the names of files without a valid header.
-    fn scan(&self) -> (Vec<MemoryEntry>, Vec<String>) {
-        let mut entries = Vec::new();
-        let mut unreadable = Vec::new();
-        let Ok(listing) = fs::read_dir(&self.dir) else {
-            return (entries, unreadable);
-        };
-        for item in listing.flatten() {
-            let file_name = item.file_name().to_string_lossy().into_owned();
-            let Some(name) = file_name.strip_suffix(".md") else {
-                continue;
-            };
-            if !valid_name(name) {
-                continue;
-            }
-            match self
-                .read_raw(name)
-                .ok()
-                .flatten()
-                .as_deref()
-                .and_then(parse_memory)
-            {
-                Some((description, updated, _)) => entries.push(MemoryEntry {
-                    name: name.to_owned(),
-                    description,
-                    updated,
-                }),
-                None => unreadable.push(name.to_owned()),
-            }
-        }
-        entries.sort_by(|a, b| b.updated.cmp(&a.updated).then_with(|| a.name.cmp(&b.name)));
-        unreadable.sort();
-        (entries, unreadable)
+    pub async fn list(&self) -> Result<Vec<MemoryEntry>, ToolError> {
+        let rows = self.tables.memories().await.map_err(storage_error)?;
+        Ok(sorted_entries(&rows))
     }
 
-    pub fn list(&self) -> Vec<MemoryEntry> {
-        self.scan().0
-    }
-
-    pub fn index(&self) -> MemoryIndex {
-        let (entries, unreadable) = self.scan();
-        let (text, omitted) = index_text(&entries);
-        MemoryIndex {
-            text,
-            omitted,
-            unreadable,
-        }
-    }
-
-    /// The file text, header included, even when the header is invalid.
-    pub fn read(&self, name: &str) -> Result<String, ToolError> {
+    /// The memory with its header, and records its version for this
+    /// session.
+    pub async fn read(&self, name: &str) -> Result<String, ToolError> {
         check_name(name)?;
-        self.read_raw(name)?
-            .ok_or_else(|| ToolError::failed(format!("There is no memory named {name}.")))
+        let row = self
+            .tables
+            .memory(name)
+            .await
+            .map_err(storage_error)?
+            .ok_or_else(|| missing(name))?;
+        self.seen().insert(name.to_owned(), row.version);
+        Ok(format!(
+            "---\ndescription: {}\nupdated: {}\n---\n{}",
+            row.description, row.updated, row.body
+        ))
     }
 
-    pub fn write(
+    pub async fn write(
         &self,
         name: &str,
         description: &str,
@@ -211,7 +378,7 @@ impl MemoryStore {
             )));
         }
         let today = (self.today)();
-        let (entries, _) = self.scan();
+        let entries = sorted_entries(&self.tables.memories().await.map_err(storage_error)?);
         let before = full_index_len(&entries);
         let mut after_entries: Vec<MemoryEntry> = entries
             .iter()
@@ -229,66 +396,69 @@ impl MemoryStore {
                 "The memory index is full. Merge related memories or delete ones that no longer apply, then try again.",
             ));
         }
-        let kind = if self.read_raw(name)?.is_some() {
-            WriteKind::Updated
-        } else {
-            WriteKind::Created
+        let row = MemoryRow {
+            name: name.to_owned(),
+            description: description.to_owned(),
+            body: content.to_owned(),
+            updated: today,
+            version: 1,
         };
-        let text = format!("---\ndescription: {description}\nupdated: {today}\n---\n{content}");
-        self.store(name, text.as_bytes())?;
+        let seen = self.seen().get(name).copied();
+        let (kind, version) = match seen {
+            Some(seen) => match self
+                .tables
+                .update_memory(&row, seen)
+                .await
+                .map_err(storage_error)?
+            {
+                Some(version) => (WriteKind::Updated, version),
+                None => return Err(changed(name)),
+            },
+            None => {
+                if self
+                    .tables
+                    .insert_memory(&row)
+                    .await
+                    .map_err(storage_error)?
+                {
+                    (WriteKind::Created, 1)
+                } else {
+                    return Err(changed(name));
+                }
+            }
+        };
+        self.seen().insert(name.to_owned(), version);
         Ok(kind)
     }
 
-    pub fn delete(&self, name: &str) -> Result<(), ToolError> {
+    pub async fn delete(&self, name: &str) -> Result<(), ToolError> {
         check_name(name)?;
-        let dir = self
-            .dir_fd()
-            .ok_or_else(|| ToolError::failed(format!("There is no memory named {name}.")))?;
-        rustix::fs::unlinkat(&dir, format!("{name}.md"), AtFlags::empty()).map_err(|errno| {
-            match errno {
-                rustix::io::Errno::NOENT => {
-                    ToolError::failed(format!("There is no memory named {name}."))
-                }
-                other => ToolError::failed(format!("Could not delete memory {name}: {other}")),
-            }
-        })
-    }
-
-    /// Stages the file in the scope directory and renames it into place.
-    pub(crate) fn store(&self, name: &str, bytes: &[u8]) -> Result<(), ToolError> {
-        let failed =
-            |error: String| ToolError::failed(format!("Could not save memory {name}: {error}"));
-        DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(&self.dir)
-            .map_err(|error| failed(error.to_string()))?;
-        let dir = self
-            .dir_fd()
-            .ok_or_else(|| failed("the folder cannot be opened".into()))?;
-        let staging = format!(".{name}.{}.tmp", crate::environment::random_suffix());
-        let fd = rustix::fs::openat(
-            &dir,
-            &staging,
-            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::from_raw_mode(0o600),
-        )
-        .map_err(|errno| failed(errno.to_string()))?;
-        let mut file = File::from(fd);
-        let result = file
-            .write_all(bytes)
-            .and_then(|()| file.sync_all())
-            .map_err(|error| error.to_string())
-            .and_then(|()| {
-                rustix::fs::renameat(&dir, &staging, &dir, format!("{name}.md"))
-                    .map_err(|errno| errno.to_string())
-            });
-        if let Err(error) = result {
-            let _ = rustix::fs::unlinkat(&dir, &staging, AtFlags::empty());
-            return Err(failed(error));
+        let seen = self.seen().get(name).copied();
+        if let Some(seen) = seen
+            && self
+                .tables
+                .delete_memory(name, seen)
+                .await
+                .map_err(storage_error)?
+        {
+            self.seen().remove(name);
+            return Ok(());
         }
-        Ok(())
+        match self.tables.memory(name).await.map_err(storage_error)? {
+            Some(_) => Err(changed(name)),
+            None => Err(missing(name)),
+        }
     }
+}
+
+fn missing(name: &str) -> ToolError {
+    ToolError::failed(format!("There is no memory named {name}."))
+}
+
+fn changed(name: &str) -> ToolError {
+    ToolError::failed(format!(
+        "{name} changed since you read it, or was never read in this session. Read it again first."
+    ))
 }
 
 fn check_name(name: &str) -> Result<(), ToolError> {
@@ -299,28 +469,6 @@ fn check_name(name: &str) -> Result<(), ToolError> {
             "{name:?} is not a valid memory name: use lowercase letters, digits, and hyphens, up to 64 characters."
         )))
     }
-}
-
-/// The description, date, and body of a memory file.
-fn parse_memory(text: &str) -> Option<(String, NaiveDate, String)> {
-    let rest = text.strip_prefix("---\n")?;
-    let (header, body) = rest
-        .split_once("\n---\n")
-        .or_else(|| rest.strip_suffix("\n---").map(|h| (h, "")))?;
-    let mut description = None;
-    let mut updated = None;
-    for line in header.lines() {
-        if let Some(value) = line.strip_prefix("description:") {
-            description = Some(value.trim().to_owned());
-        } else if let Some(value) = line.strip_prefix("updated:") {
-            updated = value.trim().parse::<NaiveDate>().ok();
-        }
-    }
-    Some((
-        description.filter(|d| !d.is_empty())?,
-        updated?,
-        body.to_owned(),
-    ))
 }
 
 fn line(entry: &MemoryEntry) -> String {
@@ -422,7 +570,7 @@ pub fn memory_tool() -> RegisteredTool {
     RegisteredTool {
         definition: ToolDefinition {
             name: "memory".into(),
-            description: "Your long-term memory, shared across sessions. `list` shows every memory, `read` returns one, `write` creates or replaces a whole memory from name, description (one line), and content, and `delete` removes one. Names use lowercase letters, digits, and hyphens.".into(),
+            description: "Your long-term memory, shared across sessions. `list` shows every memory, `read` returns one, `write` creates or replaces a whole memory from name, description (one line), and content, and `delete` removes one. To change or delete an existing memory, `read` it first in this session. Names use lowercase letters, digits, and hyphens.".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -449,13 +597,13 @@ pub fn memory_tool() -> RegisteredTool {
             let need_name = || name.ok_or_else(|| ToolError::failed("This command needs a name."));
             match arguments["command"].as_str().unwrap_or_default() {
                 "list" => {
-                    let entries = store.list();
+                    let entries = store.list().await?;
                     if entries.is_empty() {
                         return Ok(ToolOutput::text("No memories yet."));
                     }
                     Ok(ToolOutput::text(entries.iter().map(line).collect::<String>()))
                 }
-                "read" => Ok(ToolOutput::text(store.read(need_name()?)?)),
+                "read" => Ok(ToolOutput::text(store.read(need_name()?).await?)),
                 "write" => {
                     let name = need_name()?;
                     let description = arguments["description"]
@@ -464,13 +612,13 @@ pub fn memory_tool() -> RegisteredTool {
                     let content = arguments["content"]
                         .as_str()
                         .ok_or_else(|| ToolError::failed("write needs content."))?;
-                    let kind = store.write(name, description, content)?;
+                    let kind = store.write(name, description, content).await?;
                     let text = if kind == WriteKind::Created { "created" } else { "updated" };
                     Ok(ToolOutput::text(text).with_notice(format!("Remembered: {name}")))
                 }
                 "delete" => {
                     let name = need_name()?;
-                    store.delete(name)?;
+                    store.delete(name).await?;
                     Ok(ToolOutput::text(format!("Deleted {name}.")).with_notice(format!("Forgot: {name}")))
                 }
                 other => Err(ToolError::failed(format!("Unknown memory command {other:?}."))),
@@ -481,22 +629,51 @@ pub fn memory_tool() -> RegisteredTool {
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::PermissionsExt;
-
     use super::*;
 
-    fn store(root: &Path, date: &str) -> MemoryStore {
-        let date: NaiveDate = date.parse().unwrap();
-        MemoryStore::open(root, "owner", Arc::new(move || date))
+    fn date(text: &str) -> NaiveDate {
+        text.parse().unwrap()
+    }
+
+    fn store(tables: &Arc<InMemoryTables>, day: &str) -> MemoryStore {
+        let day = date(day);
+        MemoryStore::open(tables.clone(), Arc::new(move || day))
     }
 
     #[test]
-    fn an_empty_store_then_a_first_write() {
-        let root = tempfile::tempdir().unwrap();
-        let memory_root = root.path().join("memory");
-        let store = store(&memory_root, "2026-11-25");
+    fn the_host_list_is_sorted_by_name_and_counts() {
+        let row = |name: &str, day: &str| MemoryRow {
+            name: name.into(),
+            description: format!("About {name}"),
+            body: String::new(),
+            updated: date(day),
+            version: 1,
+        };
         assert_eq!(
-            instruction_section(&store.index()).lines().last(),
+            host_list(
+                &[
+                    row("thesis-repo", "2026-11-26"),
+                    row("editor", "2026-11-20")
+                ],
+                2
+            ),
+            "editor (2026-11-20): About editor\nthesis-repo (2026-11-26): About thesis-repo\n2 memories · 2 people with notes\n"
+        );
+        assert_eq!(
+            host_list(&[row("a", "2026-11-20")], 1).lines().last(),
+            Some("1 memory · 1 person with notes")
+        );
+        assert_eq!(host_list(&[], 0), "0 memories · 0 people with notes\n");
+    }
+
+    #[tokio::test]
+    async fn an_empty_store_then_a_first_write() {
+        let tables = InMemoryTables::new();
+        let store = store(&tables, "2026-11-25");
+        assert_eq!(
+            instruction_section(&store.index().await.unwrap())
+                .lines()
+                .last(),
             Some("No memories yet.")
         );
         assert_eq!(
@@ -506,118 +683,153 @@ mod tests {
                     "Thesis lives in ~/Projects/thesis",
                     "Use LaTeX."
                 )
+                .await
                 .unwrap(),
             WriteKind::Created
         );
-        let dir = memory_root.join("owner");
         assert_eq!(
-            fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
-            0o700
-        );
-        assert_eq!(
-            fs::metadata(dir.join("thesis-repo.md"))
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o777,
-            0o600
-        );
-        assert_eq!(
-            store.read("thesis-repo").unwrap(),
+            store.read("thesis-repo").await.unwrap(),
             "---\ndescription: Thesis lives in ~/Projects/thesis\nupdated: 2026-11-25\n---\nUse LaTeX."
         );
     }
 
-    #[test]
-    fn an_update_takes_the_new_date() {
-        let root = tempfile::tempdir().unwrap();
-        store(root.path(), "2026-11-20")
+    #[tokio::test]
+    async fn an_update_takes_the_new_date() {
+        let tables = InMemoryTables::new();
+        store(&tables, "2026-11-20")
             .write("editor", "Uses Helix", "x")
+            .await
             .unwrap();
-        let later = store(root.path(), "2026-11-25");
+        let later = store(&tables, "2026-11-25");
+        later.read("editor").await.unwrap();
         assert_eq!(
-            later.write("editor", "Uses Helix and Zed", "y").unwrap(),
+            later
+                .write("editor", "Uses Helix and Zed", "y")
+                .await
+                .unwrap(),
             WriteKind::Updated
         );
-        let entries = later.list();
+        let entries = later.list().await.unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].updated.to_string(), "2026-11-25");
         assert_eq!(
-            later.index().text,
+            later.index().await.unwrap().text,
             "- editor (2026-11-25): Uses Helix and Zed\n"
         );
     }
 
-    #[test]
-    fn bad_names_and_symlinks_are_refused() {
-        let root = tempfile::tempdir().unwrap();
-        let store = store(root.path(), "2026-11-25");
+    #[tokio::test]
+    async fn a_change_from_another_session_must_be_read_first() {
+        let tables = InMemoryTables::new();
+        let first = store(&tables, "2026-11-25");
+        first.write("thesis-repo", "Where", "A").await.unwrap();
+        let a = store(&tables, "2026-11-25");
+        let b = store(&tables, "2026-11-25");
+        a.read("thesis-repo").await.unwrap();
+        b.read("thesis-repo").await.unwrap();
+        b.write("thesis-repo", "Where", "B").await.unwrap();
+
+        let error = a.write("thesis-repo", "Where", "A2").await.unwrap_err();
+        assert!(
+            error.to_string().contains(
+                "thesis-repo changed since you read it, or was never read in this session"
+            ),
+            "{error}"
+        );
+        assert!(a.delete("thesis-repo").await.is_err());
+        assert!(b.read("thesis-repo").await.unwrap().ends_with("\nB"));
+
+        a.read("thesis-repo").await.unwrap();
+        a.write("thesis-repo", "Where", "A2").await.unwrap();
+        assert!(a.read("thesis-repo").await.unwrap().ends_with("\nA2"));
+
+        // Writing an existing memory without reading it first fails.
+        let fresh = store(&tables, "2026-11-25");
+        assert!(fresh.write("thesis-repo", "Where", "C").await.is_err());
+        // Deleting needs a read too; a missing memory says so.
+        assert!(
+            fresh
+                .delete("thesis-repo")
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("changed since")
+        );
+        assert!(
+            fresh
+                .delete("nothing")
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("There is no memory named nothing")
+        );
+        a.delete("thesis-repo").await.unwrap();
+        assert!(a.read("thesis-repo").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn bad_names_are_refused() {
+        let tables = InMemoryTables::new();
+        let store = store(&tables, "2026-11-25");
         for name in ["../x", "A", &"a".repeat(65), ""] {
-            assert!(store.write(name, "d", "c").is_err(), "{name}");
+            assert!(store.write(name, "d", "c").await.is_err(), "{name}");
+            assert!(store.read(name).await.is_err(), "{name}");
         }
-        fs::create_dir_all(root.path().join("owner")).unwrap();
-        fs::write(root.path().join("outside.md"), "secret").unwrap();
-        std::os::unix::fs::symlink(
-            root.path().join("outside.md"),
-            root.path().join("owner/x.md"),
-        )
-        .unwrap();
-        assert!(store.read("x").is_err());
-        assert_eq!(
-            fs::read_to_string(root.path().join("outside.md")).unwrap(),
-            "secret"
-        );
+        assert!(tables.memories().await.unwrap().is_empty());
     }
 
-    #[test]
-    fn oversized_and_secret_text_is_refused() {
-        let root = tempfile::tempdir().unwrap();
-        let store = store(root.path(), "2026-11-25");
-        store.write("keep", "original", "body").unwrap();
-        let before = store.read("keep").unwrap();
-        assert!(store.write("keep", &"d".repeat(161), "body").is_err());
-        assert!(store.write("keep", "two\nlines", "body").is_err());
-        assert!(store.write("keep", "fine", &"b".repeat(4097)).is_err());
-        assert!(
-            store
-                .write("keep", "fine", "key sk-abcdefghijklmnopqrstuvwxyz")
-                .is_err()
-        );
-        assert!(
-            store
-                .write("keep", "fine", "-----BEGIN OPENSSH PRIVATE KEY-----")
-                .is_err()
-        );
-        assert!(store.write("keep", "fine", "AKIAABCDEFGHIJKLMNOP").is_err());
-        assert_eq!(store.read("keep").unwrap(), before);
+    #[tokio::test]
+    async fn oversized_and_secret_text_is_refused() {
+        let tables = InMemoryTables::new();
+        let store = store(&tables, "2026-11-25");
+        store.write("keep", "original", "body").await.unwrap();
+        let before = store.read("keep").await.unwrap();
+        for (description, body) in [
+            ("d".repeat(161).as_str(), "body"),
+            ("two\nlines", "body"),
+            ("fine", "b".repeat(4097).as_str()),
+            ("fine", "key sk-abcdefghijklmnopqrstuvwxyz"),
+            ("fine", "-----BEGIN OPENSSH PRIVATE KEY-----"),
+            ("fine", "AKIAABCDEFGHIJKLMNOP"),
+        ] {
+            assert!(store.write("keep", description, body).await.is_err());
+        }
+        assert_eq!(store.read("keep").await.unwrap(), before);
     }
 
-    #[test]
-    fn a_full_index_refuses_growth_but_allows_same_size_updates() {
-        let root = tempfile::tempdir().unwrap();
-        let store = store(root.path(), "2026-11-25");
+    #[tokio::test]
+    async fn a_full_index_refuses_growth_but_allows_same_size_updates() {
+        let tables = InMemoryTables::new();
+        let store = store(&tables, "2026-11-25");
         let description = "d".repeat(150);
         let mut written = 0;
         while store
             .write(&format!("m{written:03}"), &description, "x")
+            .await
             .is_ok()
         {
             written += 1;
         }
         assert!(written > 10);
-        let error = store.write("one-more", &description, "x").unwrap_err();
+        let error = store
+            .write("one-more", &description, "x")
+            .await
+            .unwrap_err();
         assert!(error.to_string().contains("Merge"), "{error}");
-        store.write("m000", &description, "changed").unwrap();
+        store.write("m000", &description, "changed").await.unwrap();
 
-        // Hand-edited files beyond the budget: newest first, then the count.
+        // Rows inserted directly beyond the budget: newest first, then the
+        // count.
         for extra in 0..10 {
-            fs::write(
-                root.path().join(format!("owner/old{extra}.md")),
-                format!("---\ndescription: {description}\nupdated: 2020-01-01\n---\nx"),
-            )
-            .unwrap();
+            tables.put_memory(MemoryRow {
+                name: format!("old{extra}"),
+                description: description.clone(),
+                body: "x".into(),
+                updated: date("2020-01-01"),
+                version: 1,
+            });
         }
-        let index = store.index();
+        let index = store.index().await.unwrap();
         assert!(index.omitted >= 10);
         assert!(index.text.starts_with("- m000 (2026-11-25)"));
         assert!(index.text.ends_with(&format!(
@@ -625,17 +837,5 @@ mod tests {
             index.omitted
         )));
         assert!(index.text.len() <= INDEX_BUDGET + 100);
-    }
-
-    #[test]
-    fn a_file_without_a_header_is_skipped_but_readable() {
-        let root = tempfile::tempdir().unwrap();
-        let store = store(root.path(), "2026-11-25");
-        fs::create_dir_all(root.path().join("owner")).unwrap();
-        fs::write(root.path().join("owner/loose.md"), "just text").unwrap();
-        let index = store.index();
-        assert_eq!(index.unreadable, ["loose"]);
-        assert!(index.text.is_empty());
-        assert_eq!(store.read("loose").unwrap(), "just text");
     }
 }

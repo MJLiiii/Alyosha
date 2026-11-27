@@ -76,7 +76,7 @@ Connect to `host=/run/postgresql dbname=alyosha` as the user in `USER`, which pe
 
 ### Schema
 
-Embed the migrations in the binary as numbered SQL files, `migrations/001_sessions.sql` and so on. On connecting, take `pg_advisory_lock(0)`, apply every file newer than `schema_version` in one transaction, then release the lock, so two processes starting together migrate once. A database newer than the binary is an error.
+Embed the migrations in the binary as numbered SQL files, `migrations/001_sessions.sql` and so on. On connecting, take `pg_advisory_lock(0)`, apply every file newer than `schema_version` in one transaction, then release the lock, so two processes starting together migrate once. A database newer than the binary is an error. Migration 2, `002_memory.sql`, also imports the memory files of earlier builds in its transaction, so connect takes the memory folder. [Import the old files](Memory.md#import-the-old-files)
 
 ```sql
 create table schema_version (version integer not null);

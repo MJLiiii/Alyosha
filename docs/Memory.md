@@ -19,6 +19,8 @@ The database keeps memory consistent across the sessions that share it and puts 
 
 The store is global. Every session sees the same memories. They hold what Alyosha knows about you. Your sessions, in your private chats, see them, and so do the sessions of group chats you list as trusted. Guest sessions in other group chats never see them; they use the notes kept for each person. [People in group chats](#people-in-group-chats)
 
+Earlier versions kept memories and people's notes as files under `/var/lib/alyosha/memory`. The first start of the database version copies them in, once, checks the copy against the files, and leaves the files where they are. If a file cannot be copied, the bridges do not start until you fix it, so nothing is dropped unseen. [Move memory into the database](Deployment.md#move-memory-into-the-database) · [Import the old files](#import-the-old-files)
+
 ## What the model sees
 
 When a session starts, Alyosha reads the store and builds an **index** with one line per memory: its name, description, and date. Alyosha appends the index to the normal system instruction, along with short guidance on using memory. The instruction stays the same between compactions, so compaction never removes it and provider prompt caching keeps working. A memory written during the session appears in the index after the next compaction or restart, when Alyosha rebuilds the index. [Durable sessions](SessionStore.md#without-the-nightly-fresh-start) The model already sees the write in its own history. [Default instruction](LLMClientGateway.md#default-instruction-for-normal-requests) · [Context Manager](ContextManager.md)
@@ -76,20 +78,28 @@ Open one `MemoryStore` on the session database at startup. Build the memory inde
 ### V1 store contract
 
 ```text
-MemoryStore                      # async, on the session database connection
-    open(db) -> MemoryStore
+MemoryTables                     # trait: the two tables, each write one guarded statement
+    memories() / memory(name)
+    insert_memory(row) -> bool                 # false if the name exists
+    update_memory(row, seen) -> Option<i64>    # the new version, or None
+    delete_memory(name, seen) -> bool
+    notes(person) / insert_notes(row) / update_notes(row, seen)
+
+MemoryStore                      # one per session: the tables and the versions it saw
+    open(tables, today) -> MemoryStore
     index(&self) -> MemoryIndex
     list(&self) -> Vec<MemoryEntry>
-    read(&self, name: &str) -> Result<Memory, MemoryError>
-    write(&self, name: &str, description: &str, content: &str, seen: Option<i64>)
-        -> Result<WriteKind, MemoryError>
-    delete(&self, name: &str, seen: i64) -> Result<(), MemoryError>
+    read(&self, name) -> String                # records the version
+    write(&self, name, description, content) -> WriteKind
+    delete(&self, name)
 
-MemoryEntry { name: String, description: String, updated: Date }
-Memory      { entry: MemoryEntry, body: String, version: i64 }
+MemoryRow   { name, description, body, updated: Date, version: i64 }
+MemoryEntry { name, description, updated: Date }
 MemoryIndex { text: String, omitted: usize }
 WriteKind   Created | Updated
 ```
+
+`PgStore` implements `MemoryTables` on the session store's connection, and the front end passes it to each session. `InMemoryTables` implements it in memory for the scripted tests, as the session store's `MemoryStore` does for history. [The store](SessionStore.md#the-store)
 
 - **Table.** Migration `002_memory.sql` adds the table to the session database. [Schema](SessionStore.md#schema)
 
@@ -168,11 +178,11 @@ The patterns are a guard against accidents, not a guarantee.
 Guest sessions use a second store for the notes Alyosha keeps on each person in group chats. Your sessions never open it, and guest sessions never open the `owner` scope. [People in group chats](#people-in-group-chats) · [Guest mode](Channels.md#guest-mode)
 
 ```text
-UserNotes                        # async, on the session database connection
-    open(db, today) -> UserNotes
+UserNotes                        # one per guest session, on the same MemoryTables
+    open(tables, today) -> UserNotes
     read(&self, user: &str) -> Result<Option<Notes>, ToolError>
-    write(&self, user: &str, name: &str, notes: &str, seen: Option<i64>)
-        -> Result<WriteKind, ToolError>
+    opening(&self, sender: &Sender, text: &str) -> String   # records the version shown
+    write(&self, user: &str, name: &str, notes: &str) -> Result<WriteKind, ToolError>
 
 Notes { name: String, updated: Date, text: String, version: i64 }
 Sender { id: String, name: String }
@@ -206,6 +216,27 @@ Notes on this person (<id>, updated <date>):
 
 The `user_memory` tool takes one input, `notes`, the person's complete new notes, and writes the speaker's notes with the speaker's current name. It returns `saved` and the notice **Remembered: <name>**. It returns a tool error when there is no speaker, for notes over 2 KiB, and for text that matches a credential pattern. It cannot name a person, so the model can only change the notes of the person it is answering. It is registered only in guest sessions.
 
+**Who sees which store.** Both tables are in the same database, and every session connects as the same `alyosha` role, so the database does not keep owner and guest apart. The session does, by what it opens and registers: your sessions, including trusted groups', get `MemoryStore`, the `memory` tool, and the index, and never `UserNotes`; guest sessions get `UserNotes` and `user_memory`, and never `MemoryStore`, the `memory` tool, or the index. This is the same separation the file version had, when both scopes were folders readable by `alyosha`.
+
+### Import the old files
+
+Earlier versions wrote each memory to `<state>/memory/owner/<name>.md` and each person's notes to `<state>/memory/users/<id>.md`, where `<state>` is `/var/lib/alyosha` in the container. Migration 2 imports them inside the transaction that applies `002_memory.sql`. It therefore runs once, under the migration lock, and either imports everything or nothing. [Schema](SessionStore.md#schema)
+
+The session store's connect takes the memory folder, `<state>/memory`, and the migration step for version 2 runs the import after the SQL. Tests pass a temporary folder.
+
+- **What is read.** Each `.md` file directly in `owner/` becomes a `memories` row and each in `users/` a `user_notes` row. A missing `memory/`, `owner/`, or `users/` folder imports nothing from it, as on a new install. Anything else under `memory/`, such as another folder or a file without `.md`, is not imported and is named in a warning in the log.
+- **The file format.** A file starts with `---`, a header of `key: value` lines, and `---` on a line of its own, followed by the body. A memory's header holds `description:` and `updated:`; a person's holds `name:` and `updated:`, a `YYYY-MM-DD` date. The row takes the file name without `.md` as its `name` or `person`, the header values trimmed of spaces, and the body unchanged as `body` or `notes`. `updated` is the file's date, not the day of the import, and `version` is 1.
+- **Refuse rather than drop.** These fail the import: a file name that is not a valid memory name or user ID; a symlink or anything other than a regular file; text that is not UTF-8; a header that is missing, lacks a field, has an empty description, or has a date that does not parse. The transaction rolls back, so the tables stay empty and the database stays at version 1. `alyosha acp` stops with **Could not import memory from /var/lib/alyosha/memory:** and every bad file with its reason, one per line, such as `owner/Notes.md: not a valid memory name`. The bridges do not start until each file is fixed or moved out of the folder.
+- **No write checks.** The size limits, index budget, and credential patterns of the tools are not applied. The files passed them when they were written, and the index omits what does not fit its budget.
+- **Check before commit.** After inserting, read both tables back in the same transaction and compare them with the parsed files: the same number of rows as files in each table, and for each file a row with the same name or ID, description or display name, date, and body. Any difference fails the import as above, with the file and the field that differs. Then log at info: **Imported N memories and M people's notes from /var/lib/alyosha/memory.**
+- **The files stay.** The import never changes, moves, or deletes a file, and nothing reads the folder afterward. You delete it after checking the move. Until then an earlier build still runs on the files, but without anything remembered after the move. [Move memory into the database](Deployment.md#move-memory-into-the-database)
+
+A database restored from a dump is already at version 2 or later, so it imports nothing.
+
+### The host's list
+
+`alyosha memory list` on the host runs `alyosha memory-list` in the container as `alyosha`. It prints one line per memory, `<name> (<updated>): <description>`, sorted by name, then a last line **N memories · M people with notes**. It only reads. [The host command](Deployment.md#the-host-command)
+
 ### Verification
 
 Run these against a test database (`ALYOSHA_DATABASE`, as in the session store checks) with a fixed clock. [Session store verification](SessionStore.md#verification)
@@ -223,5 +254,22 @@ Run these against a test database (`ALYOSHA_DATABASE`, as in the session store c
 - Write a memory during a session. Check the system instruction stays byte-identical until the next compaction, and that the instruction after it, and a new session's, shows the entry.
 - From an `execute_code` script, check that `tools.memory` is undefined. From `run_command`, check that `/run/postgresql` is absent.
 - Check that the daily dump holds the `memories` and `user_notes` rows.
+
+**Separation.** Write the owner memory `marker` whose body holds `OWNER-7f3c`, and notes for `telegram-1` holding `GUEST-2c9d`.
+
+- In your session, script the model to call `memory` `list` and then `read` on `marker`. Check that the tools offered include `memory` and not `user_memory`, and that no request to the model contains `GUEST-2c9d`.
+- In a guest session, queue a message from `telegram-1` and script a `user_memory` call. Check that the tools offered include `user_memory` and not `memory`, that the system instruction has no `## Memory` section, and that no request contains `OWNER-7f3c` or the index line for `marker`.
+- In a trusted group's session, check that the index shows `marker` and the tools include `memory` and not `user_memory`.
+
+**Import.** Run these with a temporary memory folder, a fresh test database, and a fixed clock dated after the files.
+
+- With no memory folder, open the store. Check that both tables are empty, the database is at version 2, and nothing is logged about an import.
+- Give the folder `owner/thesis-repo.md` with a body of several lines and a trailing blank line, `owner/editor.md`, `owner/notes.txt`, `users/telegram-1.md`, and `users/qq-6F0A.md`. Open the store. Check that each row equals its file field for field, with the file's date and version 1; that the log says **Imported 2 memories and 2 people's notes**; that a warning names `owner/notes.txt`; and that every file's bytes and modification time are unchanged.
+- Change `owner/editor.md` and open the store again. Check that the row still holds the first text and that no import is logged.
+- Open with the folder present from two processes at once. Check one import and one log line.
+- Into fresh databases, import a folder that adds, in turn, `owner/Bad.md`, a symlink `owner/link.md`, `users/telegram-3.md` without `updated:`, and `owner/empty.md` with an empty description. Each time check that opening fails with the import error naming that file and its reason, that both tables are empty, and that the database is at version 1. Remove the file and check that the next open imports the rest.
+- Make the read-back return a body that differs from its file. Check that the import fails naming the file and field, and the tables are empty.
+- Restore a dump taken after the import into an emptied database, with the folder still present. Check that nothing is imported again.
+- Run `alyosha memory-list` against the imported database. Check the two lines for `editor` and `thesis-repo`, in that order, and **2 memories · 2 people with notes**.
 
 [Architecture overview](README.md)

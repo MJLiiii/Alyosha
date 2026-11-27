@@ -59,6 +59,7 @@ async fn open(home: &Home, model: Arc<ScriptedModel>) -> Started {
             log_hint: None,
             on_loading_dev_shell: None,
             persistence: None,
+            memory: alyosha::memory::InMemoryTables::new(),
         },
         Arc::new(FixedClock(
             Utc.with_ymd_and_hms(2026, 11, 25, 9, 2, 0).unwrap(),
