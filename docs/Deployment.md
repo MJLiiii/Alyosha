@@ -198,7 +198,7 @@ KillMode=control-group
 ```
 
 - **Who may start them.** A polkit rule lets the user `alyosha` start and stop units whose name matches `alyosha-run-[a-z0-9-]+@[0-9]+-[0-9]+\.service`, and nothing else. A template fixes its user, mounts, and limits, so starting one cannot gain anything beyond what the unit allows.
-- **The slice.** `alyosha-run.slice` is started at boot. A oneshot after it, `alyosha-run-firewall.service`, adds `iptables -I OUTPUT -o lo -m cgroup --path alyosha-run.slice -j REJECT` and the same for `ip6tables`. The rule can only be added once the slice's cgroup exists. systemd's own `IPAddressDeny=` would be simpler, but it needs a BPF firewall, and the container lacks `CAP_BPF`.
+- **The slice.** `alyosha-run.slice` is started at boot. A oneshot after it, `alyosha-run-firewall.service`, adds `iptables -I OUTPUT -o lo -m cgroup --path alyosha.slice/alyosha-run.slice -j REJECT` and the same for `ip6tables`. The dash in the slice's name puts it under `alyosha.slice`, so that is the cgroup path. The rule can only be added once the slice's cgroup exists. systemd's own `IPAddressDeny=` would be simpler, but it needs a BPF firewall, and the container lacks `CAP_BPF`.
 - **Leftovers.** When `alyosha acp` starts, it stops every `alyosha-run-*@<pid>-*` unit whose process ID no longer runs: commands and jobs of a process that crashed.
 
 ### Why units and not Bubblewrap

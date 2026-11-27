@@ -540,13 +540,13 @@ in
                 };
                 script = ''
                   for tables in iptables ip6tables; do
-                    $tables -C OUTPUT -o lo -m cgroup --path alyosha-run.slice -j REJECT 2>/dev/null \
-                      || $tables -I OUTPUT -o lo -m cgroup --path alyosha-run.slice -j REJECT
+                    $tables -C OUTPUT -o lo -m cgroup --path alyosha.slice/alyosha-run.slice -j REJECT 2>/dev/null \
+                      || $tables -I OUTPUT -o lo -m cgroup --path alyosha.slice/alyosha-run.slice -j REJECT
                   done
                 '';
                 preStop = ''
                   for tables in iptables ip6tables; do
-                    $tables -D OUTPUT -o lo -m cgroup --path alyosha-run.slice -j REJECT 2>/dev/null || true
+                    $tables -D OUTPUT -o lo -m cgroup --path alyosha.slice/alyosha-run.slice -j REJECT 2>/dev/null || true
                   done
                 '';
               };
