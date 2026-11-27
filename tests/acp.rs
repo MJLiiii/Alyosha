@@ -189,6 +189,20 @@ impl Client {
     }
 }
 
+/// A media unit that is never there.
+struct NoVideo;
+
+impl alyosha::media::VideoRunner for NoVideo {
+    fn extract<'a>(
+        &'a self,
+        _input: Vec<u8>,
+        _job: alyosha::media::Job,
+        _cancel: tokio_util::sync::CancellationToken,
+    ) -> alyosha::BoxFuture<'a, Result<alyosha::media::Extracted, String>> {
+        Box::pin(async { Err("no media unit in tests".to_owned()) })
+    }
+}
+
 fn spawn_server(
     paths: &Paths,
     store: &Arc<MemoryStore>,
@@ -213,6 +227,11 @@ fn spawn_server(
         log_hint: None,
         store: store.clone() as Arc<dyn SessionStore>,
         memory: memory.clone() as Arc<dyn MemoryTables>,
+        media: Some(alyosha::media::MediaSetup {
+            store: alyosha::media::MemoryMedia::new(),
+            transcriber: Arc::new(|_: &Config| None),
+            video: Arc::new(NoVideo),
+        }),
         mode,
     };
     let server = tokio::spawn(serve(their_read, their_write, options));
@@ -256,7 +275,7 @@ async fn initialize_reports_the_capabilities() {
     assert_eq!(result["agentCapabilities"]["loadSession"], true);
     assert_eq!(
         result["agentCapabilities"]["promptCapabilities"],
-        json!({"image": false, "audio": false, "embeddedContext": false})
+        json!({"image": true, "audio": true, "embeddedContext": true})
     );
     assert_eq!(result["authMethods"], json!([]));
 }
@@ -296,7 +315,7 @@ fn last_user_text(request: &alyosha::llm_client::ModelRequest) -> String {
         .iter()
         .rev()
         .find_map(|entry| match entry {
-            alyosha::agent_state::HistoryEntry::User(user) => Some(user.text.clone()),
+            alyosha::agent_state::HistoryEntry::User(user) => Some(user.text()),
             _ => None,
         })
         .unwrap()
@@ -811,4 +830,83 @@ async fn owner_and_guest_sessions_each_see_only_their_store() {
             .contains("- marker (2026-11-24)")
     );
     assert!(!format!("{:?}", requests[0]).contains("GUEST-2c9d"));
+}
+
+#[tokio::test]
+async fn attachments_arrive_as_blocks_and_files_leave_as_links() {
+    use base64::Engine;
+    let png = {
+        let mut bytes = Vec::new();
+        image::DynamicImage::ImageRgb8(image::RgbImage::new(3, 2))
+            .write_with_encoder(image::codecs::png::PngEncoder::new(&mut bytes))
+            .unwrap();
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    };
+    let model = ScriptedModel::new();
+    model.reply(vec![call("call_s", "send_file", json!({"path": "a.txt", "caption": "Here"}))]);
+    model.reply(vec![text("Sent it.")]);
+    let mut client = Client::start(model.clone()).await;
+    client.initialize(None).await;
+    let session = client.new_session().await;
+    client.next().await;
+
+    // More than ten attachments are refused.
+    let many: Vec<Value> = (0..11)
+        .map(|_| json!({"type": "image", "mimeType": "image/png", "data": png}))
+        .collect();
+    let id = client
+        .request("session/prompt", json!({"sessionId": session, "prompt": many}))
+        .await;
+    let response = client.until_response(id).await.pop().unwrap();
+    assert_eq!(response["error"]["code"], -32602);
+    // So is data that is not base64.
+    let id = client
+        .request("session/prompt", json!({"sessionId": session, "prompt": [{"type": "image", "mimeType": "image/png", "data": "%%%"}]}))
+        .await;
+    let response = client.until_response(id).await.pop().unwrap();
+    assert_eq!(response["error"]["code"], -32602);
+
+    let id = client
+        .request(
+            "session/prompt",
+            json!({"sessionId": session, "prompt": [
+                {"type": "text", "text": "/compact"},
+                {"type": "image", "mimeType": "image/png", "data": png, "_meta": {"alyosha": {"name": "shot.png"}}},
+                {"type": "resource", "resource": {"uri": "attachment:///notes.txt", "mimeType": "text/plain", "text": "hello"}},
+            ]}),
+        )
+        .await;
+    let messages = client.until_response(id).await;
+    assert_eq!(messages.last().unwrap()["result"]["stopReason"], "end_turn");
+    // With attachments, /compact is an ordinary message.
+    let request = &model.requests()[0];
+    let alyosha::agent_state::HistoryEntry::User(user) = &request.history[0] else {
+        panic!();
+    };
+    let shown = user.text();
+    assert!(shown.contains("/compact\n[photo: inbox/2026-11-25-1002-shot.png]\n[image]"), "{shown}");
+    assert!(shown.contains("[file: inbox/2026-11-25-1002-notes.txt, 1 KB]"), "{shown}");
+    assert_eq!(request.media.len(), 1);
+    // The reading status opens and closes, and the file goes out as a link.
+    let updates: Vec<&Value> = messages
+        .iter()
+        .filter(|message| message["method"] == "session/update")
+        .map(|message| &message["params"]["update"])
+        .collect();
+    let reading = updates
+        .iter()
+        .find(|update| update["title"] == "Reading attachments…")
+        .unwrap();
+    assert!(updates.iter().any(|update| update["sessionUpdate"] == "tool_call_update"
+        && update["toolCallId"] == reading["toolCallId"]
+        && update["status"] == "completed"));
+    let link = updates
+        .iter()
+        .find(|update| update["content"]["type"] == "resource_link")
+        .unwrap();
+    assert_eq!(link["content"]["name"], "a.txt");
+    assert_eq!(link["content"]["mimeType"], "text/plain");
+    assert_eq!(link["content"]["description"], "Here");
+    let path = link["content"]["uri"].as_str().unwrap().strip_prefix("file://").unwrap();
+    assert_eq!(fs::read_to_string(path).unwrap(), "alpha");
 }

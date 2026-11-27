@@ -2,7 +2,8 @@
 # gateway commands), alyosha-schedule, alyosha-telegram, and alyosha-qq.
 #
 # `alyosha` is wrapped so the shell sandbox finds Bubblewrap, pasta, Bash,
-# and the default tools as Nix store paths (docs/EnvironmentInterface.md#implementation).
+# and the default tools as Nix store paths (docs/EnvironmentInterface.md#implementation),
+# and the media unit finds FFmpeg (docs/Media.md#video-and-sound-in-a-media-unit).
 {
   lib,
   rustPlatform,
@@ -14,6 +15,7 @@
   findutils,
   git,
   ripgrep,
+  ffmpeg-headless,
 }:
 rustPlatform.buildRustPackage {
   pname = "alyosha";
@@ -47,7 +49,9 @@ rustPlatform.buildRustPackage {
         git
         ripgrep
       ]
-    }
+    } \
+      --set ALYOSHA_FFMPEG ${ffmpeg-headless}/bin/ffmpeg \
+      --set ALYOSHA_FFPROBE ${ffmpeg-headless}/bin/ffprobe
   '';
   meta = {
     description = "A general-purpose personal assistant for NixOS";

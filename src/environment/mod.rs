@@ -314,6 +314,25 @@ impl Environment {
             .map_err(|errno| discard(format!("Could not replace {path}: {errno}")))
     }
 
+    /// Creates a folder directly in the workspace, such as `inbox`, unless
+    /// it already exists there.
+    pub fn create_dir(&self, name: &str) -> Result<(), ToolError> {
+        if name.is_empty() || name.contains('/') || name.starts_with('.') {
+            return Err(ToolError::failed(format!("{name} is not a folder name.")));
+        }
+        match rustix::fs::mkdirat(&self.workspace_fd, name, Mode::from_raw_mode(0o2770)) {
+            Ok(()) | Err(Errno::EXIST) => {}
+            Err(errno) => return Err(ToolError::failed(format!("Could not create {name}: {errno}"))),
+        }
+        open_beneath(
+            &self.workspace_fd,
+            Path::new(name),
+            OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        )
+        .map(|_| ())
+        .map_err(|errno| open_error(errno, name))
+    }
+
     /// The path of an opened workspace file relative to the workspace.
     fn real_relative(&self, fd: &OwnedFd, path: &str) -> Result<PathBuf, ToolError> {
         let link = format!("/proc/self/fd/{}", std::os::fd::AsRawFd::as_raw_fd(fd));

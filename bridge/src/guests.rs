@@ -109,6 +109,7 @@ impl GuestPool {
         group: &str,
         key: &str,
         text: &str,
+        blocks: Vec<serde_json::Value>,
         sender_id: &str,
         sender_name: &str,
     ) -> Result<(), String> {
@@ -119,9 +120,13 @@ impl GuestPool {
         let guest = self.guests.get_mut(group).expect("inserted above");
         guest.last_active = Instant::now();
         if guest.trusted {
-            guest.bridge.prompt(key, &format!("{sender_name}: {text}"));
+            guest
+                .bridge
+                .prompt_with(key, &format!("{sender_name}: {text}"), blocks);
         } else {
-            guest.bridge.prompt_from(key, text, sender_id, sender_name);
+            guest
+                .bridge
+                .prompt_from(key, text, blocks, sender_id, sender_name);
         }
         Ok(())
     }

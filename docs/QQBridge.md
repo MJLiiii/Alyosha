@@ -54,7 +54,7 @@ Handle only `C2C_MESSAGE_CREATE` dispatches. In each, `d.id` is the message ID, 
 
 Drop a message, logging the sender's `user_openid`, unless it equals `owner_openid`. Send nothing back.
 
-For a message from the owner, trim the text, then act as the Telegram bridge does: `/new`, `/cancel`, `/compact`, `/job`, and `/tasks` behave the same, and other text becomes a `session/prompt`. Send `initialize` with `clientInfo.name` set to `alyosha-qq`, and start the task runner for the `qq` channel. Handle `_alyosha/job_finished` as the Telegram bridge does. Scheduled and job replies have no message to answer and follow their own delivery rules. [Delivering on QQ](Schedule.md#deliver-on-qq) A message with attachments and no text gets the reply **Only text messages work for now.** [Incoming messages](TelegramBridge.md#incoming-messages)
+For a message from the owner, trim the text, then act as the Telegram bridge does: `/new`, `/cancel`, `/compact`, `/job`, and `/tasks` behave the same, and other text becomes a `session/prompt`. Send `initialize` with `clientInfo.name` set to `alyosha-qq`, and start the task runner for the `qq` channel. Handle `_alyosha/job_finished` as the Telegram bridge does. Scheduled and job replies have no message to answer and follow their own delivery rules. [Delivering on QQ](Schedule.md#deliver-on-qq) A message with attachments becomes a prompt with their blocks after its text. [Attachments](#attachments) · [Incoming messages](TelegramBridge.md#incoming-messages)
 
 ## Group chats
 
@@ -64,9 +64,24 @@ A group where the bot has QQ's "receive all messages" mode on sends every messag
 
 A mention in a group whose `group_openid` is in `trusted_groups` goes to the group's full session, as in the Telegram bridge: `alyosha acp --group` in `/var/lib/alyosha/work/groups/<name>`, with `<nickname>: <text>` as the prompt, approvals sent to the owner's private chat after **In group <name>:**, and finished jobs given to the group's session with the reply sent to the group as a reply to its latest mention, which falls back to an active message once that window has closed. The pool never stops it for being idle. A `/yes`, `/no`, or number from the owner answers the oldest open request, whichever session it came from; `/cancel` cancels only the private session and its requests. [Trusted groups](TelegramBridge.md#trusted-groups)
 
-Every other group message goes to the group's guest session from the shared pool, the owner's included, as the Telegram bridge does: `initialize` with `alyosha-qq`, the sender `qq-<member_openid>`, and the nickname, or `QQ user` without one. A message with attachments and no text gets **Only text messages work for now.** [Telegram group chats](TelegramBridge.md#group-chats)
+Every other group message goes to the group's guest session from the shared pool, the owner's included, as the Telegram bridge does: `initialize` with `alyosha-qq`, the sender `qq-<member_openid>`, and the nickname, or `QQ user` without one. Attachments go along as in a private message, and the guest session decides what it reads. [Guests](Media.md#guests) · [Telegram group chats](TelegramBridge.md#group-chats)
 
 Send the reply with `POST /v2/groups/{group_openid}/messages`, as passive replies to the mention's `msg_id` with `msg_seq` counting from 1, split into at most four parts as for private replies. QQ allows five replies within 60 minutes. If the window has closed, try the same request without `msg_id`. Log a reply that still fails, and drop it. Nothing is kept for later in a group, and there is no typing indicator. Log the `group_openid` of every mention at info level, so the owner can copy it into `trusted_groups`. [Send a group message](https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_groups_group_openid_messages.post.html)
+
+## Attachments
+
+Each entry of `d.attachments` has a `content_type`, a `url`, and usually a `filename` and `size`. A voice entry may also carry `voice_wav_url`, a WAV copy of the SILK recording, and `asr_refer_text`, QQ's own transcript. [C2C message event](https://bot.q.qq.com/wiki/develop/api-v2/autogen/event/c2c_message_create.html) Build blocks with the shared crate's `attachments` module, as the Telegram bridge does. [Telegram attachments](TelegramBridge.md#attachments) · [From the bridge to `alyosha acp`](Media.md#from-the-bridge-to-alyosha-acp)
+
+| `content_type` | Block |
+| --- | --- |
+| `image/*`, including `image/gif` | `image` |
+| `voice` | `audio` from `voice_wav_url` when the entry has one. Otherwise, if it has `asr_refer_text`, QQ's own transcript as the text `[voice: <text>]`. Otherwise the text `[voice message: QQ sent it in a format Alyosha cannot read]`. |
+| `video/*` | `resource` |
+| anything else | `resource` with `filename` |
+
+Download each `url`, adding `https:` when it starts with `//`. Skip an entry whose `size` is over 25 MB, or whose download passes 25 MB, and send `[<kind> <file name> too large to download: <size> MB]` in its place. Keep at most ten attachments.
+
+QQ records voice as SILK, which FFmpeg cannot decode, so Alyosha relies on QQ's WAV copy or its transcript. The first check with a real bot records which of them QQ actually sends. Decoding SILK is deferred until it turns out to be needed.
 
 ## Sending replies
 
@@ -84,6 +99,16 @@ The model writes Markdown. For a passive reply, first send each part as QQ's nat
 If a send fails with `40034128` (reply limit or window exceeded), `40034005`, or `304103` (message ID expired), send the remaining parts as active messages: the same request without `msg_id`. If that fails too, for example with `40034100` (rate limit) or `40034105` (no permission), keep the unsent text. When the owner's next message arrives, send the kept text first, as that message's replies, before relaying the new message. Log every failed send with its error code.
 
 On `40054007` (message too long), halve the part and retry once, and log it so `reply_chunk` can be lowered.
+
+### Sending files
+
+A prompt's `resource_link` chunks are files from `send_file`. Send them after the reply's text parts, each as one more reply that counts toward the four. [Sending files out](Media.md#sending-files-out)
+
+1. Upload it with `POST /v2/users/{openid}/files`, or `/v2/groups/{group_openid}/files` in a group, with `file_data` as base64, `file_name`, `srv_send_msg: false`, and `file_type` 1 for PNG and JPEG images, 2 for MP4 video, 3 for voice (`audio/ogg`, `audio/mpeg`, `audio/wav`), and 4 for anything else. If QQ answers `850019` (unsupported format) for type 3, upload the file again as type 4. The reply holds `file_info`, which works only in the kind of chat it was uploaded for. `file_data` takes at most 5 MB, so a larger file gets **Could not send <name>: QQ takes files up to 5 MB from Alyosha.** QQ's chunked upload, which takes up to 200 MB, is deferred. [Rich media](https://bot.q.qq.com/wiki/develop/api-v2/server-inter/message/rich-media.html) · [Upload for a private chat](https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_users_user_openid_files.post.html) · [Upload for a group](https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_groups_group_openid_files.post.html)
+2. Send `msg_type: 7` with `media: {"file_info": ...}` and the link's `description` as `content`: a passive reply while one is left, then an active message. A file that still cannot be sent becomes the line **Could not send <name>:** and the reason, which is delivered like reply text, and kept for your next message if need be. The copy is deleted either way.
+3. If QQ refuses the upload otherwise, for example with `850031` (too large) or `40093002` (daily file quota used up), the same line says so.
+
+In a group, files that do not fit in the four replies are dropped with a log line, like any group reply.
 
 ## Approvals and questions
 
@@ -121,6 +146,8 @@ These run under `cargo test` with a fake QQ API, serving both HTTP and the WebSo
 - Deliver a `GROUP_AT_MESSAGE_CREATE`. Check that the group's guest agent gets a prompt with a `qq-<member_openid>` sender and that the reply goes to the group endpoint with the mention's `msg_id`.
 - Deliver a `GROUP_MESSAGE_CREATE` without mentions, one that mentions someone else, and one whose `mentions` has `is_you`. Check that only the last reaches a group agent, with the `<@…>` token of the bot removed.
 - Send a reply to a fake QQ that accepts Markdown. Check one `msg_type: 2` message. Make it refuse Markdown. Check that the same reply follows as plain text with the next `msg_seq`, that the next reply skips Markdown, and that a scheduled reply is plain text.
+- Deliver a C2C message with an image and a `voice` entry that has `voice_wav_url`, and one whose `voice` entry has only `asr_refer_text`. Check an `image` and an `audio` block, then the `[voice: …]` text. Deliver a 30 MB file entry. Check the too-large line and no download.
+- Script a reply with two text parts and three `resource_link`s. Check that the upload and `msg_type: 7` sends use `msg_seq` 3 and 4, and that the third file goes as an active message. Make a type 3 upload fail with `850019`. Check the type 4 retry. Make a type 4 upload fail. Check the **Could not send** text. Script a 6 MB file. Check the 5 MB notice and no upload.
 - List a group in `trusted_groups` and deliver a mention from it. Check that a group-mode agent gets `<nickname>: <text>`, that its approval reaches the owner marked with the group, and that the owner's `/yes` answers the group's agent, not the owner's.
 
 With a real bot, which needs a registered bot, real-name QQ account, and network access, check what the documentation leaves unclear:
@@ -130,6 +157,8 @@ With a real bot, which needs a registered bot, real-name QQ account, and network
 - Whether the typing indicator counts as one of the four replies.
 - The longest text QQ accepts in one message. Set `reply_chunk` below it.
 - Whether active messages work for this bot, and their limits.
+- Which fields a voice, video, and file attachment carry, whether `voice_wav_url` or `asr_refer_text` is among them, and the largest attachment QQ delivers.
+- Whether the bot may send files of type 4, and which voice formats type 3 takes in a private chat.
 - Ask a question in QQ. Check that the reply arrives, and that messages from a second QQ account get nothing.
 
 [Architecture overview](README.md)

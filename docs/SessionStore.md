@@ -109,13 +109,13 @@ create table checkpoints (
 );
 ```
 
-`002_memory.sql` adds the `memories` and `user_notes` tables. [Memory store](Memory.md#v1-store-contract)
+`002_memory.sql` adds the `memories` and `user_notes` tables. [Memory store](Memory.md#v1-store-contract) `003_media.sql` adds the `media` table, which holds the images of every session, and the store gains `put_media` and `get_media`. [The media table](Media.md#the-media-table)
 
 A key's current session is its row with the highest `id`. `entry` is `json` rather than `jsonb` because `jsonb` reorders object keys, and provider replay data goes back to the provider as it came.
 
 ### Entries
 
-Derive `serde::Serialize` and `Deserialize` for `HistoryEntry` and the types under it, with `#[serde(tag = "type")]` on the enums. Store each entry as `{"v": 1, ...}`. Reading an entry with an unknown `v` fails the load with an error naming the session, rather than guessing. `Replay.data` is already JSON and is stored as it is.
+Derive `serde::Serialize` and `Deserialize` for `HistoryEntry` and the types under it, with `#[serde(tag = "type")]` on the enums. Store each entry as `{"v": 2, ...}`. Version 2 gives a `User` entry ordered `parts`, text and image references, instead of one `text`. [Images](Media.md#images) Read a version 1 `User` entry's `text` as one text part; other version 1 entries read unchanged. Reading an entry with an unknown `v` fails the load with an error naming the session, rather than guessing. `Replay.data` is already JSON and is stored as it is. Image bytes are not in the entry: they are in the `media` table, by hash. [The media table](Media.md#the-media-table)
 
 ### The store
 
@@ -174,7 +174,7 @@ Loading a session runs the normal session startup, with the loaded state in plac
 Change `initialize` to `loadSession: true`. [ACP mode](Channels.md#initialization)
 
 - **`session/new`** reads the key from `_meta.alyosha.sessionKey`. Without one, use `acp:<random>`, a session nothing will resume. After ending any open session, `create` a session under the key and use the key as the `sessionId`.
-- **`session/load`** with `sessionId`, `cwd`, and `mcpServers` treats `sessionId` as the key. End any open session first, as `session/new` does. Call `load_current`. With no session, answer the JSON-RPC error `-32002` "Resource not found" and open nothing. Otherwise start it in `cwd` with the normal startup, ignoring `mcpServers`. ACP requires the conversation to be replayed before the response, so send a `user_message_chunk` for each `User` entry's text without its clock line and an `agent_message_chunk` for each assistant text part, in order, then answer with an empty result. `StoreError::Busy` is a JSON-RPC error with that message. [ACP session setup](https://agentclientprotocol.com/protocol/session-setup)
+- **`session/load`** with `sessionId`, `cwd`, and `mcpServers` treats `sessionId` as the key. End any open session first, as `session/new` does. Call `load_current`. With no session, answer the JSON-RPC error `-32002` "Resource not found" and open nothing. Otherwise start it in `cwd` with the normal startup, ignoring `mcpServers`. ACP requires the conversation to be replayed before the response, so send a `user_message_chunk` for each `User` entry's text parts without its clock line, with each image shown as `[image]`, and an `agent_message_chunk` for each assistant text part, in order, then answer with an empty result. `StoreError::Busy` is a JSON-RPC error with that message. [ACP session setup](https://agentclientprotocol.com/protocol/session-setup)
 
 ### Bridges
 

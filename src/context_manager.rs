@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     agent_state::{
         AssistantPart, ContextCheckpoint, HistoryEntry, MessageId, MessageOrigin, ToolOutcome,
-        UserEntry,
+        UserEntry, UserPart,
     },
     llm_client::{ModelClient, ModelError, ModelRequest, result_text},
     tools::{OutputKind, ToolError, ToolOutput},
@@ -27,6 +27,8 @@ pub const SUMMARY_REPLY: u64 = 4096;
 pub const EXCERPT_LIMIT: usize = 2 * 1024;
 const RECENT_CAP: u64 = 20_000;
 const FRAMING_TOKENS: u64 = 4;
+/// What one image counts for, whatever its size (`docs/Media.md#context-and-compaction`).
+pub const IMAGE_TOKENS: u64 = 1_600;
 
 /// A route's limits, in tokens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,7 +94,14 @@ fn text_tokens(text: &str) -> u64 {
 pub fn entry_tokens(entry: &HistoryEntry) -> u64 {
     FRAMING_TOKENS
         + match entry {
-            HistoryEntry::User(user) => text_tokens(&user.text),
+            HistoryEntry::User(user) => user
+                .parts
+                .iter()
+                .map(|part| match part {
+                    UserPart::Text(text) => text_tokens(text),
+                    UserPart::Image(_) => IMAGE_TOKENS,
+                })
+                .sum(),
             HistoryEntry::Assistant(assistant) => assistant
                 .parts
                 .iter()
@@ -182,6 +191,7 @@ impl RequestSettings {
             history: entries,
             tools: self.tools.clone(),
             max_output_tokens: None,
+            media: Default::default(),
         }
     }
 }
@@ -374,13 +384,14 @@ impl Preparation<'_> {
             model: self.settings.model.clone(),
             system_instruction: SUMMARY_INSTRUCTIONS.into(),
             summary: None,
-            history: vec![HistoryEntry::User(UserEntry {
-                message_id: MessageId(0),
-                origin: MessageOrigin::Owner,
-                text: transcript,
-            })],
+            history: vec![HistoryEntry::User(UserEntry::text_only(
+                MessageId(0),
+                MessageOrigin::Owner,
+                transcript,
+            ))],
             tools: Vec::new(),
             max_output_tokens: Some(SUMMARY_REPLY as u32),
+            media: Default::default(),
         };
         let summary_budget = self.settings.limits.usable_input(SUMMARY_REPLY);
         if estimate(&request) > summary_budget {
@@ -439,7 +450,8 @@ fn transcript(previous: Option<&str>, entries: &[HistoryEntry]) -> String {
         match entry {
             HistoryEntry::User(user) => {
                 text.push_str("\n[Owner]\n");
-                text.push_str(&user.text);
+                // The summary request carries no images; each shows as [image].
+                text.push_str(&user.text());
                 text.push('\n');
             }
             HistoryEntry::Assistant(assistant) => {
@@ -714,11 +726,7 @@ mod tests {
     }
 
     fn user(text: &str) -> HistoryEntry {
-        HistoryEntry::User(UserEntry {
-            message_id: MessageId(1),
-            origin: MessageOrigin::Owner,
-            text: text.into(),
-        })
+        HistoryEntry::User(UserEntry::text_only(MessageId(1), MessageOrigin::Owner, text))
     }
 
     #[test]

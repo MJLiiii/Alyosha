@@ -17,6 +17,7 @@ pub mod gateway_admin;
 pub mod jobs;
 pub mod llm_client;
 pub mod mcp;
+pub mod media;
 pub mod memory;
 pub mod memory_import;
 pub mod session;

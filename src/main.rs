@@ -1,6 +1,6 @@
 //! The `alyosha` program in the container: `alyosha acp`, the gateway
-//! commands, the configuration check, and `run-exec`, which a command's unit
-//! runs. You talk to Alyosha through the Telegram and QQ bridges, which run
+//! commands, the configuration check, `run-exec`, which a command's unit
+//! runs, and `media-exec`, which the media unit runs. You talk to Alyosha through the Telegram and QQ bridges, which run
 //! `alyosha acp`. The host's own `alyosha` command is a different program, in
 //! the container module.
 
@@ -22,6 +22,7 @@ Usage:
   alyosha config check FILE
                           Check a configuration file, as the container module does
   alyosha run-exec RUN    Inside a command's unit: run the command its run folder holds
+  alyosha media-exec RUN  Inside the media unit: run FFmpeg on its run folder's file
   alyosha check-units     As `alyosha` in the container: check the command units
   alyosha memory-list     As `alyosha` in the container: list the memories in the database";
 
@@ -49,6 +50,13 @@ fn main() -> ExitCode {
             );
             fail(&format!("could not start the command: {error}"))
         }
+        ["media-exec", instance] => match alyosha::media::video::media_exec(
+            Path::new(alyosha::environment::shell::RUNS_DIR),
+            instance,
+        ) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => fail(&format!("could not read the file: {error}")),
+        },
         _ => usage_error(),
     }
 }

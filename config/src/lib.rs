@@ -27,6 +27,7 @@ pub struct Config {
     pub model: ModelConfig,
     pub gateway: GatewayConfig,
     pub approvals: ApprovalsConfig,
+    pub media: MediaConfig,
     /// Present only when the file has a `[telegram]` section.
     pub telegram: Option<TelegramConfig>,
     /// Present only when the file has a `[qq]` section.
@@ -42,6 +43,7 @@ impl Default for Config {
             model: ModelConfig::default(),
             gateway: GatewayConfig::default(),
             approvals: ApprovalsConfig::default(),
+            media: MediaConfig::default(),
             telegram: None,
             qq: None,
             guest: GuestConfig::default(),
@@ -62,6 +64,8 @@ pub struct ModelConfig {
     pub name: String,
     /// How hard the model reasons; `None` keeps the provider's default.
     pub effort: Option<Effort>,
+    /// Whether the model can see images.
+    pub images: bool,
 }
 
 impl Default for ModelConfig {
@@ -71,6 +75,28 @@ impl Default for ModelConfig {
             api: Api::Codex,
             name: "gpt-6.2-sol".to_owned(),
             effort: None,
+            images: true,
+        }
+    }
+}
+
+/// `[media]`: how voice messages and the sound of videos are transcribed.
+/// See `docs/Media.md#transcription`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct MediaConfig {
+    /// The GPROXY provider, on the `openai` channel, that transcribes.
+    /// Without it, voice messages are not transcribed.
+    pub transcribe_provider: Option<String>,
+    /// The transcription model.
+    pub transcribe_model: String,
+}
+
+impl Default for MediaConfig {
+    fn default() -> Self {
+        Self {
+            transcribe_provider: None,
+            transcribe_model: "gpt-transcribe".to_owned(),
         }
     }
 }
@@ -477,6 +503,8 @@ struct ConfigFile {
     gateway: GatewayConfig,
     #[serde(default)]
     approvals: ApprovalsConfig,
+    #[serde(default)]
+    media: MediaConfig,
     telegram: Option<TelegramConfig>,
     qq: Option<QqConfig>,
     #[serde(default)]
@@ -509,6 +537,17 @@ fn parse(text: &str) -> Result<Config, Problem> {
             "gateway.url: {:?} is not an http:// URL",
             file.gateway.url
         ));
+    }
+    if file
+        .media
+        .transcribe_provider
+        .as_deref()
+        .is_some_and(|provider| provider.trim().is_empty())
+    {
+        problems.push("media.transcribe_provider: must not be empty".to_owned());
+    }
+    if file.media.transcribe_model.trim().is_empty() {
+        problems.push("media.transcribe_model: must not be empty".to_owned());
     }
     if file.approvals.timeout_minutes < 1 {
         problems.push("approvals.timeout_minutes: must be at least 1".to_owned());
@@ -584,6 +623,7 @@ fn parse(text: &str) -> Result<Config, Problem> {
         model: file.model,
         gateway: file.gateway,
         approvals: file.approvals,
+        media: file.media,
         telegram: file.telegram,
         qq: file.qq,
         guest: file.guest,
@@ -643,6 +683,9 @@ name = "gpt-6.2-sol"
 [gateway]
 url = "http://127.0.0.1:18787"
 
+[media]
+transcribe_provider = "openai"
+
 [approvals]
 timeout_minutes = 60
 
@@ -691,6 +734,9 @@ API_TOKEN = "search-token"
         assert_eq!(config.model.name, "gpt-6.2-sol");
         assert_eq!(config.gateway.url, "http://127.0.0.1:18787");
         assert_eq!(config.approvals.timeout_minutes, 60);
+        assert!(config.model.images);
+        assert_eq!(config.media.transcribe_provider, None);
+        assert_eq!(config.media.transcribe_model, "gpt-transcribe");
         assert!(config.telegram.is_none() && config.qq.is_none());
         assert!(config.mcp.servers.is_empty());
         // An empty file is the same as a missing one.
@@ -719,6 +765,19 @@ API_TOKEN = "search-token"
         assert_eq!(search.env["MODE"], "stdio");
         assert_eq!(search.secret_env["API_TOKEN"], "search-token");
         assert_eq!(config.approvals.timeout_minutes, 60);
+        assert_eq!(config.media.transcribe_provider.as_deref(), Some("openai"));
+    }
+
+    #[test]
+    fn media_settings_are_checked() {
+        let config = load_text("[model]\nimages = false\n[media]\ntranscribe_model = \"whisper-1\"\n").unwrap();
+        assert!(!config.model.images);
+        assert_eq!(config.media.transcribe_model, "whisper-1");
+        let error = load_text("[media]\ntranscribe_provider = \" \"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("media.transcribe_provider"), "{error}");
+        assert!(load_text("[media]\nlanguage = \"en\"\n").is_err());
     }
 
     #[test]

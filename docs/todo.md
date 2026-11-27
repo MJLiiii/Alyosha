@@ -35,12 +35,16 @@ Designed. open-webSearch's MCP server searches without an account or key, with S
 
 Designed. Alyosha acts freely in its own space and asks before reaching the real world: tools marked `ask` in the configuration wait for the owner's approval, and the model asks with `ask_owner` before actions only it can recognize. [Approvals](Approvals.md)
 
+## 6. Photos, voice, video, and files
+
+Designed and written after v1; the checks with real bots are still to run. You send photos, voice, video, GIFs, stickers, and files, and Alyosha sends files back. [Photos, voice, video, and files](Media.md)
+
 ## Later
 
 These are already deferred on their components' pages and are less urgent:
 
 - Recall of past sessions. [Memory deferred work](Memory.md#deferred)
-- Reading images and PDFs, which needs image support in tool results and a model that reads images.
+- Images in tool results, such as `read_file` on an image or a browser screenshot. Images you send are designed. [Media deferred work](Media.md#deferred)
 - Downloads from the browser.
 - Full desktop control. [Browser deferred work](Browser.md#deferred)
 

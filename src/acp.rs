@@ -26,7 +26,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     BoxFuture,
     agent_loop::{Persistence, SessionDriver, SessionEvent, Status},
-    agent_state::{HistoryEntry, MessageId, Sender, TurnOutcome},
+    agent_state::{Attachment, HistoryEntry, MessageId, Sender, TurnOutcome},
     approvals::{Approver, OwnerAnswer, OwnerRequest},
     clock::Clock,
     llm_client::ModelClient,
@@ -57,6 +57,8 @@ pub struct ServeOptions {
     pub store: Arc<dyn SessionStore>,
     /// The memory and people's notes tables.
     pub memory: Arc<dyn MemoryTables>,
+    /// How attachments are read.
+    pub media: Option<crate::media::MediaSetup>,
     /// Whose session this process serves.
     pub mode: Mode,
 }
@@ -311,7 +313,7 @@ impl Agent {
                         "protocolVersion": PROTOCOL_VERSION,
                         "agentCapabilities": {
                             "loadSession": true,
-                            "promptCapabilities": {"image": false, "audio": false, "embeddedContext": false},
+                            "promptCapabilities": {"image": true, "audio": true, "embeddedContext": true},
                             "mcpCapabilities": {"http": false, "sse": false},
                         },
                         "authMethods": [],
@@ -448,8 +450,9 @@ impl Agent {
         for entry in &history {
             match entry {
                 HistoryEntry::User(user) => {
-                    // The clock line is for the model only.
-                    let text = user.text.split_once('\n').map_or("", |(_, rest)| rest);
+                    // The clock line is for the model only; images show as [image].
+                    let full = user.text();
+                    let text = full.split_once('\n').map_or("", |(_, rest)| rest);
                     self.out.update(
                         key,
                         json!({"sessionUpdate": "user_message_chunk", "content": {"type": "text", "text": text}}),
@@ -523,6 +526,7 @@ impl Agent {
                 self.options.clock.clone(),
                 Some(persistence),
                 self.options.memory.clone(),
+                self.options.media.clone(),
             )
             .await
             .map(|mut started| {
@@ -582,6 +586,7 @@ impl Agent {
                 on_loading_dev_shell: None,
                 persistence: Some(persistence),
                 memory: self.options.memory.clone(),
+                media: self.options.media.clone(),
             },
             self.options.clock.clone(),
         )
@@ -611,6 +616,7 @@ impl Agent {
             return;
         };
         let mut parts = Vec::new();
+        let mut attachments = Vec::new();
         for block in params["prompt"].as_array().into_iter().flatten() {
             match block["type"].as_str() {
                 Some("text") => parts.push(block["text"].as_str().unwrap_or_default().to_owned()),
@@ -619,8 +625,26 @@ impl Agent {
                     block["name"].as_str().unwrap_or_default(),
                     block["uri"].as_str().unwrap_or_default()
                 )),
+                Some("image" | "audio" | "resource") => match attachment(block) {
+                    Ok(attachment) => attachments.push(attachment),
+                    Err(message) => {
+                        self.out.error(&id, -32602, &message);
+                        return;
+                    }
+                },
                 _ => {}
             }
+        }
+        if attachments.len() > crate::media::MAX_ATTACHMENTS {
+            self.out.error(
+                &id,
+                -32602,
+                &format!(
+                    "a prompt carries at most {} attachments",
+                    crate::media::MAX_ATTACHMENTS
+                ),
+            );
+            return;
         }
         let text = parts.join("\n\n");
         if self.options.mode == Mode::Guest {
@@ -639,12 +663,15 @@ impl Agent {
                 id: id_text.to_owned(),
                 name: sender["name"].as_str().unwrap_or_default().to_owned(),
             };
-            let message_id = open.driver.submit_from(text, sender);
+            let message_id = open.driver.submit_message(text, attachments, Some(sender));
             open.prompts.push_back((id, Waiting::Turn(message_id)));
             return;
         }
         let trimmed = text.trim();
-        if trimmed == "/compact" {
+        if !attachments.is_empty() {
+            let message_id = open.driver.submit_message(text, attachments, None);
+            open.prompts.push_back((id, Waiting::Turn(message_id)));
+        } else if trimmed == "/compact" {
             open.prompts.push_back((id, Waiting::Compact));
             open.driver.compact();
         } else if trimmed == "/job" || trimmed.starts_with("/job ") || trimmed.starts_with("/job\n")
@@ -691,7 +718,8 @@ impl Agent {
                     &session_id,
                     json!({"sessionUpdate": "tool_call", "toolCallId": id, "title": text, "kind": "think", "status": "in_progress"}),
                 );
-                if text == "Compacting context…" {
+                // Open until the work it names ends with a status change.
+                if text == "Compacting context…" || text == crate::media::READING {
                     open.compacting_status = Some(id);
                 } else {
                     self.out.update(&session_id, json!({"sessionUpdate": "tool_call_update", "toolCallId": id, "status": "completed"}));
@@ -742,6 +770,22 @@ impl Agent {
                 "_alyosha/job_finished",
                 json!({"sessionId": session_id, "jobId": job_id, "text": text}),
             ),
+            SessionEvent::File(file) => {
+                let mut link = json!({
+                    "type": "resource_link",
+                    "uri": format!("file://{}", file.path.display()),
+                    "name": file.name,
+                    "mimeType": file.mime,
+                    "size": file.size,
+                });
+                if let Some(caption) = file.caption {
+                    link["description"] = json!(caption);
+                }
+                self.out.update(
+                    &session_id,
+                    json!({"sessionUpdate": "agent_message_chunk", "content": link}),
+                );
+            }
             SessionEvent::Queued(_)
             | SessionEvent::TurnStarted(_)
             | SessionEvent::Jobs(_) => {}
@@ -758,6 +802,48 @@ impl Agent {
             self.out.update(&open.session_id, chunk(&warning));
         }
     }
+}
+
+/// An attachment from an `image`, `audio`, or `resource` block. See
+/// `docs/Media.md#from-the-bridge-to-alyosha-acp`.
+fn attachment(block: &Value) -> Result<Attachment, String> {
+    use base64::Engine;
+    let decode = |data: &str| {
+        base64::engine::general_purpose::STANDARD
+            .decode(data.trim())
+            .map_err(|error| format!("an attachment's data is not base64: {error}"))
+    };
+    let (mime, name, bytes) = if block["type"] == "resource" {
+        let resource = &block["resource"];
+        let name = resource["uri"]
+            .as_str()
+            .and_then(|uri| uri.rsplit('/').next())
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned);
+        let bytes = match (resource["blob"].as_str(), resource["text"].as_str()) {
+            (Some(blob), _) => decode(blob)?,
+            (None, Some(text)) => text.as_bytes().to_vec(),
+            (None, None) => return Err("a resource block has neither blob nor text".into()),
+        };
+        (resource["mimeType"].as_str(), name, bytes)
+    } else {
+        let data = block["data"]
+            .as_str()
+            .ok_or("an image or audio block has no data")?;
+        let name = block["_meta"]["alyosha"]["name"].as_str().map(str::to_owned);
+        (block["mimeType"].as_str(), name, decode(data)?)
+    };
+    if bytes.len() > crate::media::MAX_ATTACHMENT_BYTES {
+        return Err(format!(
+            "an attachment is {} MB; at most 25 MB is accepted",
+            bytes.len().div_ceil(1024 * 1024)
+        ));
+    }
+    Ok(Attachment {
+        mime: mime.unwrap_or_default().to_owned(),
+        name,
+        bytes,
+    })
 }
 
 fn chunk(text: &str) -> Value {
@@ -822,6 +908,7 @@ pub fn run(mode: Mode) -> u8 {
         clock: Arc::new(crate::clock::SystemClock),
         log_hint,
         memory: store.clone(),
+        media: Some(crate::media::MediaSetup::real(store.clone(), paths.clone())),
         store,
         mode,
     };

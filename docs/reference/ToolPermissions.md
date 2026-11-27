@@ -12,6 +12,7 @@ Selecting a workspace at session startup authorizes the following operations. Th
 | `memory` | Read and atomically replace files in the owner's memory store. Direct model calls only. [Memory store](#memory-store) |
 | `skill` | Read the skills directory. Direct model calls only. [Skills directory](#skills-directory) |
 | `ask_owner` | Ask the owner through the session's front end. No file, shell, or network access. Direct model calls only. [Approvals](../Approvals.md) |
+| `send_file` | Read a regular workspace file, as `read_file` does, and copy it into the session's own folder for the bridge to send. Direct model calls only. [Sending files out](../Media.md#sending-files-out) |
 | `mcp__<server>__<tool>` | Whatever the server itself can do. It runs as the agent's user, outside the command units. Direct model calls only. [MCP tools](#mcp-tools) |
 | `execute_code` | Run JavaScript in an isolated sandbox. Its only host operation is `tools.read_file`, limited to regular files inside the workspace. [Read-only Code Mode](../ToolExecutor.md#read-only-code-mode) |
 

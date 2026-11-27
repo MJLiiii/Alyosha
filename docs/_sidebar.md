@@ -20,6 +20,7 @@
   - [Approvals](/Approvals.md)
   - [Scheduled tasks](/Schedule.md)
   - [Background jobs](/Jobs.md)
+  - [Photos, voice, video, and files](/Media.md)
   - [Deployment](/Deployment.md)
 
 - Capabilities

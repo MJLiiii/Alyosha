@@ -90,7 +90,7 @@ async fn below_then_over_budget() {
     assert_eq!(summary.max_output_tokens, Some(4096));
     assert!(summary.system_instruction.contains("five sections"));
     let transcript = match &summary.history[0] {
-        HistoryEntry::User(user) => user.text.clone(),
+        HistoryEntry::User(user) => user.text().clone(),
         other => panic!("{other:?}"),
     };
     assert!(
@@ -141,7 +141,7 @@ async fn a_long_turn_keeps_its_opening_message_and_latest_batch() {
     let openings = last
         .history
         .iter()
-        .filter(|entry| matches!(entry, HistoryEntry::User(user) if user.text.contains("opening")))
+        .filter(|entry| matches!(entry, HistoryEntry::User(user) if user.text().contains("opening")))
         .count();
     assert_eq!(openings, 1, "the opening message appears once");
     assert_eq!(

@@ -33,6 +33,10 @@ use crate::{
     jobs::{self, JobEnvironment},
     llm_client::{GatewayClient, ModelClient, ModelError, ModelReply, ModelRequest, Timeouts},
     mcp::McpManager,
+    media::{
+        MediaSetup,
+        send_file::{Outbox, send_file_tool},
+    },
     memory::{self, MemoryStore, MemoryTables},
     session_store::{self, INTERRUPTED_LINE, RESUMED_LINE},
     skills::{self, SkillStore},
@@ -62,6 +66,8 @@ pub struct FrontEnd {
     pub persistence: Option<Persistence>,
     /// The memory tables: the session database's, or in memory for tests.
     pub memory: Arc<dyn MemoryTables>,
+    /// How attachments are read. Without it they become a line saying so.
+    pub media: Option<MediaSetup>,
 }
 
 /// A started session.
@@ -282,6 +288,7 @@ pub async fn start_with_clock(
     registry.register(memory::memory_tool())?;
     registry.register(skills::skill_tool())?;
     registry.register(approvals::ask_owner_tool())?;
+    registry.register(send_file_tool())?;
     let mut mcp_problems = mcp_warnings;
     for tool in mcp.tools() {
         let name = tool.definition.name.clone();
@@ -347,6 +354,8 @@ pub async fn start_with_clock(
         approver: front_end.approver,
         approval_timeout: Some(Duration::from_secs(config.approvals.timeout_minutes * 60)),
         mcp: Some(mcp),
+        media: front_end.media.as_ref().map(|media| media.services(config)),
+        outbox: Some(Outbox::new(session_dir.join("outbox"))),
         ..SessionServices::default()
     };
     let (driver, events) = SessionDriver::start(SessionSetup {
@@ -385,6 +394,7 @@ pub async fn start_with_clock(
 /// jobs, or approver. Its MCP servers run in the guest working folder. It
 /// opens the people's notes in `memory` and never the owner's memories.
 /// See `docs/Channels.md#guest-mode`.
+#[allow(clippy::too_many_arguments)]
 pub async fn start_guest(
     config: &Config,
     paths: &Paths,
@@ -393,6 +403,7 @@ pub async fn start_guest(
     clock: Arc<dyn Clock>,
     persistence: Option<Persistence>,
     memory: Arc<dyn MemoryTables>,
+    media: Option<MediaSetup>,
 ) -> Result<Started, StartupError> {
     let folder = paths.guest_work();
     std::fs::DirBuilder::new()
@@ -433,6 +444,7 @@ pub async fn start_guest(
             memory,
             Arc::new(move || Utc::now().with_timezone(&timezone).date_naive()),
         )),
+        media: media.as_ref().map(|media| media.services(config)),
         ..SessionServices::default()
     };
     let (driver, events) = SessionDriver::start(SessionSetup {

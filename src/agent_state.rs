@@ -60,9 +60,33 @@ pub struct UserMessage {
     pub sender: Option<Sender>,
     /// The text as submitted, without the clock line.
     pub text: String,
+    /// What came with it, as the bridge sent it. They become parts of the
+    /// opening entry when the turn starts (`docs/Media.md#preparing-a-message`).
+    pub attachments: Vec<Attachment>,
     /// When it was submitted. Its clock line shows this time, not the time
     /// its turn starts.
     pub submitted_at: DateTime<Utc>,
+}
+
+/// A file that came with a message: a photo, a voice message, a video, or
+/// any other file.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Attachment {
+    /// The MIME type the bridge gave, possibly empty.
+    pub mime: String,
+    /// The file name the chat gave, if any.
+    pub name: Option<String>,
+    pub bytes: Vec<u8>,
+}
+
+impl std::fmt::Debug for Attachment {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Attachment")
+            .field("mime", &self.mime)
+            .field("name", &self.name)
+            .field("bytes", &self.bytes.len())
+            .finish()
+    }
 }
 
 /// One entry of conversation history.
@@ -76,12 +100,94 @@ pub enum HistoryEntry {
 
 /// The message that opened a turn, as the model sees it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(from = "StoredUserEntry")]
 pub struct UserEntry {
     pub message_id: MessageId,
     pub origin: MessageOrigin,
-    /// The clock line, a line break, and the submitted text.
-    pub text: String,
+    /// In order: the clock line, a line break, and the submitted text as one
+    /// text part, then each attachment's line and parts.
+    pub parts: Vec<UserPart>,
 }
+
+/// One part of a user entry.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "value", rename_all = "snake_case")]
+pub enum UserPart {
+    Text(String),
+    /// An image, kept in the media table by its hash.
+    Image(MediaRef),
+}
+
+/// An image in the media table. See `docs/Media.md#images`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MediaRef {
+    /// The SHA-256 of the stored bytes, in hex.
+    pub sha256: String,
+    /// `image/jpeg` or `image/png`.
+    pub mime: String,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// A user entry as stored: version 1 has `text`, version 2 `parts`.
+#[derive(Deserialize)]
+struct StoredUserEntry {
+    message_id: MessageId,
+    origin: MessageOrigin,
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    parts: Option<Vec<UserPart>>,
+}
+
+impl From<StoredUserEntry> for UserEntry {
+    fn from(stored: StoredUserEntry) -> Self {
+        let parts = match (stored.parts, stored.text) {
+            (Some(parts), _) => parts,
+            (None, Some(text)) => vec![UserPart::Text(text)],
+            (None, None) => Vec::new(),
+        };
+        Self {
+            message_id: stored.message_id,
+            origin: stored.origin,
+            parts,
+        }
+    }
+}
+
+impl UserEntry {
+    /// An entry with one text part.
+    pub fn text_only(message_id: MessageId, origin: MessageOrigin, text: impl Into<String>) -> Self {
+        Self {
+            message_id,
+            origin,
+            parts: vec![UserPart::Text(text.into())],
+        }
+    }
+
+    /// The text parts joined by line breaks, with each image as `[image]`.
+    pub fn text(&self) -> String {
+        self.parts
+            .iter()
+            .map(|part| match part {
+                UserPart::Text(text) => text.as_str(),
+                UserPart::Image(_) => IMAGE_PLACEHOLDER,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The images, in order.
+    pub fn images(&self) -> impl Iterator<Item = &MediaRef> {
+        self.parts.iter().filter_map(|part| match part {
+            UserPart::Image(image) => Some(image),
+            UserPart::Text(_) => None,
+        })
+    }
+}
+
+/// How an image shows where only text goes: summaries and replays.
+pub const IMAGE_PLACEHOLDER: &str = "[image]";
 
 /// One complete assistant response.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]

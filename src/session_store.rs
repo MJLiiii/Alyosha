@@ -24,8 +24,9 @@ use crate::{
     memory::{MemoryRow, MemoryTables, NotesRow},
 };
 
-/// The format version every stored entry carries.
-pub const ENTRY_VERSION: u64 = 1;
+/// The format version every stored entry carries. Version 1 entries, whose
+/// user entries have `text` instead of `parts`, are still read.
+pub const ENTRY_VERSION: u64 = 2;
 /// Where Alyosha connects unless `ALYOSHA_DATABASE` says otherwise.
 pub const DEFAULT_DATABASE: &str = "host=/run/postgresql dbname=alyosha";
 /// The result recorded for a call a restart cut off.
@@ -41,6 +42,7 @@ pub const BUSY: &str = "This session is open in another Alyosha process.";
 const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/001_sessions.sql"),
     include_str!("../migrations/002_memory.sql"),
+    include_str!("../migrations/003_media.sql"),
 ];
 /// The migration that also imports the old memory files.
 const MEMORY_MIGRATION: i32 = 2;
@@ -124,7 +126,7 @@ pub trait SessionStore: Send + Sync {
     fn close(&self, session: SessionId) -> BoxFuture<'_, Result<(), StoreError>>;
 }
 
-/// An entry as stored: the entry's JSON with `"v": 1`.
+/// An entry as stored: the entry's JSON with `"v": 2`.
 pub fn encode(entry: &HistoryEntry) -> Value {
     let mut value = serde_json::to_value(entry).expect("history entries serialize");
     value["v"] = ENTRY_VERSION.into();
@@ -134,7 +136,7 @@ pub fn encode(entry: &HistoryEntry) -> Value {
 /// Reads a stored entry, refusing a format this binary does not know.
 pub fn decode(mut value: Value) -> Result<HistoryEntry, String> {
     let version = value.get("v").and_then(Value::as_u64);
-    if version != Some(ENTRY_VERSION) {
+    if !matches!(version, Some(1) | Some(ENTRY_VERSION)) {
         return Err(format!(
             "a history entry has format {}, which this Alyosha does not read",
             version.map_or_else(|| "none".to_owned(), |v| v.to_string())
@@ -684,6 +686,40 @@ impl MemoryTables for PgStore {
     }
 }
 
+impl crate::media::MediaStore for PgStore {
+    fn put_media<'a>(
+        &'a self,
+        mime: &'a str,
+        bytes: &'a [u8],
+    ) -> BoxFuture<'a, Result<String, String>> {
+        Box::pin(async move {
+            let hash = crate::media::sha256_hex(bytes);
+            self.client
+                .execute(
+                    "insert into media (sha256, mime, bytes) values ($1, $2, $3) on conflict do nothing",
+                    &[&hash, &mime, &bytes],
+                )
+                .await
+                .map_err(text_error)?;
+            Ok(hash)
+        })
+    }
+
+    fn get_media<'a>(
+        &'a self,
+        sha256: &'a str,
+    ) -> BoxFuture<'a, Result<Option<crate::media::store::MediaRow>, String>> {
+        Box::pin(async move {
+            Ok(self
+                .client
+                .query_opt("select mime, bytes from media where sha256 = $1", &[&sha256])
+                .await
+                .map_err(text_error)?
+                .map(|row| (row.get(0), row.get(1))))
+        })
+    }
+}
+
 impl SessionStore for PgStore {
     fn create<'a>(
         &'a self,
@@ -841,7 +877,8 @@ mod tests {
 
     use super::*;
     use crate::agent_state::{
-        AssistantEntry, AssistantPart, MessageId, MessageOrigin, Replay, ToolCall, UserEntry,
+        AssistantEntry, AssistantPart, MediaRef, MessageId, MessageOrigin, Replay, ToolCall, UserEntry,
+        UserPart,
     };
 
     fn sample() -> Vec<HistoryEntry> {
@@ -849,7 +886,15 @@ mod tests {
             HistoryEntry::User(UserEntry {
                 message_id: MessageId(7),
                 origin: MessageOrigin::Owner,
-                text: "[clock]\nhello".into(),
+                parts: vec![
+                    UserPart::Text("[clock]\nhello".into()),
+                    UserPart::Image(MediaRef {
+                        sha256: "ab".into(),
+                        mime: "image/jpeg".into(),
+                        width: 2,
+                        height: 1,
+                    }),
+                ],
             }),
             HistoryEntry::Assistant(AssistantEntry {
                 parts: vec![
@@ -887,12 +932,22 @@ mod tests {
             })])
         {
             let value = encode(&entry);
-            assert_eq!(value["v"], 1);
+            assert_eq!(value["v"], 2);
             assert_eq!(decode(value).unwrap(), entry);
         }
         let mut future = encode(&sample()[0]);
-        future["v"] = 2.into();
-        assert!(decode(future).unwrap_err().contains("format 2"));
+        future["v"] = 3.into();
+        assert!(decode(future).unwrap_err().contains("format 3"));
+        // A version 1 user entry reads as one text part.
+        let old = json!({"v": 1, "type": "user", "message_id": 3, "origin": "owner", "text": "[clock]\nhi"});
+        assert_eq!(
+            decode(old).unwrap(),
+            HistoryEntry::User(UserEntry::text_only(
+                MessageId(3),
+                MessageOrigin::Owner,
+                "[clock]\nhi"
+            ))
+        );
     }
 
     #[tokio::test]

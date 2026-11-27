@@ -1,6 +1,6 @@
 # Built-in tool contracts
 
-The Tool Registry advertises nine built-in tools in v1, plus any tools from configured MCP servers. The Tool Executor passes validated arguments and a scoped `ToolContext` to each handler. File and shell handlers use the Environment Interface. Relative paths and shell commands start from the session working directory. Absolute paths under `/workspace` work in both the shell and the file tools. Paths under `/skills` are read-only in both. [MCP Client](../MCP.md) · [Tool Registry](../ToolRegistry.md) · [Environment Interface](../EnvironmentInterface.md#handler-interface) · [Tool permissions](ToolPermissions.md)
+The Tool Registry advertises ten built-in tools, plus any tools from configured MCP servers. The Tool Executor passes validated arguments and a scoped `ToolContext` to each handler. File and shell handlers use the Environment Interface. Relative paths and shell commands start from the session working directory. Absolute paths under `/workspace` work in both the shell and the file tools. Paths under `/skills` are read-only in both. [MCP Client](../MCP.md) · [Tool Registry](../ToolRegistry.md) · [Environment Interface](../EnvironmentInterface.md#handler-interface) · [Tool permissions](ToolPermissions.md)
 
 ## V1 inputs and outputs
 
@@ -17,6 +17,7 @@ The Tool Registry advertises nine built-in tools in v1, plus any tools from conf
 | `memory` | List, read, write, or delete long-term memories | `command`, `name?`, `description?`, `content?` | Depends on `command` |
 | `skill` | List skills or load one | `name?` | The skill list, or one skill's files and instructions |
 | `ask_owner` | Ask the owner a question and wait for the answer | `question`, `choices?` | The owner's answer as text |
+| `send_file` | Send a workspace file to the chat | `path`, `caption?` | `status`, `name`, and `bytes` |
 
 ### `read_file`
 
@@ -66,6 +67,10 @@ With no `name`, list every valid skill with its description. With a `name`, retu
 
 The model asks a yes-or-no question, or offers up to six choices, before an action only it can recognize as real-world, or when a decision is the owner's. The owner answers through the session's chat bridge. The result says what the owner chose, or that they did not answer in time. Direct model calls only. [Approvals](../Approvals.md) · [Tool contract](../Approvals.md#the-ask_owner-tool)
 
+### `send_file`
+
+The model sends a file from the workspace to the chat the conversation is in: a photo, a chart it drew, a PDF, a video. Open it with `open_file(path, Read)`, refuse anything but a regular workspace file of at most 50 MB, copy it into the session's folder, and hand the copy to the bridge as a `resource_link`. `caption` is at most 1,024 characters. The result is `queued`: the bridge sends the file after the turn's reply, and a failure to send it shows in the chat, not in the result. Not in guest sessions. Direct model calls only. [Sending files out](../Media.md#sending-files-out)
+
 ## Startup registration
 
-The filesystem module supplies the three file handlers, the shell module supplies `run_command` and `job`, the Code Mode module supplies `execute_code`, the memory module supplies `memory`, the skills module supplies `skill`, and the approvals module supplies `ask_owner`. The Tool Registry pairs each handler with its model-facing definition at startup. [Registration example](../ToolRegistry.md#register-built-in-tools-at-startup) · [Architecture overview](../README.md)
+The filesystem module supplies the three file handlers, the shell module supplies `run_command` and `job`, the Code Mode module supplies `execute_code`, the memory module supplies `memory`, the skills module supplies `skill`, the approvals module supplies `ask_owner`, and the media module supplies `send_file`. The Tool Registry pairs each handler with its model-facing definition at startup. [Registration example](../ToolRegistry.md#register-built-in-tools-at-startup) · [Architecture overview](../README.md)

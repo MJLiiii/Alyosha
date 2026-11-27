@@ -237,14 +237,15 @@ pub async fn login(
         system_instruction: "Reply with one word.".into(),
         summary: None,
         history: vec![crate::agent_state::HistoryEntry::User(
-            crate::agent_state::UserEntry {
-                message_id: crate::agent_state::MessageId(0),
-                origin: crate::agent_state::MessageOrigin::Owner,
-                text: "Say OK.".into(),
-            },
+            crate::agent_state::UserEntry::text_only(
+                crate::agent_state::MessageId(0),
+                crate::agent_state::MessageOrigin::Owner,
+                "Say OK.",
+            ),
         )],
         tools: Vec::new(),
         max_output_tokens: None,
+        media: Default::default(),
     };
     match client.generate(request, CancellationToken::new()).await {
         Ok(reply) => {
@@ -253,12 +254,98 @@ pub async fn login(
                 config.model.name,
                 reply.entry.text().trim()
             ));
+        }
+        Err(error) => {
+            return Err(GatewayError::Login(format!(
+                "the test request failed: {error}"
+            )));
+        }
+    }
+    login_transcription(config, &admin, &gateway_key, terminal).await
+}
+
+/// Sets up `[media] transcribe_provider` on the `openai` channel with its
+/// own API key, unless it is the model's provider, and sends it one short
+/// transcription. See `docs/Media.md#transcription`.
+async fn login_transcription(
+    config: &Config,
+    admin: &Admin,
+    gateway_key: &str,
+    terminal: &mut dyn LoginTerminal,
+) -> Result<(), GatewayError> {
+    let Some(provider) = config.media.transcribe_provider.as_deref() else {
+        return Ok(());
+    };
+    if provider == config.model.provider {
+        if config.model.api != Api::Openai {
+            return Err(GatewayError::Login(format!(
+                "media.transcribe_provider {provider} is the model's provider, which is not on the openai channel"
+            )));
+        }
+    } else {
+        let provider_id = match admin.find_provider(provider).await? {
+            Some(id) => id,
+            None => {
+                let id = admin.create_provider(provider, "openai").await?;
+                terminal.say(&format!("Created the provider {provider} (openai) for transcription."));
+                id
+            }
+        };
+        let old_credentials = admin.credentials(&provider_id).await?;
+        let key = terminal.read_secret(&format!("OpenAI API key for {provider} (transcription): "))?;
+        let key = key.trim();
+        if key.is_empty() {
+            return Err(GatewayError::Login("no key was entered".into()));
+        }
+        let credential_id = admin.add_api_key(&provider_id, key).await?;
+        for old in old_credentials.iter().filter(|id| **id != credential_id) {
+            admin.delete_credential(old).await?;
+        }
+        terminal.say(&format!("Signed in {provider}."));
+    }
+    let transcriber = crate::media::GatewayTranscriber::new(
+        &config.gateway.url,
+        gateway_key,
+        provider,
+        &config.media.transcribe_model,
+    );
+    use crate::media::Transcriber;
+    match transcriber
+        .transcribe(silence(), "audio/wav", CancellationToken::new())
+        .await
+    {
+        Ok(_) => {
+            terminal.say(&format!(
+                "Test transcription with {} succeeded.",
+                config.media.transcribe_model
+            ));
             Ok(())
         }
         Err(error) => Err(GatewayError::Login(format!(
-            "the test request failed: {error}"
+            "the test transcription failed: {error}"
         ))),
     }
+}
+
+/// Half a second of silence as a 16 kHz mono WAV file.
+fn silence() -> Vec<u8> {
+    let samples = 8_000u32;
+    let data = samples * 2;
+    let mut wav = Vec::with_capacity(44 + data as usize);
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&(36 + data).to_le_bytes());
+    wav.extend_from_slice(b"WAVEfmt ");
+    wav.extend_from_slice(&16u32.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes());
+    wav.extend_from_slice(&16_000u32.to_le_bytes());
+    wav.extend_from_slice(&32_000u32.to_le_bytes());
+    wav.extend_from_slice(&2u16.to_le_bytes());
+    wav.extend_from_slice(&16u16.to_le_bytes());
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&data.to_le_bytes());
+    wav.resize(44 + data as usize, 0);
+    wav
 }
 
 /// The GPROXY channel for a configured API.
@@ -518,6 +605,15 @@ mod tests {
 
     fn files(root: &Path) -> GatewayFiles {
         GatewayFiles::new(&Paths::under(root))
+    }
+
+    #[test]
+    fn the_test_sound_is_a_valid_wav() {
+        let wav = silence();
+        assert_eq!(&wav[..4], b"RIFF");
+        assert_eq!(&wav[8..16], b"WAVEfmt ");
+        assert_eq!(u32::from_le_bytes(wav[4..8].try_into().unwrap()) as usize, wav.len() - 8);
+        assert_eq!(wav.len(), 44 + 16_000);
     }
 
     #[test]

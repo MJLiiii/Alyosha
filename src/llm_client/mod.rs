@@ -12,7 +12,7 @@ mod gemini;
 mod responses;
 mod sse;
 
-use std::time::Duration;
+use std::{collections::HashMap, time::Duration};
 
 use tokio_util::sync::CancellationToken;
 
@@ -22,7 +22,7 @@ pub use gateway::{GatewayClient, Timeouts};
 
 use crate::{
     BoxFuture,
-    agent_state::{AssistantEntry, HistoryEntry, ToolOutcome},
+    agent_state::{AssistantEntry, HistoryEntry, ToolOutcome, UserEntry, UserPart},
     tools::ToolDefinition,
 };
 
@@ -58,6 +58,65 @@ pub struct ModelRequest {
     pub tools: Vec<ToolDefinition>,
     /// `None` uses the route's default output allowance.
     pub max_output_tokens: Option<u32>,
+    /// The bytes of the images in `history`, by hash, loaded by the caller
+    /// from the media table (`docs/Media.md#context-and-compaction`).
+    pub media: HashMap<String, MediaData>,
+}
+
+/// One image's bytes, ready to send.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaData {
+    pub mime: String,
+    /// The bytes in standard base64.
+    pub base64: String,
+}
+
+/// One piece of a user message as a route encodes it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Piece<'a> {
+    Text(String),
+    Image(&'a MediaData),
+}
+
+/// A user entry's pieces in order. An entry without images is one text
+/// piece, so it encodes exactly as before images existed. Adjacent text
+/// parts are joined by a line break.
+pub(crate) fn user_pieces<'a>(user: &UserEntry, request: &'a ModelRequest) -> Vec<Piece<'a>> {
+    let mut pieces = Vec::new();
+    let mut text: Option<String> = None;
+    for part in &user.parts {
+        match part {
+            UserPart::Text(part) => match &mut text {
+                Some(text) => {
+                    text.push('\n');
+                    text.push_str(part);
+                }
+                None => text = Some(part.clone()),
+            },
+            UserPart::Image(image) => {
+                if let Some(text) = text.take() {
+                    pieces.push(Piece::Text(text));
+                }
+                match request.media.get(&image.sha256) {
+                    Some(data) => pieces.push(Piece::Image(data)),
+                    // The caller checks every image before sending.
+                    None => pieces.push(Piece::Text(crate::agent_state::IMAGE_PLACEHOLDER.into())),
+                }
+            }
+        }
+    }
+    if let Some(text) = text {
+        pieces.push(Piece::Text(text));
+    }
+    if pieces.is_empty() {
+        pieces.push(Piece::Text(String::new()));
+    }
+    pieces
+}
+
+/// `data:<mime>;base64,<data>`.
+pub(crate) fn data_url(data: &MediaData) -> String {
+    format!("data:{};base64,{}", data.mime, data.base64)
 }
 
 /// A complete reply.
@@ -124,4 +183,91 @@ pub fn result_text(outcome: &ToolOutcome) -> String {
 /// How the conversation summary is introduced to the model.
 pub(crate) fn summary_text(summary: &str) -> String {
     format!("Summary of the earlier conversation, written for you to continue from:\n\n{summary}")
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+    use crate::agent_state::{MediaRef, MessageId, MessageOrigin};
+
+    /// A user entry of text, an image, and more text, with its bytes.
+    fn request() -> ModelRequest {
+        let image = MediaRef {
+            sha256: "abc".into(),
+            mime: "image/png".into(),
+            width: 1,
+            height: 1,
+        };
+        ModelRequest {
+            provider: "p".into(),
+            model: "m".into(),
+            system_instruction: "s".into(),
+            summary: None,
+            history: vec![HistoryEntry::User(UserEntry {
+                message_id: MessageId(1),
+                origin: MessageOrigin::Owner,
+                parts: vec![
+                    UserPart::Text("[clock]\nlook".into()),
+                    UserPart::Text("[photo: inbox/a.png]".into()),
+                    UserPart::Image(image),
+                    UserPart::Text("after".into()),
+                ],
+            })],
+            tools: Vec::new(),
+            max_output_tokens: None,
+            media: HashMap::from([(
+                "abc".to_owned(),
+                MediaData {
+                    mime: "image/png".into(),
+                    base64: "QUJD".into(),
+                },
+            )]),
+        }
+    }
+
+    #[test]
+    fn each_route_puts_the_image_between_its_texts() {
+        let request = request();
+        let responses = responses::encode(&request, true, None);
+        assert_eq!(
+            responses.body["input"][0]["content"],
+            json!([
+                {"type": "input_text", "text": "[clock]\nlook\n[photo: inbox/a.png]"},
+                {"type": "input_image", "image_url": "data:image/png;base64,QUJD", "detail": "auto"},
+                {"type": "input_text", "text": "after"},
+            ])
+        );
+        let claude = claude::encode(&request);
+        assert_eq!(
+            claude.body["messages"][0]["content"][1],
+            json!({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "QUJD"}})
+        );
+        let chat = chat::encode(&request);
+        assert_eq!(
+            chat.body["messages"][1]["content"][1],
+            json!({"type": "image_url", "image_url": {"url": "data:image/png;base64,QUJD"}})
+        );
+        let gemini = gemini::encode(&request);
+        assert_eq!(
+            gemini.body["contents"][0]["parts"][1],
+            json!({"inline_data": {"mime_type": "image/png", "data": "QUJD"}})
+        );
+    }
+
+    #[test]
+    fn text_only_entries_encode_as_before() {
+        let mut request = request();
+        request.history = vec![HistoryEntry::User(UserEntry::text_only(
+            MessageId(1),
+            MessageOrigin::Owner,
+            "hi",
+        ))];
+        assert_eq!(chat::encode(&request).body["messages"][1]["content"], json!("hi"));
+        assert_eq!(
+            responses::encode(&request, true, None).body["input"][0]["content"],
+            json!([{"type": "input_text", "text": "hi"}])
+        );
+    }
 }

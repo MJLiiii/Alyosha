@@ -20,7 +20,7 @@ jsonschema = { version = "0.63.1", default-features = false }
 rpassword = "7.5.5"
 rquickjs = { version = "0.14.0", features = ["futures", "parallel"] }
 rustix = { version = "1.1.6", features = ["fs", "process"] }
-reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "json"] }
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "json", "multipart"] }
 serde_json = { version = "1.0.154", features = ["preserve_order"] }
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = ["rt", "rt-multi-thread", "macros", "sync", "time", "net", "io-util", "process", "signal", "fs", "io-std"] }
@@ -28,6 +28,9 @@ tokio-util = "0.7.20"
 tracing = "0.1.44"
 tokio-postgres = { version = "0.7.18", features = ["with-serde_json-1", "with-chrono-0_4"] }
 serde = { version = "1.0.229", features = ["derive"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
+sha2 = "0.10"
+base64 = "0.22"
 
 [dev-dependencies]
 tempfile = "3.27.0"

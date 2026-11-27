@@ -396,6 +396,7 @@ fn request(provider: &str) -> ModelRequest {
         history: Vec::new(),
         tools: vec![read_file_definition()],
         max_output_tokens: None,
+        media: Default::default(),
     }
 }
 

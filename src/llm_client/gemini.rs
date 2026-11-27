@@ -12,11 +12,11 @@ use std::{
 use serde_json::{Map, Value, json};
 
 use super::{
-    ModelError, ModelRequest, TokenUsage,
+    ModelError, ModelRequest, Piece, TokenUsage,
     gateway::{Assembler, Encoded, stream_error},
     result_text,
     sse::SseEvent,
-    summary_text,
+    summary_text, user_pieces,
 };
 use crate::agent_state::{
     AssistantEntry, AssistantPart, HistoryEntry, Replay, ToolCall, ToolOutcome,
@@ -43,7 +43,19 @@ pub(crate) fn encode(request: &ModelRequest) -> Encoded {
     }
     for entry in &request.history {
         match entry {
-            HistoryEntry::User(user) => push("user", json!({"text": user.text})),
+            HistoryEntry::User(user) => {
+                for piece in user_pieces(user, request) {
+                    push(
+                        "user",
+                        match piece {
+                            Piece::Text(text) => json!({"text": text}),
+                            Piece::Image(data) => {
+                                json!({"inline_data": {"mime_type": data.mime, "data": data.base64}})
+                            }
+                        },
+                    );
+                }
+            }
             HistoryEntry::Assistant(assistant) => {
                 let mut signature = None;
                 for part in &assistant.parts {

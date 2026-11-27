@@ -23,7 +23,7 @@ use crate::{
     agent_state::{
         ActiveTurn, ActiveWork, AgentState, CallId, ContextCheckpoint, HistoryEntry, MessageId,
         MessageOrigin, Sender, ToolCall, ToolOutcome, ToolResultEntry, TurnOutcome, TurnPhase,
-        UserEntry, UserMessage,
+        Attachment, UserEntry, UserMessage, UserPart,
     },
     approvals::{Approver, ObservedApprover, OwnerRequest},
     clock::{Clock, clock_line},
@@ -148,6 +148,8 @@ pub enum SessionEvent {
     AssistantText(String),
     /// A line for the status area, such as a memory write.
     Notice(String),
+    /// A file from `send_file`, to send after the reply.
+    File(crate::media::send_file::OutgoingFile),
     /// A turn's final reply, to display.
     Reply {
         turn_id: MessageId,
@@ -215,6 +217,12 @@ impl SessionDriver {
             services.notify = Some(Arc::new(move |text| {
                 let _ = notices.send(SessionEvent::Notice(text));
             }));
+            if let Some(outbox) = &services.outbox {
+                let files = events.clone();
+                outbox.connect(Arc::new(move |file| {
+                    let _ = files.send(SessionEvent::File(file));
+                }));
+            }
             if let Some(approver) = services.approver.take() {
                 services.approver = Some(watch_approver(approver, weak.clone()));
             }
@@ -293,14 +301,25 @@ impl SessionDriver {
     /// Queues one of the owner's messages behind any earlier ones and returns
     /// its ID.
     pub fn submit(&self, text: impl Into<String>) -> MessageId {
-        self.session.enqueue(text.into(), None)
+        self.session.enqueue(text.into(), Vec::new(), None)
+    }
+
+    /// Queues a message with attachments, from the owner or, in a guest
+    /// session, from a group member.
+    pub fn submit_message(
+        &self,
+        text: impl Into<String>,
+        attachments: Vec<Attachment>,
+        sender: Option<Sender>,
+    ) -> MessageId {
+        self.session.enqueue(text.into(), attachments, sender)
     }
 
     /// Queues a group member's message in a guest session. When its turn
     /// starts, the sender becomes the speaker whose notes `user_memory`
     /// writes, and the opening entry carries their notes.
     pub fn submit_from(&self, text: impl Into<String>, sender: Sender) -> MessageId {
-        self.session.enqueue(text.into(), Some(sender))
+        self.session.enqueue(text.into(), Vec::new(), Some(sender))
     }
 
     /// Signals Stop to the active turn or command. Queued messages stay
@@ -422,6 +441,9 @@ impl SessionDriver {
         if let Some(environment) = &session.services.environment {
             environment.logs.remove_all();
         }
+        if let Some(outbox) = &session.services.outbox {
+            outbox.remove_all();
+        }
         if let Some((store, id)) = &session.store
             && let Err(error) = store.close(*id).await
         {
@@ -510,7 +532,12 @@ async fn consume(session: Arc<Session>) {
 }
 
 impl Session {
-    fn enqueue(&self, text: String, sender: Option<Sender>) -> MessageId {
+    fn enqueue(
+        &self,
+        text: String,
+        attachments: Vec<Attachment>,
+        sender: Option<Sender>,
+    ) -> MessageId {
         let id = {
             let mut state = self.lock_state();
             let id = MessageId(self.last_message_id.fetch_add(1, Ordering::Relaxed) + 1);
@@ -519,6 +546,7 @@ impl Session {
                 origin: MessageOrigin::Owner,
                 sender,
                 text,
+                attachments,
                 submitted_at: self.clock.now(),
             });
             // Sent under the lock, so the front end hears of the message
@@ -672,6 +700,78 @@ impl Session {
         Ok(())
     }
 
+    /// Turns a message's attachments into parts, showing a status line
+    /// meanwhile. `None` means Stop came first.
+    async fn prepare_attachments(
+        &self,
+        attachments: Vec<Attachment>,
+        submitted_at: chrono::DateTime<chrono::Utc>,
+        cancel: &CancellationToken,
+    ) -> Option<Vec<UserPart>> {
+        let Some(media) = &self.services.media else {
+            return Some(
+                attachments
+                    .iter()
+                    .map(|_| UserPart::Text("[attachment not read: this session cannot read attachments]".into()))
+                    .collect(),
+            );
+        };
+        self.emit(SessionEvent::Notice(crate::media::READING.into()));
+        let prepared = tokio::select! {
+            biased;
+            () = cancel.cancelled() => None,
+            prepared = media.prepare(
+                self.services.environment.as_ref(),
+                attachments,
+                submitted_at,
+                cancel,
+            ) => prepared,
+        };
+        self.emit(SessionEvent::Status(Status::Thinking));
+        prepared.filter(|_| !cancel.is_cancelled())
+    }
+
+    /// Loads the bytes of every image the request carries. A missing row
+    /// fails the turn with its hash.
+    async fn load_media(&self, request: &mut ModelRequest) -> Result<(), String> {
+        use base64::Engine;
+        let hashes: Vec<String> = request
+            .history
+            .iter()
+            .filter_map(|entry| match entry {
+                HistoryEntry::User(user) => Some(user.images()),
+                _ => None,
+            })
+            .flatten()
+            .map(|image| image.sha256.clone())
+            .collect();
+        if hashes.is_empty() {
+            return Ok(());
+        }
+        let Some(media) = &self.services.media else {
+            return Err("This session cannot read images.".into());
+        };
+        for hash in hashes {
+            if request.media.contains_key(&hash) {
+                continue;
+            }
+            match media.store.get_media(&hash).await {
+                Ok(Some((mime, bytes))) => {
+                    request.media.insert(
+                        hash,
+                        crate::llm_client::MediaData {
+                            mime,
+                            base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+                        },
+                    );
+                }
+                Ok(None) => return Err(format!("image {hash} is missing from the media table")),
+                Err(error) => return Err(format!("could not load image {hash}: {error}")),
+            }
+        }
+        Ok(())
+    }
+
     /// Takes one message through model requests and tool batches until the
     /// model replies without calls, Stop ends the turn, or a request fails.
     async fn run_turn(
@@ -691,14 +791,21 @@ impl Session {
             (Some(sender), Some(users)) => users.opening(sender, &message.text).await,
             _ => message.text.clone(),
         };
+        let mut parts = vec![UserPart::Text(format!(
+            "{}\n{}",
+            clock_line(message.submitted_at, self.timezone),
+            body
+        ))];
+        if !message.attachments.is_empty() {
+            match self.prepare_attachments(message.attachments, message.submitted_at, cancel).await {
+                Some(prepared) => parts.extend(prepared),
+                None => return TurnEnd::Stopped,
+            }
+        }
         let opening = UserEntry {
             message_id: message.id,
             origin: message.origin,
-            text: format!(
-                "{}\n{}",
-                clock_line(message.submitted_at, self.timezone),
-                body
-            ),
+            parts,
         };
         let opening_index = match self.append(HistoryEntry::User(opening)).await {
             Ok(index) => index,
@@ -724,6 +831,9 @@ impl Session {
                 Ok(request) => request,
                 Err(error) => return prepare_failure(error),
             };
+            if let Err(reason) = self.load_media(&mut request).await {
+                return TurnEnd::Failed(reason);
+            }
             let reply = loop {
                 let size = context_manager::estimate(&request);
                 let result = tokio::select! {
@@ -746,7 +856,12 @@ impl Session {
                             )
                             .await
                         {
-                            Ok(smaller) => request = smaller,
+                            Ok(mut smaller) => {
+                                if let Err(reason) = self.load_media(&mut smaller).await {
+                                    return TurnEnd::Failed(reason);
+                                }
+                                request = smaller;
+                            }
                             Err(PrepareError::Cancelled) => return TurnEnd::Stopped,
                             Err(_) => {
                                 return TurnEnd::Failed(

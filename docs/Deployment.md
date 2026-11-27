@@ -48,7 +48,7 @@ host /nix/store                  every package the host has built or downloaded
 | Settings | `/etc/alyosha/config.toml`, generated from `services.alyosha.settings` | root, read-only | Edit the host configuration, then `sudo nixos-rebuild switch` [Configuration](reference/Configuration.md) |
 | Secrets | `/var/lib/alyosha-secrets/<name>`, one file each | root, readable by the `alyosha` group; `gproxy.env` root only | `alyosha secret set <name>` [Secrets](reference/Configuration.md#secrets) |
 | GPROXY's database and provider sign-in | `/var/lib/gproxy` | `gproxy` | `alyosha gateway login` [LLM Client / Gateway](LLMClientGateway.md) |
-| Conversations, memory, people's notes | PostgreSQL | `postgres`; only the `alyosha` role connects | Ask Alyosha; look with `alyosha memory list` [Memory](Memory.md) |
+| Conversations with the images you sent, memory, people's notes | PostgreSQL | `postgres`; only the `alyosha` role connects | Ask Alyosha; look with `alyosha memory list` [Memory](Memory.md) |
 | Working folders | `/var/lib/alyosha/work/owner`, `work/groups/<name>`, `work/guest` | `alyosha-run`, group `alyosha-work` | Look with `alyosha shell` |
 | Google sign-in store, `schedule.toml` | `/var/lib/alyosha` | `alyosha` | `alyosha shell` [Email and calendar](EmailCalendar.md) · [Scheduled tasks](Schedule.md) |
 | Skills | host `~/.agents/skills`, mounted read-only at `/var/lib/alyosha/.agents/skills` | you | Your editor [Skills](Skills.md) |
@@ -56,7 +56,7 @@ host /nix/store                  every package the host has built or downloaded
 | Logs | the container's journal | — | `alyosha logs` [Logging](reference/Logging.md) |
 | Database dumps | host `/var/backup/alyosha`, mounted writable | root on the host | `alyosha backup` |
 
-- **Each session has one working folder.** Your private chats in Telegram and QQ share `work/owner`, each trusted group has `work/groups/<name>`, and guest sessions' MCP servers start in `work/guest`. The folders hold only what the agent made, such as notes, saved pages, clones, and downloads. None of your own folders is shared: for Alyosha to work on a project, it clones the project into its folder. [Chat channels](Channels.md#two-bridges-at-once)
+- **Each session has one working folder.** Your private chats in Telegram and QQ share `work/owner`, each trusted group has `work/groups/<name>`, and guest sessions' MCP servers start in `work/guest`. The folders hold only what the agent made, such as notes, saved pages, clones, and downloads, and what you sent it, under `inbox/`. [Where things are kept](Media.md#where-things-are-kept) None of your own folders is shared: for Alyosha to work on a project, it clones the project into its folder. [Chat channels](Channels.md#two-bridges-at-once)
 - **What each user can read.** A command, as `alyosha-run`, sees its own folder, the Nix store, the shell cache, and the internet. The agent and its MCP servers, as `alyosha`, read the secrets they need, the database, and every working folder. Only `gproxy` and root read GPROXY's master key and provider sign-in.
 - **Backups.** Only the database is dumped each day. The working folders are not backed up. The container's own files survive restarts and rebuilds, but `nixos-container destroy` removes them.
 
@@ -155,7 +155,7 @@ services.alyosha = {
 | `gproxy.service` | `User=gproxy`, `StateDirectory=gproxy`, `EnvironmentFile=/var/lib/alyosha-secrets/gproxy.env`, which systemd reads as root. Skipped until the file exists. [Run GPROXY as a service](LLMClientGateway.md#run-gproxy-as-a-service) |
 | PostgreSQL | As in [Durable sessions](SessionStore.md#container), with the role and database owner `alyosha`. |
 | The bridges | `alyosha-telegram.service` and `alyosha-qq.service`, `User=alyosha`, standard output and error to the journal. They require the database and start after GPROXY. |
-| Command units | One template per working folder, the slice, the polkit rule, and the loopback rule, under [Command units](#command-units). |
+| Command units | One template per working folder, the media unit's template, the slice, the polkit rule, and the loopback rule, under [Command units](#command-units). |
 | Chromium | A tmpfiles rule gives `alyosha` a writable `~/.config`, which Chromium needs for its crash database. Without it Chromium exits on its first navigation with `chrome_crashpad_handler: --database is required`. [Chromium inside the container](Browser.md#chromium-inside-the-container) |
 
 ### Command units
@@ -200,6 +200,7 @@ KillMode=control-group
 - **Who may start them.** A polkit rule lets the user `alyosha` start and stop units whose name matches `alyosha-run-[a-z0-9-]+@[0-9]+-[0-9]+\.service`, and nothing else. A template fixes its user, mounts, and limits, so starting one cannot gain anything beyond what the unit allows.
 - **The slice.** `alyosha-run.slice` is started at boot. A oneshot after it, `alyosha-run-firewall.service`, adds `iptables -I OUTPUT -o lo -m cgroup --path alyosha.slice/alyosha-run.slice -j REJECT` and the same for `ip6tables`. The dash in the slice's name puts it under `alyosha.slice`, so that is the cgroup path. The rule can only be added once the slice's cgroup exists. systemd's own `IPAddressDeny=` would be simpler, but it needs a BPF firewall, and the container lacks `CAP_BPF`.
 - **Leftovers.** When `alyosha acp` starts, it stops every `alyosha-run-*@<pid>-*` unit whose process ID no longer runs: commands and jobs of a process that crashed.
+- **The media unit.** `alyosha-run-media@.service` runs FFmpeg on videos and sound people send, so a flaw in a decoder reaches nothing of value. Its name matches the polkit rule, and it uses the same slice, user, and protections as the command units, with these differences: no working folder, `BindPaths=/run/alyosha-run/%i` for its input and output, `PrivateNetwork=yes`, `MemoryMax=1G`, `RuntimeMaxSec=5min`, and `ExecStart=/run/current-system/sw/bin/alyosha media-exec %i`. The `alyosha` package refers to `ffmpeg-headless` by its store path, so FFmpeg needs no place on `PATH`. [Video and sound in a media unit](Media.md#video-and-sound-in-a-media-unit)
 
 ### Why units and not Bubblewrap
 
@@ -264,6 +265,7 @@ These checks need NixOS with the container built from the module, and a provider
 - As `alyosha`: `read_file` and `edit_file` work on a file a command wrote, and a command can change a file the agent wrote.
 - Exit status, a timeout, Stop, a job, and `MemoryMax` behave as in [Command results](EnvironmentInterface.md#command-results). Kill an `alyosha acp` with a job running and start it again. Check that the leftover unit is stopped.
 - Start a unit of another name as `alyosha` with `systemctl start`. Check that polkit refuses it.
+- In a media unit: no network interface but loopback, `/var/lib/alyosha-secrets` and the working folders absent, and FFmpeg writes frames from a sample video. [Media verification](Media.md#verification)
 - The browser cannot open the router's address; MCP servers still reach GPROXY; `sudo alyosha gateway login` works.
 - `alyosha secret set telegram-token` restarts only the Telegram bridge; `alyosha secret list` prints no values; `alyosha logs qq -f` follows the bridge.
 - `systemctl show container@alyosha -p MemoryMax` reports the configured value.

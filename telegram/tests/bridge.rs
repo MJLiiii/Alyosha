@@ -26,6 +26,8 @@ struct BotApi {
     /// Answer the next sendMessage with 429.
     rate_limit_once: Mutex<bool>,
     next_message: Mutex<i64>,
+    /// Refuse every sendPhoto, as Telegram does a bad image.
+    refuse_photos: Mutex<bool>,
 }
 
 impl BotApi {
@@ -86,8 +88,24 @@ impl BotApi {
                         }
                         buffer.extend_from_slice(&chunk[..read]);
                     }
-                    let body: Value =
-                        serde_json::from_slice(&buffer[end..end + length]).unwrap_or(Value::Null);
+                    let raw = &buffer[end..(end + length).min(buffer.len())];
+                    // A download: the file's bytes are its path's last part.
+                    let path = head.split_whitespace().nth(1).unwrap_or_default().to_owned();
+                    if path.starts_with("/file/botTOKEN/") {
+                        let name = path.rsplit('/').next().unwrap().trim_end_matches(".bin").to_owned();
+                        let body = format!("bytes of {name}");
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\ncontent-type: application/octet-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                            body.len()
+                        );
+                        let _ = socket.write_all(response.as_bytes()).await;
+                        return;
+                    }
+                    let body: Value = if head.to_lowercase().contains("multipart/form-data") {
+                        json!({"multipart": String::from_utf8_lossy(raw)})
+                    } else {
+                        serde_json::from_slice(raw).unwrap_or(Value::Null)
+                    };
                     let method = head
                         .split_whitespace()
                         .nth(1)
@@ -135,11 +153,21 @@ impl BotApi {
             && body["text"]
                 .as_str()
                 .is_some_and(|text| text.contains("REFUSE"));
-        self.calls.lock().unwrap().push((method.to_owned(), body));
+        self.calls.lock().unwrap().push((method.to_owned(), body.clone()));
         if refuse {
             return (
                 400,
                 json!({"ok": false, "error_code": 400, "description": "Bad Request: can't parse entities"}),
+            );
+        }
+        if method == "getFile" {
+            let id = body["file_id"].as_str().unwrap_or_default();
+            return (200, json!({"ok": true, "result": {"file_id": id, "file_path": format!("files/{id}.bin")}}));
+        }
+        if method == "sendPhoto" && *self.refuse_photos.lock().unwrap() {
+            return (
+                400,
+                json!({"ok": false, "error_code": 400, "description": "Bad Request: IMAGE_PROCESS_FAILED"}),
             );
         }
         if method == "getMe" {
@@ -243,6 +271,23 @@ async fn agent(
                         continue;
                     }
                     "exit" => return,
+                    "sendfile" => {
+                        let path = std::env::temp_dir().join(format!(
+                            "alyosha-telegram-test-{}-{}.png",
+                            std::process::id(),
+                            id
+                        ));
+                        std::fs::write(&path, b"PNGDATA").unwrap();
+                        out += &send(chunk("Here it is."));
+                        out += &send(update(json!({"sessionUpdate": "agent_message_chunk", "content": {
+                            "type": "resource_link",
+                            "uri": format!("file://{}", path.display()),
+                            "name": "chart.png",
+                            "mimeType": "image/png",
+                            "size": 7,
+                            "description": "Sales",
+                        }})));
+                    }
                     _ => out += &send(chunk("?")),
                 }
                 out += &send(
@@ -418,17 +463,94 @@ async fn long_replies_split_and_rate_limits_are_waited_out() {
     assert!(texts[0].starts_with("000 ") && texts[2].ends_with(&"x".repeat(96)));
 }
 
+/// The blocks of each prompt the agent received, after the first text.
+fn prompt_blocks(log: &Mutex<Vec<Value>>) -> Vec<Vec<Value>> {
+    log.lock()
+        .unwrap()
+        .iter()
+        .filter(|message| message["method"] == "session/prompt")
+        .map(|message| message["params"]["prompt"].as_array().unwrap()[1..].to_vec())
+        .collect()
+}
+
+fn private(id: i64, fields: Value) -> Value {
+    let mut message = json!({"message_id": id, "from": {"id": OWNER}, "chat": {"id": OWNER, "type": "private"}});
+    for (key, value) in fields.as_object().unwrap() {
+        message[key] = value.clone();
+    }
+    json!({"update_id": id, "message": message})
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn photos_get_the_text_only_reply() {
+async fn attachments_are_downloaded_and_sent_as_blocks() {
+    use base64::Engine;
     let harness = start().await;
-    harness.api.push(json!({"update_id": 1, "message": {"message_id": 1, "from": {"id": OWNER}, "chat": {"id": OWNER, "type": "private"}, "photo": [{}]}}));
+    let b64 = |text: &str| base64::engine::general_purpose::STANDARD.encode(text);
+    harness.api.push(private(1, json!({"photo": [{"file_id": "small"}, {"file_id": "big"}], "caption": "look"})));
+    harness.api.push(private(2, json!({"voice": {"file_id": "v1", "mime_type": "audio/ogg"}})));
+    harness.api.push(private(3, json!({"document": {"file_id": "d1", "file_name": "big.zip", "file_size": 30 * 1024 * 1024}})));
+    harness.api.push(private(4, json!({"sticker": {"file_id": "s1", "emoji": "😂", "is_video": true, "thumbnail": {"file_id": "t1"}}, })));
+    harness.api.push(private(5, json!({"game": {"title": "x"}})));
+    let log = harness.log.clone();
+    wait_for(|| prompts(&log).len() == 4).await;
     let api = harness.api.clone();
-    wait_for(|| {
-        api.texts()
-            .contains(&"Only text messages work for now.".to_owned())
-    })
-    .await;
-    assert!(prompts(&harness.log).is_empty());
+    wait_for(|| api.texts().iter().any(|text| text.starts_with("Only text, photos"))).await;
+    let prompts_text = prompts(&harness.log);
+    assert_eq!(prompts_text[0], "look");
+    let blocks = prompt_blocks(&harness.log);
+    assert_eq!(blocks[0], vec![json!({"type": "image", "mimeType": "image/jpeg", "data": b64("bytes of big")})]);
+    assert_eq!(blocks[1], vec![json!({"type": "audio", "mimeType": "audio/ogg", "data": b64("bytes of v1")})]);
+    assert_eq!(blocks[2], vec![json!({"type": "text", "text": "[file big.zip too large to download: 30 MB]"})]);
+    assert_eq!(blocks[3][0], json!({"type": "text", "text": "[sticker 😂]"}));
+    assert_eq!(blocks[3][1]["resource"]["blob"], b64("bytes of t1"));
+    // The large file was never fetched.
+    assert!(!harness.api.calls("getFile").iter().any(|body| body["file_id"] == "d1"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_album_is_one_prompt() {
+    let harness = start().await;
+    harness.api.push(private(1, json!({"media_group_id": "a1", "photo": [{"file_id": "p1"}], "caption": "two photos"})));
+    harness.api.push(private(2, json!({"media_group_id": "a1", "photo": [{"file_id": "p2"}]})));
+    harness.api.push(private(3, json!({"text": "hello"})));
+    let log = harness.log.clone();
+    wait_for(|| prompts(&log).len() == 2).await;
+    // The text is not held, so it may come first; the album is one prompt.
+    let blocks = prompt_blocks(&harness.log);
+    let album = blocks.iter().find(|blocks| !blocks.is_empty()).unwrap();
+    assert_eq!(album.len(), 2);
+    assert!(prompts(&harness.log).contains(&"two photos".to_owned()));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn files_from_alyosha_follow_the_reply() {
+    let harness = start().await;
+    harness.api.push(message(1, OWNER, "sendfile"));
+    let api = harness.api.clone();
+    wait_for(|| !api.calls("sendPhoto").is_empty()).await;
+    assert!(harness.api.texts().contains(&"Here it is.".to_owned()));
+    let photo = &harness.api.calls("sendPhoto")[0]["multipart"];
+    let photo = photo.as_str().unwrap();
+    assert!(photo.contains("PNGDATA") && photo.contains("Sales") && photo.contains("chart.png"));
+
+    // A refused photo goes again as a document.
+    *harness.api.refuse_photos.lock().unwrap() = true;
+    harness.api.push(message(2, OWNER, "sendfile"));
+    wait_for(|| !api.calls("sendDocument").is_empty()).await;
+    let document = harness.api.calls("sendDocument")[0]["multipart"].as_str().unwrap().to_owned();
+    assert!(document.contains("PNGDATA"));
+    // Alyosha's copies are deleted once sent.
+    let leftovers = std::fs::read_dir(std::env::temp_dir())
+        .unwrap()
+        .flatten()
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(&format!("alyosha-telegram-test-{}-", std::process::id()))
+        })
+        .count();
+    assert_eq!(leftovers, 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

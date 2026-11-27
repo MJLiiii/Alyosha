@@ -52,6 +52,21 @@ Buffer stream events and assemble tool arguments until the provider signals succ
 
 Every route streams: the Responses route for both channels, Claude's Messages API, Chat Completions, and Gemini's `streamGenerateContent?alt=sse`. One SSE reader serves all four, and each route's assembler returns the reply only after its completion event. Claude's Messages API requires `max_tokens` and publishes no default, so ordinary requests send 32,000. The `codex` channel's backend accepts no output limit, so summary requests omit it there. Provider fields for replay are kept as `Replay` parts of the assistant entry, in order, and sent again only on their own route.
 
+### Images in requests
+
+A `User` entry's parts go in order as the content of one user message, adjacent text parts joined by a line break. The Agent Loop puts each image's bytes, base64-encoded, in the request's `media` map, keyed by hash, before it sends the request; the client sends them in the route's native form. An entry without images encodes exactly as before. [Images](Media.md#images) · [Context and compaction](Media.md#context-and-compaction)
+
+| Route | Image part |
+| --- | --- |
+| Responses (`codex`, `openai`) | `{"type": "input_image", "image_url": "data:<mime>;base64,<data>", "detail": "auto"}`, next to `input_text` parts |
+| Claude Messages | `{"type": "image", "source": {"type": "base64", "media_type": <mime>, "data": <data>}}` |
+| Chat Completions | `{"type": "image_url", "image_url": {"url": "data:<mime>;base64,<data>"}}` |
+| Gemini | `{"inline_data": {"mime_type": <mime>, "data": <data>}}` |
+
+A route or model that rejects images fails like any unsupported request; set `[model] images = false` for such a model. [Configuration](reference/Configuration.md#model)
+
+The client also sends speech to OpenAI's transcription route through GPROXY, with the same connect and response limits. [Transcription](Media.md#transcription)
+
 ### Native requests and credentials
 
 Use the provider and model pinned by the caller for the whole turn or manual command. Prefix the native path with the configured provider’s name. A Claude provider named `work-claude`, for example, receives requests at `/work-claude/v1/messages` on the local gateway. [GPROXY mounts](https://gproxy.leenhawk.com/reference/routing-table#mounts)
@@ -113,7 +128,9 @@ GPROXY runs as one always-on systemd service, and every Alyosha process connects
    4. Get the credential. For `codex`, POST to `/admin/api/credential-login/device/start`, print the verification address and code, and poll `device/poll` with the login session ID until you finish or the code expires. You can open the address on any device. For an API-key channel, read the key from the terminal without echo and add it through `POST /admin/api/credentials`. Replace any credential the provider already has, so running the command again is how you sign in again after a login expires or a key is revoked. [Provider login](https://gproxy.leenhawk.com/guides/providers#logging-in-to-obtain-a-credential)
    5. Send one small request through the gateway with the gateway key and report success, or the error.
 
-   Changing only `[model] name` needs nothing. After changing `[model] provider` to a new name, run the command again. One key per provider for now. Adding several keys to the provider's pool is deferred.
+   When `[media] transcribe_provider` is set and differs from `[model] provider`, repeat steps 3 and 4 for it on the `openai` channel, asking for its API key, and send it one short transcription in step 5. [Transcription](Media.md#transcription)
+
+   Changing only `[model] name` needs nothing. After changing `[model] provider` or `[media] transcribe_provider` to a new name, run the command again. One key per provider for now. Adding several keys to the provider's pool is deferred.
 
    Every other Alyosha process reads only the secret `gateway-key` and sends it as `Authorization: Bearer <gateway-key>`. Only the `gateway` commands use the admin key. When a request fails because the provider does not exist, its login has expired, or its key is invalid, the client returns a not-signed-in error whose message says: "The model provider is not signed in. Run `alyosha gateway login` in a terminal." A chat shows it as **Failed:**, so a scheduled task that fails at night is how you find out. Check at step 2 which response GPROXY gives for a provider that does not exist, and record it here. Until checked, the client treats HTTP 401, 403, and 404 as not signed in.
 
@@ -172,6 +189,8 @@ To roll back, switch to the previous system generation. If the new release migra
 For offline client checks, point the client at a local HTTP fixture that records requests and serves scripted provider responses. For gateway integration, run the installed GPROXY Headless binary against local mock upstreams with test credentials. Both sets of checks can run without a live account.
 
 - On each native route, return two tool calls, send both results back, and return a final reply. Check the path, call IDs, block order, and provider-specific fields on the second request. Use a streaming fixture for the `codex` route.
+- On each native route, send a user entry with text, an image, and more text. Check the image's native form and its place between the two texts. Remove its media row and check the error naming the hash.
+- Through the real GPROXY with an OpenAI key, post a short Ogg Opus file to `/<transcribe_provider>/v1/audio/transcriptions` as multipart. Check that the transcript comes back. Record here whether GPROXY forwards it, because the media page's fallback depends on it. [Transcription](Media.md#transcription)
 - Cut a stream after the first complete tool call and before the response ends. Repeat with Stop and an output-token limit. Expect zero tool executions and zero partial assistant entries from that response.
 - Have the first key return HTTP 429 and the second succeed. Exhaust the pool and check that the rate limit reaches the caller. An expired ChatGPT login that cannot refresh, an invalid key, and a missing provider each return the not-signed-in error with the `gateway login` hint.
 - Run `alyosha gateway init` twice. Check that the second run refuses and the first wrote `gproxy.env` owned by root with mode `0400` and all three variables.

@@ -293,6 +293,49 @@ let
       KillMode = "control-group";
     };
   };
+
+  # The media unit: FFmpeg on a file someone sent, with no network, no
+  # working folder, and no secrets (docs/Media.md#video-and-sound-in-a-media-unit).
+  mediaUnit = {
+    description = "FFmpeg on a file sent to Alyosha";
+    restartIfChanged = false;
+    serviceConfig = {
+      Type = "exec";
+      User = "alyosha-run";
+      Group = "alyosha-work";
+      Slice = "alyosha-run.slice";
+      ExecStart = "${alyosha}/bin/alyosha media-exec %i";
+      RemainAfterExit = true;
+      BindPaths = [ "/run/alyosha-run/%i:/run/alyosha-run/%i" ];
+      TemporaryFileSystem = [
+        "/var/lib"
+        "/var/cache"
+        "/home"
+        "/run/alyosha-run"
+      ];
+      InaccessiblePaths = [
+        "-/run/postgresql"
+        "-/nix/var/nix/daemon-socket"
+        "-${backups}"
+      ];
+      PrivateNetwork = true;
+      PrivatePIDs = true;
+      PrivateTmp = true;
+      PrivateIPC = true;
+      ProtectSystem = "strict";
+      NoNewPrivileges = true;
+      RestrictNamespaces = true;
+      RestrictSUIDSGID = true;
+      LockPersonality = true;
+      MemoryMax = "1G";
+      MemorySwapMax = 0;
+      TasksMax = 256;
+      RuntimeMaxSec = "5min";
+      Nice = 10;
+      UMask = "0007";
+      KillMode = "control-group";
+    };
+  };
 in
 {
   options.services.alyosha = {
@@ -573,6 +616,7 @@ in
               };
             }))
             (lib.listToAttrs (map (folder: lib.nameValuePair "${folder.template}@" (runUnit folder)) folders))
+            { "alyosha-run-media@" = mediaUnit; }
           ];
 
           # Started at boot, so its cgroup exists for the loopback rule.

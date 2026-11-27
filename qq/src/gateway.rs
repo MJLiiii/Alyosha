@@ -20,7 +20,8 @@ use tokio::sync::{Mutex, mpsc};
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::{
-    MarkdownRefused, ReplyTo, Seen, SendError, Sender, TEXT_ONLY, deliver, deliver_reply,
+    MarkdownRefused, ReplyTo, Seen, SendError, Sender, deliver, deliver_reply,
+    media::{Chat, send_files},
     parse_answer, parse_token, permission_text, reply_parts,
 };
 
@@ -119,7 +120,17 @@ impl QqApi {
             .await
     }
 
+    /// The HTTP client, for downloads.
+    pub(crate) fn http(&self) -> &reqwest::Client {
+        &self.http
+    }
+
     async fn send_message(&self, path: &str, body: Value) -> Result<(), SendError> {
+        self.post(path, body).await.map(|_| ())
+    }
+
+    /// Posts JSON to the API and returns QQ's reply.
+    pub(crate) async fn post(&self, path: &str, body: Value) -> Result<Value, SendError> {
         let token = self.token().await.map_err(|error| SendError {
             code: -1,
             message: error.to_string(),
@@ -142,7 +153,7 @@ impl QqApi {
             .or(reply["code"].as_i64())
             .unwrap_or(0);
         if status.is_success() && code == 0 {
-            return Ok(());
+            return Ok(reply);
         }
         tracing::warn!(
             code,
@@ -196,7 +207,8 @@ pub struct GroupMessage {
     /// The member's nickname, or `QQ user` when QQ sends none.
     pub name: String,
     pub content: String,
-    pub has_attachments: bool,
+    /// `d.attachments` as QQ sent them.
+    pub attachments: Vec<Value>,
 }
 
 /// A private message from the gateway.
@@ -205,7 +217,12 @@ pub struct C2cMessage {
     pub id: String,
     pub openid: String,
     pub content: String,
-    pub has_attachments: bool,
+    /// `d.attachments` as QQ sent them.
+    pub attachments: Vec<Value>,
+}
+
+fn attachments_of(d: &Value) -> Vec<Value> {
+    d["attachments"].as_array().cloned().unwrap_or_default()
 }
 
 /// Keeps a WebSocket connection to the gateway and forwards private
@@ -307,7 +324,7 @@ async fn connect_once(
                                 id: d["id"].as_str().unwrap_or_default().to_owned(),
                                 openid: d["author"]["user_openid"].as_str().unwrap_or_default().to_owned(),
                                 content: d["content"].as_str().unwrap_or_default().trim().to_owned(),
-                                has_attachments: d["attachments"].as_array().is_some_and(|items| !items.is_empty()),
+                                attachments: attachments_of(d),
                             }));
                         }
                         Some("GROUP_AT_MESSAGE_CREATE") => {
@@ -374,9 +391,7 @@ pub fn group_message(d: &Value) -> GroupMessage {
             .to_owned(),
         name: name.to_owned(),
         content: d["content"].as_str().unwrap_or_default().trim().to_owned(),
-        has_attachments: d["attachments"]
-            .as_array()
-            .is_some_and(|items| !items.is_empty()),
+        attachments: attachments_of(d),
     }
 }
 
@@ -486,20 +501,14 @@ pub async fn run(
                         if !seen.first(&message.id, Instant::now()) {
                             continue;
                         }
-                        let to = ToGroup { api: api.clone(), group_openid: message.group_openid.clone() };
-                        let mut reply = ReplyTo::message(&message.id);
-                        if message.content.is_empty() && message.has_attachments {
-                            if deliver(&to, &[TEXT_ONLY.to_owned()], &mut reply).await.is_some() {
-                                tracing::warn!(group = %message.group_openid, "a group reply failed; dropped");
-                            }
-                            continue;
-                        }
+                        let reply = ReplyTo::message(&message.id);
+                        let blocks = api.blocks(&message.attachments).await;
                         tracing::info!(group = %message.group_openid, trusted = pool.is_trusted(&message.group_openid), "a group mention");
                         last_mention.insert(message.group_openid.clone(), message.id.clone());
                         let key = format!("g{}:{}", message.group_openid, message.id);
                         group_replies.insert(key.clone(), (message.group_openid.clone(), reply));
                         let user = format!("qq-{}", message.member_openid);
-                        if let Err(error) = pool.prompt(&message.group_openid, &key, &message.content, &user, &message.name).await {
+                        if let Err(error) = pool.prompt(&message.group_openid, &key, &message.content, blocks, &user, &message.name).await {
                             tracing::warn!(group = %message.group_openid, error = %error, "the group session did not start");
                             group_replies.remove(&key);
                         }
@@ -525,8 +534,11 @@ pub async fn run(
                     expired_notice = false;
                     let _ = deliver(&owner, &["Expired — not approved.".to_owned()], &mut reply).await;
                 }
-                if message.content.is_empty() && message.has_attachments {
-                    let _ = deliver(&owner, &[TEXT_ONLY.to_owned()], &mut reply).await;
+                if !message.attachments.is_empty() {
+                    let blocks = api.blocks(&message.attachments).await;
+                    let key = format!("m{}", message.id);
+                    replies.lock().await.insert(key.clone(), reply);
+                    bridge.prompt_with(&key, &message.content, blocks);
                     continue;
                 }
                 // An answer to an open request.
@@ -588,6 +600,12 @@ pub async fn run(
                         if let Some(rest) = deliver_reply(&owner, &finished.reply(), chunk, &mut reply, &markdown).await {
                             kept.lock().await.push(rest);
                         }
+                        let problems = send_files(&api, &owner, Chat::User(&settings.owner_openid), &finished.files, &mut reply).await;
+                        if !problems.is_empty()
+                            && let Some(rest) = deliver(&owner, &problems, &mut reply).await
+                        {
+                            kept.lock().await.push(rest);
+                        }
                     }
                     Event::Permission(permission) => {
                         let options: Vec<String> = permission.options.iter().map(|(_, name)| name.clone()).collect();
@@ -632,9 +650,17 @@ pub async fn run(
                     Event::Finished(finished) => {
                         pool.touch(&group);
                         if let Some((group_openid, mut reply)) = group_replies.remove(&finished.key) {
-                            let to = ToGroup { api: api.clone(), group_openid };
+                            let to = ToGroup { api: api.clone(), group_openid: group_openid.clone() };
                             if deliver_reply(&to, &finished.reply(), chunk, &mut reply, &markdown).await.is_some() {
                                 tracing::warn!(group = %group, "a group reply failed; dropped");
+                            }
+                            let problems = send_files(&api, &to, Chat::Group(&group_openid), &finished.files, &mut reply).await;
+                            if !problems.is_empty() && deliver(&to, &problems, &mut reply).await.is_some() {
+                                tracing::warn!(group = %group, "a group reply failed; dropped");
+                            }
+                        } else {
+                            for file in &finished.files {
+                                file.remove();
                             }
                         }
                     }
@@ -715,12 +741,12 @@ mod tests {
             ),
             ("m1", "G1", "M7", "Bob", "what is 2+2?")
         );
-        assert!(!message.has_attachments);
+        assert!(message.attachments.is_empty());
         let unnamed = group_message(
             &json!({"id": "m2", "group_openid": "G1", "author": {"member_openid": "M8"}, "content": "", "attachments": [{"url": "x"}]}),
         );
         assert_eq!(unnamed.name, "QQ user");
-        assert!(unnamed.content.is_empty() && unnamed.has_attachments);
+        assert!(unnamed.content.is_empty() && unnamed.attachments.len() == 1);
     }
 
     #[test]

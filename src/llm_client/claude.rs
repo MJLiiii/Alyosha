@@ -3,11 +3,11 @@
 use serde_json::{Map, Value, json};
 
 use super::{
-    ModelError, ModelRequest, TokenUsage,
+    ModelError, ModelRequest, Piece, TokenUsage,
     gateway::{Assembler, Encoded, parse_arguments, stream_error},
     result_text,
     sse::SseEvent,
-    summary_text,
+    summary_text, user_pieces,
 };
 use crate::agent_state::{
     AssistantEntry, AssistantPart, HistoryEntry, Replay, ToolCall, ToolOutcome,
@@ -35,7 +35,20 @@ pub(crate) fn encode(request: &ModelRequest) -> Encoded {
     }
     for entry in &request.history {
         match entry {
-            HistoryEntry::User(user) => push("user", json!({"type": "text", "text": user.text})),
+            HistoryEntry::User(user) => {
+                for piece in user_pieces(user, request) {
+                    push(
+                        "user",
+                        match piece {
+                            Piece::Text(text) => json!({"type": "text", "text": text}),
+                            Piece::Image(data) => json!({
+                                "type": "image",
+                                "source": {"type": "base64", "media_type": data.mime, "data": data.base64},
+                            }),
+                        },
+                    );
+                }
+            }
             HistoryEntry::Assistant(assistant) => {
                 for part in &assistant.parts {
                     match part {

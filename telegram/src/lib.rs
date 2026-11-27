@@ -6,6 +6,8 @@
 //! through that group's session: a full one in a trusted group, a guest one
 //! elsewhere. See `docs/TelegramBridge.md`.
 
+pub mod media;
+
 use std::{
     collections::HashMap,
     path::PathBuf,
@@ -29,21 +31,27 @@ const PART_LIMIT: usize = 4000;
 const EDIT_EVERY: Duration = Duration::from_secs(3);
 /// How much of a replied-to message a group prompt carries.
 const QUOTE_LIMIT: usize = 500;
-pub const TEXT_ONLY: &str = "Only text messages work for now.";
+pub const UNSUPPORTED: &str = "Only text, photos, voice, video, stickers, and files work for now.";
+/// How long an album waits for its other messages.
+const ALBUM_WAIT: Duration = Duration::from_secs(1);
 
 /// The Bot API, with retries: it waits out a `429` and backs off on network
 /// errors up to a minute, so no reply is dropped by a temporary error.
 #[derive(Clone)]
 pub struct Api {
     base: String,
+    /// Where files are downloaded: `<base>/file/bot<token>`.
+    files: String,
     http: reqwest::Client,
 }
 
 impl Api {
     /// `base` is `https://api.telegram.org`, or a fake server's address.
     pub fn new(base: &str, token: &str) -> Self {
+        let base = base.trim_end_matches('/');
         Self {
-            base: format!("{}/bot{token}", base.trim_end_matches('/')),
+            files: format!("{base}/file/bot{token}"),
+            base: format!("{base}/bot{token}"),
             http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(60))
                 .build()
@@ -236,11 +244,8 @@ struct OpenRequest {
 /// Classifies an incoming update: the owner's private message, the owner's
 /// button press, or something to drop.
 pub enum Incoming {
-    Text {
-        message_id: i64,
-        text: String,
-    },
-    NotText,
+    /// A private message from the owner, with whatever it carries.
+    Owner(Value),
     Button {
         query_id: String,
         data: String,
@@ -249,14 +254,16 @@ pub enum Incoming {
         sender: Option<i64>,
         chat_type: String,
     },
-    /// A group message that mentions the bot or replies to it. `text` is
-    /// `None` for a photo, file, or other message without text.
+    /// A group message that mentions the bot or replies to it, with the
+    /// mention removed, and its attachments and those of the message it
+    /// replies to.
     Group {
         chat: i64,
         message_id: i64,
         sender: i64,
         name: String,
-        text: Option<String>,
+        text: String,
+        items: Vec<media::Item>,
     },
     /// A group message not addressed to the bot.
     Unaddressed,
@@ -279,12 +286,11 @@ fn display_name(user: &Value) -> String {
 /// a reply to the bot. The mentions are removed. A reply to someone else
 /// brings the start of their message along.
 fn group_message(message: &Value, bot: &Bot) -> Incoming {
-    let (text, entities, has_text) = match message["text"].as_str() {
-        Some(text) => (text, &message["entities"], true),
+    let (text, entities) = match message["text"].as_str() {
+        Some(text) => (text, &message["entities"]),
         None => (
             message["caption"].as_str().unwrap_or_default(),
             &message["caption_entities"],
-            false,
         ),
     };
     // Entity offsets count UTF-16 code units.
@@ -321,21 +327,38 @@ fn group_message(message: &Value, bot: &Bot) -> Incoming {
         }
     }
     kept.extend_from_slice(&units[position.min(units.len())..]);
-    let mut body = String::from_utf16_lossy(&kept).trim().to_owned();
-    if !to_bot && let Some(quoted) = replied["text"].as_str() {
-        let start: String = quoted.chars().take(QUOTE_LIMIT).collect();
-        body = format!(
-            "(Replying to {}: \"{start}\")\n{body}",
-            display_name(&replied["from"])
-        );
-    }
+    let body = String::from_utf16_lossy(&kept).trim().to_owned();
+    let (text, items) = with_reply(message, body, bot);
     Incoming::Group {
         chat: message["chat"]["id"].as_i64().unwrap_or_default(),
         message_id: message["message_id"].as_i64().unwrap_or_default(),
         sender: message["from"]["id"].as_i64().unwrap_or_default(),
         name: display_name(&message["from"]),
-        text: has_text.then_some(body),
+        text,
+        items,
     }
+}
+
+/// A message's text and items, with the message it replies to brought
+/// along when that is not the bot's: its start as a line in front, and its
+/// items first. See `docs/TelegramBridge.md#attachments`.
+fn with_reply(message: &Value, body: String, bot: &Bot) -> (String, Vec<media::Item>) {
+    let replied = &message["reply_to_message"];
+    let mut items = Vec::new();
+    let mut text = body;
+    if replied.is_object() && replied["from"]["id"].as_i64() != Some(bot.id) {
+        let quoted = media::text_of(replied);
+        if !quoted.is_empty() {
+            let start: String = quoted.chars().take(QUOTE_LIMIT).collect();
+            text = format!(
+                "(Replying to {}: \"{start}\")\n{text}",
+                display_name(&replied["from"])
+            );
+        }
+        items.extend(media::items(replied));
+    }
+    items.extend(media::items(message));
+    (text, items)
 }
 
 pub fn classify(update: &Value, owner: i64, bot: &Bot) -> Incoming {
@@ -364,13 +387,13 @@ pub fn classify(update: &Value, owner: i64, bot: &Bot) -> Incoming {
     if chat_type != "private" || sender != Some(owner) {
         return Incoming::Ignored { sender, chat_type };
     }
-    match message["text"].as_str() {
-        Some(text) => Incoming::Text {
-            message_id: message["message_id"].as_i64().unwrap_or_default(),
-            text: text.to_owned(),
-        },
-        None => Incoming::NotText,
-    }
+    Incoming::Owner(message.clone())
+}
+
+/// An album's messages, held until none has arrived for a second.
+struct Album {
+    messages: Vec<Value>,
+    last: Instant,
 }
 
 /// Runs the bridge until `alyosha acp` exits or SIGTERM. Returns the exit
@@ -463,6 +486,7 @@ pub async fn run(
     });
 
     let mut working: HashMap<String, Working> = HashMap::new();
+    let mut albums: HashMap<String, Album> = HashMap::new();
     // Open requests by their button number, from every session.
     let mut requests: HashMap<u32, OpenRequest> = HashMap::new();
     let mut next_request = 1u32;
@@ -479,17 +503,17 @@ pub async fn run(
                 let Some(update) = update else { continue };
                 match classify(&update, chat, &bot) {
                     Incoming::Unaddressed => {}
-                    Incoming::Group { chat: group, message_id, sender, name, text } => {
-                        let Some(text) = text else {
-                            api.send_reply(group, TEXT_ONLY, message_id).await;
+                    Incoming::Group { chat: group, message_id, sender, name, text, items } => {
+                        if text.is_empty() && items.is_empty() {
                             continue;
-                        };
+                        }
+                        let blocks = api.blocks(items).await;
                         let group_id = group.to_string();
                         tracing::info!(group, trusted = pool.is_trusted(&group_id), "a group mention");
                         let key = format!("g{group}:{message_id}");
                         group_replies.insert(key.clone(), (group, Some(message_id)));
                         let user = format!("telegram-{sender}");
-                        if let Err(error) = pool.prompt(&group_id, &key, &text, &user, &name).await {
+                        if let Err(error) = pool.prompt(&group_id, &key, &text, blocks, &user, &name).await {
                             tracing::warn!(group, error = %error, "the group session did not start");
                             group_replies.remove(&key);
                         }
@@ -497,7 +521,6 @@ pub async fn run(
                     Incoming::Ignored { sender, chat_type } => {
                         tracing::info!(sender = sender.unwrap_or_default(), chat_type = %chat_type, "dropped a message from someone else");
                     }
-                    Incoming::NotText => { let _ = api.send(chat, TEXT_ONLY, None).await; }
                     Incoming::Button { query_id, data } => {
                         let _ = api.call("answerCallbackQuery", json!({"callback_query_id": query_id})).await;
                         let Some((number, option)) = data.strip_prefix('r').and_then(|rest| rest.split_once(':')) else { continue };
@@ -518,7 +541,24 @@ pub async fn run(
                             api.edit(chat, message, &format!("{}\n\nAnswered: {name}", open.text)).await;
                         }
                     }
-                    Incoming::Text { message_id, text } => {
+                    Incoming::Owner(message) => {
+                        if let Some(album) = message["media_group_id"].as_str() {
+                            let held = albums.entry(album.to_owned()).or_insert(Album { messages: Vec::new(), last: Instant::now() });
+                            held.messages.push(message);
+                            held.last = Instant::now();
+                            continue;
+                        }
+                        let message_id = message["message_id"].as_i64().unwrap_or_default();
+                        let (text, items) = with_reply(&message, media::text_of(&message).to_owned(), &bot);
+                        if !items.is_empty() {
+                            let blocks = api.blocks(items).await;
+                            bridge.prompt_with(&format!("m{message_id}"), &text, blocks);
+                            continue;
+                        }
+                        if message.get("text").is_none() && text.is_empty() {
+                            let _ = api.send(chat, UNSUPPORTED, None).await;
+                            continue;
+                        }
                         let trimmed = text.trim();
                         match trimmed {
                             "/start" => { let _ = api.send(chat, HELP, None).await; }
@@ -572,6 +612,9 @@ pub async fn run(
                             api.edit(chat, message, &text).await;
                         }
                         api.send_rendered(chat, &finished.reply(), None).await;
+                        for file in &finished.files {
+                            api.send_file(chat, file, None).await;
+                        }
                     }
                     Event::Permission(permission) => {
                         let number = next_request;
@@ -604,6 +647,13 @@ pub async fn run(
                         pool.touch(&group);
                         if let Some((group_chat, message_id)) = group_replies.remove(&finished.key) {
                             api.send_rendered(group_chat, &finished.reply(), message_id).await;
+                            for file in &finished.files {
+                                api.send_file(group_chat, file, message_id).await;
+                            }
+                        } else {
+                            for file in &finished.files {
+                                file.remove();
+                            }
                         }
                     }
                     Event::Exited => pool.exited(&group, guest),
@@ -645,6 +695,25 @@ pub async fn run(
             }
             _ = idle_check.tick() => pool.stop_idle(IDLE_LIMIT).await,
             _ = flush.tick() => {
+                let ready: Vec<String> = albums
+                    .iter()
+                    .filter(|(_, album)| album.last.elapsed() >= ALBUM_WAIT)
+                    .map(|(id, _)| id.clone())
+                    .collect();
+                for id in ready {
+                    let album = albums.remove(&id).expect("listed above");
+                    let mut messages = album.messages;
+                    messages.sort_by_key(|message| message["message_id"].as_i64().unwrap_or_default());
+                    let first = &messages[0];
+                    let message_id = first["message_id"].as_i64().unwrap_or_default();
+                    let captions: Vec<&str> = messages.iter().map(media::text_of).filter(|text| !text.is_empty()).collect();
+                    let (text, mut items) = with_reply(first, captions.join("\n\n"), &bot);
+                    for message in &messages[1..] {
+                        items.extend(media::items(message));
+                    }
+                    let blocks = api.blocks(items).await;
+                    bridge.prompt_with(&format!("m{message_id}"), &text, blocks);
+                }
                 for view in working.values_mut() {
                     if view.last_edit.elapsed() >= EDIT_EVERY
                         && let (Some(message), Some(text)) = (view.message, view.pending.take())
@@ -761,10 +830,12 @@ mod tests {
                 sender,
                 name,
                 text,
+                items,
             } => {
                 assert_eq!((chat, message_id, sender), (-100, 5, 7));
                 assert_eq!(name, "Bob B");
-                assert_eq!(text.as_deref(), Some("😀é  what is 2+2?"));
+                assert_eq!(text, "😀é  what is 2+2?");
+                assert!(items.is_empty());
             }
             _ => panic!("a mention is for the bot"),
         }
@@ -783,7 +854,7 @@ mod tests {
             json!({"from": {"id": 999}, "text": "4"}),
         );
         assert!(
-            matches!(classify(&reply, 42, &bot()), Incoming::Group { text: Some(text), .. } if text == "and why?")
+            matches!(classify(&reply, 42, &bot()), Incoming::Group { text, .. } if text == "and why?")
         );
         let quoted = group(
             "@AlyoshaBot is this true?",
@@ -791,13 +862,23 @@ mod tests {
             json!({"from": {"id": 8, "first_name": "Anna"}, "text": "The moon is cheese."}),
         );
         assert!(
-            matches!(classify(&quoted, 42, &bot()), Incoming::Group { text: Some(text), .. }
+            matches!(classify(&quoted, 42, &bot()), Incoming::Group { text, .. }
             if text == "(Replying to Anna: \"The moon is cheese.\")\nis this true?")
         );
-        let photo = json!({"message": {"message_id": 6, "from": {"id": 7}, "chat": {"id": -100, "type": "group"}, "photo": [], "caption": "@AlyoshaBot look", "caption_entities": [{"type": "mention", "offset": 0, "length": 11}]}});
+        let photo = json!({"message": {"message_id": 6, "from": {"id": 7}, "chat": {"id": -100, "type": "group"}, "photo": [{"file_id": "p"}], "caption": "@AlyoshaBot look", "caption_entities": [{"type": "mention", "offset": 0, "length": 11}]}});
         assert!(matches!(
             classify(&photo, 42, &bot()),
-            Incoming::Group { text: None, .. }
+            Incoming::Group { text, items, .. } if text == "look" && items.len() == 1
+        ));
+        // A mention under someone else's photo brings the photo along.
+        let under = group(
+            "@AlyoshaBot what is this?",
+            json!([{"type": "mention", "offset": 0, "length": 11}]),
+            json!({"from": {"id": 8, "first_name": "Anna"}, "photo": [{"file_id": "q"}]}),
+        );
+        assert!(matches!(
+            classify(&under, 42, &bot()),
+            Incoming::Group { text, items, .. } if text == "what is this?" && items.len() == 1
         ));
     }
 
@@ -806,7 +887,7 @@ mod tests {
         let owner = 42;
         let private = json!({"message": {"message_id": 1, "from": {"id": 42}, "chat": {"type": "private"}, "text": "hi"}});
         assert!(
-            matches!(classify(&private, owner, &bot()), Incoming::Text { text, .. } if text == "hi")
+            matches!(classify(&private, owner, &bot()), Incoming::Owner(message) if message["text"] == "hi")
         );
         let stranger = json!({"message": {"message_id": 2, "from": {"id": 7}, "chat": {"type": "private"}, "text": "hi"}});
         assert!(matches!(
@@ -827,7 +908,7 @@ mod tests {
             Incoming::Ignored { .. }
         ));
         let photo = json!({"message": {"message_id": 4, "from": {"id": 42}, "chat": {"type": "private"}, "photo": []}});
-        assert!(matches!(classify(&photo, owner, &bot()), Incoming::NotText));
+        assert!(matches!(classify(&photo, owner, &bot()), Incoming::Owner(_)));
         let press = json!({"callback_query": {"id": "q", "from": {"id": 42}, "data": "r1:0"}});
         assert!(
             matches!(classify(&press, owner, &bot()), Incoming::Button { data, .. } if data == "r1:0")

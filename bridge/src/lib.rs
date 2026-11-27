@@ -8,13 +8,14 @@
 //! newline-delimited JSON-RPC to the child directly. See
 //! `docs/TelegramBridge.md` and `docs/Schedule.md#the-runner`.
 
+pub mod attachments;
 pub mod guests;
 pub mod markdown;
 pub mod runner;
 
 use std::{
     collections::{HashMap, VecDeque},
-    path::Path,
+    path::{Path, PathBuf},
     process::Stdio,
     sync::{
         Arc, Mutex, PoisonError,
@@ -47,6 +48,25 @@ pub enum Outcome {
     Failed(String),
 }
 
+/// A file `send_file` gave the prompt, to send after its reply.
+/// See `docs/Media.md#sending-files-out`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutFile {
+    /// Alyosha's copy, which the bridge deletes once sent or given up on.
+    pub path: PathBuf,
+    pub name: String,
+    pub mime: String,
+    pub size: u64,
+    pub caption: Option<String>,
+}
+
+impl OutFile {
+    /// Deletes Alyosha's copy.
+    pub fn remove(&self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
 /// A finished prompt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Finished {
@@ -54,6 +74,8 @@ pub struct Finished {
     pub text: String,
     pub tools: Vec<ToolLine>,
     pub outcome: Outcome,
+    /// Files to send after the reply, in order.
+    pub files: Vec<OutFile>,
 }
 
 impl Finished {
@@ -125,6 +147,7 @@ struct Prompt {
     key: String,
     text: String,
     tools: Vec<ToolLine>,
+    files: Vec<OutFile>,
 }
 
 #[derive(Default)]
@@ -326,17 +349,29 @@ impl Bridge {
     /// Sends a prompt at once. Its updates and response arrive as events
     /// tagged with `key`.
     pub fn prompt(&self, key: &str, text: &str) {
-        self.send_prompt(key, text, None);
+        self.send_prompt(key, text, Vec::new(), None);
+    }
+
+    /// Sends a prompt with attachment blocks after its text.
+    pub fn prompt_with(&self, key: &str, text: &str, blocks: Vec<Value>) {
+        self.send_prompt(key, text, blocks, None);
     }
 
     /// Sends a group member's prompt to a guest session, with its sender in
     /// `_meta`. See `docs/Channels.md#guest-mode`.
-    pub fn prompt_from(&self, key: &str, text: &str, sender_id: &str, sender_name: &str) {
+    pub fn prompt_from(
+        &self,
+        key: &str,
+        text: &str,
+        blocks: Vec<Value>,
+        sender_id: &str,
+        sender_name: &str,
+    ) {
         let meta = json!({"alyosha": {"sender": {"id": sender_id, "name": sender_name}}});
-        self.send_prompt(key, text, Some(meta));
+        self.send_prompt(key, text, blocks, Some(meta));
     }
 
-    fn send_prompt(&self, key: &str, text: &str, meta: Option<Value>) {
+    fn send_prompt(&self, key: &str, text: &str, blocks: Vec<Value>, meta: Option<Value>) {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let session = {
             let mut shared = self.lock();
@@ -347,9 +382,11 @@ impl Bridge {
             shared.prompt_requests.insert(id, key.to_owned());
             shared.session.clone().unwrap_or_default()
         };
+        let mut prompt = vec![json!({"type": "text", "text": text})];
+        prompt.extend(attachments::limit(blocks));
         let mut params = json!({
             "sessionId": session,
-            "prompt": [{"type": "text", "text": text}],
+            "prompt": prompt,
         });
         if let Some(meta) = meta {
             params["_meta"] = meta;
@@ -374,6 +411,7 @@ impl Bridge {
             text: prompt.text,
             tools: prompt.tools,
             outcome,
+            files: prompt.files,
         }));
     }
 
@@ -535,6 +573,21 @@ impl Bridge {
             return;
         };
         match kind {
+            "agent_message_chunk" if update["content"]["type"] == "resource_link" => {
+                let link = &update["content"];
+                if let Some(path) = link["uri"].as_str().and_then(|uri| uri.strip_prefix("file://")) {
+                    prompt.files.push(OutFile {
+                        path: PathBuf::from(path),
+                        name: link["name"].as_str().unwrap_or("file").to_owned(),
+                        mime: link["mimeType"]
+                            .as_str()
+                            .unwrap_or("application/octet-stream")
+                            .to_owned(),
+                        size: link["size"].as_u64().unwrap_or_default(),
+                        caption: link["description"].as_str().map(str::to_owned),
+                    });
+                }
+            }
             "agent_message_chunk" => {
                 if let Some(text) = update["content"]["text"].as_str() {
                     if !prompt.text.is_empty() && !prompt.text.ends_with('\n') {
@@ -655,6 +708,7 @@ mod tests {
             text: text.into(),
             tools: Vec::new(),
             outcome,
+            files: Vec::new(),
         };
         assert_eq!(
             finished("", Outcome::Stopped("end_turn".into())).reply(),

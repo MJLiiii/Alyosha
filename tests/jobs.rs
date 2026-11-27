@@ -60,6 +60,7 @@ async fn open(home: &Home, model: Arc<ScriptedModel>) -> Started {
             on_loading_dev_shell: None,
             persistence: None,
             memory: alyosha::memory::InMemoryTables::new(),
+            media: None,
         },
         Arc::new(FixedClock(
             Utc.with_ymd_and_hms(2026, 11, 25, 9, 2, 0).unwrap(),
@@ -187,11 +188,11 @@ async fn a_background_job_starts_a_turn_when_it_ends() {
         panic!("{:?}", state.history[4])
     };
     assert!(
-        message.text.contains(
+        message.text().contains(
             "[Job j1 finished: status 0 after 1s · sleep 1; echo done]\nLast output:\ndone\n"
         ),
         "{}",
-        message.text
+        message.text()
     );
     assert!(model.requests().last().unwrap().history.len() == 5);
 }

@@ -8,6 +8,7 @@ publish = false
 [dependencies]
 alyosha-config = { path = "../config" }
 alyosha-schedule = { path = "../schedule" }
+base64 = "0.22"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 chrono-tz = "0.10.4"
 pulldown-cmark = { version = "0.13.6", default-features = false }

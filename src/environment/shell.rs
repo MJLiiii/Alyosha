@@ -393,7 +393,8 @@ pub async fn run_shell_into<S: OutputSink + ?Sized + 'static>(
 static RUNS: AtomicU64 = AtomicU64::new(0);
 
 /// A unit's instance name: this process's ID and a counter.
-fn next_instance() -> String {
+/// A fresh instance name: `<process ID>-<counter>`.
+pub(crate) fn next_instance() -> String {
     format!(
         "{}-{}",
         std::process::id(),
@@ -579,6 +580,44 @@ async fn run_unit<S: OutputSink + ?Sized + 'static>(
         )));
     }
     Ok(ShellStatus::Exited(state.status()))
+}
+
+/// Starts `unit`, waits for it to finish within `limit`, then stops and
+/// resets it. An error says why it did not finish with status 0.
+pub(crate) async fn run_to_end(
+    unit: &str,
+    limit: Duration,
+    cancel: &CancellationToken,
+) -> Result<(), String> {
+    if let Err(message) = systemctl(&["start", unit]).await {
+        let _ = systemctl(&["reset-failed", unit]).await;
+        return Err(format!("could not start {unit}: {message}"));
+    }
+    let deadline = tokio::time::Instant::now() + limit;
+    let mut interval = Duration::from_millis(20);
+    let ended = loop {
+        match unit_state(unit).await {
+            Ok(state) if state.finished() => break Ok(state),
+            Ok(_) => {}
+            Err(message) => break Err(message),
+        }
+        tokio::select! {
+            () = tokio::time::sleep(interval) => {}
+            () = tokio::time::sleep_until(deadline) => break Err(format!("{unit} took more than {} seconds", limit.as_secs())),
+            () = cancel.cancelled() => break Err("stopped".to_owned()),
+        }
+        interval = (interval * 2).min(Duration::from_millis(200));
+    };
+    let _ = systemctl(&["stop", unit]).await;
+    let _ = systemctl(&["reset-failed", unit]).await;
+    let state = ended?;
+    if state.main_code == 0 {
+        return Err(format!("{unit} ended before it ran ({})", state.result));
+    }
+    match state.status() {
+        0 => Ok(()),
+        status => Err(format!("{unit} failed with status {status} ({})", state.result)),
+    }
 }
 
 /// Inside a unit: reads the run folder's description and replaces this process

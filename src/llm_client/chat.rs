@@ -8,11 +8,11 @@ use std::collections::BTreeMap;
 use serde_json::{Value, json};
 
 use super::{
-    ModelError, ModelRequest, TokenUsage,
+    ModelError, ModelRequest, Piece, TokenUsage, data_url,
     gateway::{Assembler, Encoded, arguments_text, parse_arguments, stream_error},
     result_text,
     sse::SseEvent,
-    summary_text,
+    summary_text, user_pieces,
 };
 use crate::agent_state::{AssistantEntry, AssistantPart, HistoryEntry, Replay, ToolCall};
 
@@ -26,7 +26,22 @@ pub(crate) fn encode(request: &ModelRequest) -> Encoded {
     for entry in &request.history {
         match entry {
             HistoryEntry::User(user) => {
-                messages.push(json!({"role": "user", "content": user.text}))
+                let pieces = user_pieces(user, request);
+                let content = match pieces.as_slice() {
+                    [Piece::Text(text)] => json!(text),
+                    _ => Value::Array(
+                        pieces
+                            .iter()
+                            .map(|piece| match piece {
+                                Piece::Text(text) => json!({"type": "text", "text": text}),
+                                Piece::Image(data) => {
+                                    json!({"type": "image_url", "image_url": {"url": data_url(data)}})
+                                }
+                            })
+                            .collect(),
+                    ),
+                };
+                messages.push(json!({"role": "user", "content": content}));
             }
             HistoryEntry::Assistant(assistant) => {
                 let mut message = json!({"role": "assistant", "content": assistant.text()});

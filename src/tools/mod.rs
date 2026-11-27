@@ -113,6 +113,11 @@ pub struct SessionServices {
     pub users: Option<crate::user_notes::UserNotes>,
     /// In a guest session, the sender of the message the active turn answers.
     pub speaker: std::sync::Mutex<Option<crate::agent_state::Sender>>,
+    /// Prepares attachments; without it they become a line saying so.
+    pub media: Option<Arc<crate::media::MediaServices>>,
+    /// Where `send_file` puts files for the bridge. The driver sets how it
+    /// tells the bridge.
+    pub outbox: Option<crate::media::send_file::Outbox>,
 }
 
 impl SessionServices {

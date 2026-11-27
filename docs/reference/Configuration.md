@@ -52,6 +52,9 @@ name = "gpt-6.2-sol"
 [gateway]
 url = "http://127.0.0.1:18787"
 
+[media]
+transcribe_provider = "openai"
+
 [approvals]
 timeout_minutes = 60
 
@@ -91,6 +94,7 @@ MODE = "stdio"
 | `provider` | string | `"chatgpt"` | The GPROXY provider name. `alyosha gateway login` creates it with this name. [Gateway login](../LLMClientGateway.md#run-gproxy-as-a-service) |
 | `api` | `"codex"`, `"openai"`, `"claudeapi"`, `"aistudio"`, or `"deepseek"` | `"codex"` | The provider's native API, which decides how the client encodes requests. [Native requests](../LLMClientGateway.md#native-requests-and-credentials) |
 | `name` | string | `"gpt-6.2-sol"` | The exact model ID. |
+| `images` | boolean | `true` | Whether the model can see images. With `false`, images you send reach it as a line saying they are not shown. [Images](../Media.md#images) |
 | `effort` | `"low"`, `"medium"`, or `"high"` | none | How hard the model reasons, for every session: private chats, trusted groups, and guests. Higher is slower and uses more quota. Without it, the provider's default applies. Only the `codex` and `openai` APIs take it for now; with any other `api`, the configuration is refused. [Native requests](../LLMClientGateway.md#native-requests-and-credentials) |
 
 ### `[gateway]`
@@ -98,6 +102,13 @@ MODE = "stdio"
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `url` | URL | `"http://127.0.0.1:18787"` | The GPROXY service's address. Must match the service's port. |
+
+### `[media]`
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `transcribe_provider` | string | none | The GPROXY provider, on the `openai` channel, that transcribes voice messages and the sound of videos. `alyosha gateway login` creates it and asks for your OpenAI API key. It may be the same as `[model] provider` when that is an `openai` provider. Without it, voice messages reach the model as a line saying transcription is not set up. [Transcription](../Media.md#transcription) |
+| `transcribe_model` | string | `"gpt-transcribe"` | The transcription model. |
 
 ### `[approvals]`
 
@@ -150,7 +161,7 @@ One section per MCP server. `<name>` matches `[a-z0-9][a-z0-9-]{0,31}` and becom
 
 | Program | Sections it uses |
 | --- | --- |
-| `alyosha acp` | Top level, `[model]`, `[gateway]`, `[approvals]`, `[mcp.servers.*]`, and in guest mode `[guest]` |
+| `alyosha acp` | Top level, `[model]`, `[gateway]`, `[media]`, `[approvals]`, `[mcp.servers.*]`, and in guest mode `[guest]` |
 | `alyosha-telegram` | Top level, for its task runner, and `[telegram]` |
 | `alyosha-qq` | Top level, for its task runner, and `[qq]` |
 | `alyosha-schedule` | Top level, and whether `[telegram]` and `[qq]` exist |

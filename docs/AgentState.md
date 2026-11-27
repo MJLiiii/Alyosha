@@ -38,9 +38,9 @@ Create one in-memory `AgentState` per session. The Agent Loop’s session driver
 | Field | Rust representation | Lifetime and updates |
 | --- | --- | --- |
 | `provider` | Provider account identifier | Fixed when the session opens. |
-| `history` | `Vec<HistoryEntry>` | Append `User`, complete `Assistant`, and `ToolResult` entries in order. Preserve text, calls, their order, and native replay fields within each assistant entry. Keep each result’s original call ID. [Model reply contract](LLMClientGateway.md#implementation) |
+| `history` | `Vec<HistoryEntry>` | Append `User`, complete `Assistant`, and `ToolResult` entries in order. A `User` entry holds ordered parts, text and image references, with the clock line and the message's text first. Preserve text, calls, their order, and native replay fields within each assistant entry. Keep each result’s original call ID. [Model reply contract](LLMClientGateway.md#implementation) · [Images](Media.md#images) |
 | `context_checkpoint` | `Option<ContextCheckpoint>` | Latest summary and index of the first retained history entry. The Context Manager supplies the candidate. The driver commits a validated replacement for the active turn or manual compaction after checking cancellation. [Checkpoint contract](ContextManager.md#implementation) |
-| `pending_messages` | `VecDeque<UserMessage>` | Hold each message, its session-unique ID, and its origin, always `Owner`, until its turn starts. A finished background job is not queued directly: the bridge sends its text back as a prompt. [Background jobs](Jobs.md#when-a-job-finishes) |
+| `pending_messages` | `VecDeque<UserMessage>` | Hold each message, its session-unique ID, its origin, always `Owner`, and its attachments as they came, until its turn starts. Attachments are prepared into parts when the turn starts. [Preparing a message](Media.md#preparing-a-message) A finished background job is not queued directly: the bridge sends its text back as a prompt. [Background jobs](Jobs.md#when-a-job-finishes) |
 | `active_work` | `Option<ActiveWork>` | Either `Turn(ActiveTurn)`, `ManualCompaction { model_id, cancel }`, or an empty slot. |
 | `outcomes` | `HashMap<MessageId, TurnOutcome>` | One final `Completed`, `Stopped`, or `Failed(reason)` per finished user turn. |
 
@@ -59,7 +59,7 @@ Initialize the collections empty and the two optional fields to `None`, or, when
 
 | Event | State update |
 | --- | --- |
-| Driver starts a message | Reserve the slot and take the oldest queued message together. Set `Turn` to `Generating` with a fresh token. `run_turn` appends the opening message once. |
+| Driver starts a message | Reserve the slot and take the oldest queued message together. Set `Turn` to `Generating` with a fresh token. `run_turn` prepares its attachments, then appends the opening message once. Stop during preparation finishes as `Stopped` with nothing appended. [Preparing a message](Media.md#preparing-a-message) |
 | Complete response arrives | Append one `Assistant` entry. With calls, enter `RunningTools` with `active_call_id = None`. With zero calls, finish as `Completed`. |
 | A top-level call runs | Set `active_call_id` at dispatch. Append its result and clear the ID together. Between calls keep the phase at `RunningTools`. After a completed batch, return to `Generating` if the turn continues. |
 | An approval or `ask_owner` question opens | Enter `WaitingForOwner` with the call's ID. When `ask` returns, go back to `RunningTools` with the same `active_call_id`. The front end shows **Waiting for you** meanwhile. [The front-end operation](Approvals.md#the-front-end-operation) |

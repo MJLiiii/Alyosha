@@ -11,10 +11,11 @@ alyosha-config = { path = "../config" }
 alyosha-schedule = { path = "../schedule" }
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 chrono-tz = "0.10.4"
-reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "json"] }
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "json", "multipart"] }
 serde_json = { version = "1.0.154", features = ["preserve_order"] }
-tokio = { version = "1.54.1", features = ["rt", "rt-multi-thread", "macros", "sync", "time", "signal", "net", "io-util"] }
+tokio = { version = "1.54.1", features = ["rt", "rt-multi-thread", "macros", "sync", "time", "signal", "net", "io-util", "fs"] }
 tracing = "0.1.44"
 
 [dev-dependencies]
+base64 = "0.22"
 tempfile = "3.27.0"

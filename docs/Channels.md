@@ -36,7 +36,7 @@ A protocol of Alyosha's own, like the JSON-lines RPC mode of the pi agent, would
 - **Stop works.** `session/cancel` signals the active turn, and the prompt ends as cancelled.
 - **The configuration decides the tools.** Alyosha starts the MCP servers in its own configuration and ignores servers the bridge offers in `session/new`, so a bridge cannot add tools. It also ignores the editor features ACP offers, such as the client's file system and terminals, because the Environment Interface already handles files and shell commands. [Environment Interface](EnvironmentInterface.md)
 - **Finished jobs reach the bridge.** ACP lets only the client start a turn, so when a background job ends, Alyosha sends the bridge a notification of its own, and the bridge sends the job's message back as a prompt. [Background jobs](Jobs.md#when-a-job-ends)
-- **Text only.** Alyosha accepts text and links. Photos, files, and voice wait until tool results and prompts support images.
+- **Photos, voice, video, and files.** The bridge downloads what you send and passes it in the prompt as ACP image, audio, and resource blocks. Alyosha turns it into images and text for the model, and saves files in the session's `inbox/`. The model sends files back with `send_file`. [Photos, voice, video, and files](Media.md)
 - **The model knows the app.** The system instruction gains one line naming the bridge, taken from ACP's `initialize`, such as "The owner is talking to you through alyosha-qq." The model uses it to send scheduled results to the app you wrote from. [Scheduled tasks](Schedule.md#creating-tasks)
 
 ## Trust
@@ -72,7 +72,7 @@ containers.alyosha
 - **Runs scheduled tasks.** Tasks for Telegram run as prompts in this session, marked **⏰ Scheduled**. [Scheduled tasks](Schedule.md#running-tasks) Finished background jobs come in the same way, marked **⚙ Job finished**. [Background jobs](Jobs.md)
 - **You see it working.** While a turn runs, the chat shows Telegram's typing indicator and one **Working…** message listing tool calls as they happen, such as `MCP: chromium.browser_click`.
 - **Formatted replies.** The model writes Markdown, and the reply shows it formatted: bold, italics, code, code blocks, links, and quotes, with headings as bold lines and lists with bullets. If Telegram refuses the formatting, the same part goes again as plain text without the Markdown markers. Long replies are split into several messages, keeping code blocks whole in each. A failed turn shows its error, and a stopped turn says so.
-- **Text only.** A photo, file, or voice message gets a short reply saying only text works for now.
+- **Photos, voice, video, and files.** Photos, albums, voice messages, videos, GIFs, stickers, files, locations, and contacts all reach Alyosha, and files it sends arrive as photos, videos, voice messages, or files. [Photos, voice, video, and files](Media.md)
 - **Approvals as buttons.** An approval or a question from Alyosha arrives as a message with one button per answer. [Approvals](Approvals.md)
 - **Crashes resume.** If `alyosha acp` exits, the bridge tells you and exits, and systemd starts both again. The new child loads the same session. [Durable sessions](SessionStore.md)
 
@@ -93,7 +93,7 @@ The official API limits replies, and that shapes the bridge:
 
 Approvals and questions arrive as text, and you answer with `/yes`, `/no`, or the number of a choice, because buttons need extra permission from QQ. The request uses one of the four replies, and your answer gives the turn a fresh set of four. [Approvals](Approvals.md)
 
-Otherwise it behaves like the Telegram bridge. In private chats it answers only your account, identified by the `openid` QQ assigns you for this bot, and drops other private messages without replying. In groups it answers anyone who @-mentions it, through the group's own session. [Group chats](#group-chats) It runs one long-lived session with `/new`, `/cancel`, `/compact`, `/job`, and `/tasks`, runs QQ's scheduled tasks, accepts text only, and resumes its session after a crash. Replies use QQ's native Markdown when QQ allows the bot to send it. A bot QQ has not granted Markdown gets the same reply as plain text, with the markers removed. Its settings go in a `[qq]` section of `config.toml`, together with the bot's secret.
+Otherwise it behaves like the Telegram bridge. In private chats it answers only your account, identified by the `openid` QQ assigns you for this bot, and drops other private messages without replying. In groups it answers anyone who @-mentions it, through the group's own session. [Group chats](#group-chats) It runs one long-lived session with `/new`, `/cancel`, `/compact`, `/job`, and `/tasks`, runs QQ's scheduled tasks, takes photos, voice, video, and files as far as QQ passes them to a bot, and resumes its session after a crash. [Photos, voice, video, and files](Media.md) Replies use QQ's native Markdown when QQ allows the bot to send it. A bot QQ has not granted Markdown gets the same reply as plain text, with the markers removed. Its settings go in a `[qq]` section of `config.toml`, together with the bot's secret.
 
 A bot registered by an individual can be used privately by its creator and by test users added in the bot's settings, without Tencent's review. That covers personal use.
 
@@ -114,7 +114,7 @@ group B ────────── @Alyosha ──► bridge ──► alyos
 your private chat ───────────► bridge ──► alyosha acp (your session, your tools) ──┘   (not shared with your own memory)
 ```
 
-- **What counts as a mention.** In Telegram, `@` followed by the bot's username, or a reply to one of Alyosha's messages. In QQ, an @ of the bot, whether QQ sends the group only @s or, with its "receive all messages" mode, every message. A Telegram mention that replies to someone else's message brings the start of that message along, so "@Alyosha is this true?" works.
+- **What counts as a mention.** In Telegram, `@` followed by the bot's username, or a reply to one of Alyosha's messages. In QQ, an @ of the bot, whether QQ sends the group only @s or, with its "receive all messages" mode, every message. A Telegram mention that replies to someone else's message brings the start of that message and its attachments along, so "@Alyosha is this true?" works, and so does "@Alyosha what is this?" under a photo.
 - **A session per group.** Each group gets its own child, started at the first mention. It keeps the group's conversation, so follow-up questions work, and survives restarts like your session. Groups never see each other's conversations or your private chat's.
 - **Trusted groups get your powers.** You list trusted groups in the bridge's section of the configuration, each under a short name you choose, with the group ID the bridge logs for every mention. Their session is a full session like yours: shell, files, your memory, skills, background jobs, every MCP server, and your browser sign-ins. Everyone in a trusted group, including people who join later, can use all of it, so list only groups where you would hand every member your computer. [Trusted groups](#trusted-groups)
 - **Other groups get guests.** A group you have not listed gets a guest session. It has no shell, no files, no background jobs, no skills, no `ask_owner`, and not your memory. Its only MCP servers are the ones `[guest]` in the configuration lists, normally just web search. Search is read-only and needs no account, so a guest cannot reach your mail, your sign-ins, or the machine. A guest session that has been quiet for an hour is stopped, so a bot added to many groups does not keep a process for each. Its conversation is saved and resumes at the next mention. [Web search](WebSearch.md) · [Configuration](reference/Configuration.md#guest)
@@ -122,7 +122,8 @@ your private chat ───────────► bridge ──► alyosha 
 - **A memory for each person, in guest sessions.** A guest session keeps notes on each person, by their platform and user ID, and shows them to the model with each of their messages. The model updates them with the `user_memory` tool, which writes only the notes of the person whose message it is answering. Trusted groups use your memory instead. [People in group chats](Memory.md#people-in-group-chats)
 - **Names are not proof.** Each message reaches the model with the sender's display name. Anyone can pick any display name, so a guest session's instruction tells the model that nobody in the group is its owner and that it acts for no one there.
 - **Replies are formatted as in private.** The reply is rendered and split like a private reply. QQ allows five replies per group message within 60 minutes, and the bridge uses at most four, as for private messages. A group reply that fails is logged and dropped, never kept for later.
-- **Nothing else in groups.** Commands, scheduled tasks, and the **Working…** message are for your private chat only. A mention with a photo or file and no text gets **Only text messages work for now.**
+- **Nothing else in groups.** Commands, scheduled tasks, and the **Working…** message are for your private chat only.
+- **Media in groups.** A trusted group's session takes everything your private chat takes and saves files in its own `inbox/`. A guest session sees images, video frames, and transcripts, but not files, and cannot send files. [Guests](Media.md#guests)
 - **Cost.** Every group mention is a model request on your account. Guest groups have no allowlist and no rate limit in v1. If strangers' use becomes a problem, add a limit per group or per person.
 
 A QQ user's ID is the `member_openid` QQ gives them, which may differ from group to group. If it does, a QQ user has separate notes in each group. The first check with a real QQ bot settles this. Telegram user IDs are the same everywhere.
@@ -142,7 +143,7 @@ A group that is not listed gets a guest session as before. Removing a group from
 
 ## Deferred
 
-- Photos, files, and voice messages.
+- Images in tool results, voice replies, and the other media work deferred on its page. [Media deferred work](Media.md#deferred)
 - Several sessions at once for you, such as one per chat thread.
 - More tools for guests, such as the browser with a profile that holds no sign-ins.
 - Commands such as `/new` and `/cancel` for a trusted group's session.
@@ -167,7 +168,7 @@ Answer `initialize` with protocol version `1` and these agent capabilities:
 | Capability | Value | Why |
 | --- | --- | --- |
 | `loadSession` | `true` | Sessions are saved and resumed by key. [Durable sessions](SessionStore.md#acp) |
-| `promptCapabilities` `image`, `audio`, `embeddedContext` | `false` | V1 accepts text and links only. |
+| `promptCapabilities` `image`, `audio`, `embeddedContext` | `true` | Bridges pass photos, voice, video, and files. [From the bridge to `alyosha acp`](Media.md#from-the-bridge-to-alyosha-acp) |
 | `mcpCapabilities` `http`, `sse` | `false` | Bridge-supplied servers are ignored. |
 | `authMethods` | empty | Only a program that can start Alyosha as its user can connect. |
 
@@ -198,7 +199,7 @@ Requests naming any other `sessionId` get a JSON-RPC error.
 
 ### Prompts
 
-Join the prompt's `text` blocks with blank lines. Render each `resource_link` block as its name and URI on its own line. That text is one user message. If it is exactly `/compact`, run manual compaction instead of queuing a message. [Compaction command](ContextManager.md#run-compact)
+Join the prompt's `text` blocks with blank lines. Render each `resource_link` block as its name and URI on its own line. That text is one user message. Keep `image`, `audio`, and `resource` blocks as the message's attachments, in order; they are prepared when its turn starts. [Preparing a message](Media.md#preparing-a-message) If the text is exactly `/compact` and there are no attachments, run manual compaction instead of queuing a message. [Compaction command](ContextManager.md#run-compact)
 
 Enqueue the message and keep the JSON-RPC request open until that message's turn closes. Several prompts may be open at once. Each is answered in queue order. ACP does not say whether a client may send a second prompt during a turn, so accept it rather than reject it.
 
@@ -209,6 +210,7 @@ While the turn runs, send `session/update` notifications for that session:
 | A tool call starts | `tool_call` with the call ID as `toolCallId`, the status title as `title`, a `kind`, and `status: "in_progress"` |
 | A tool call finishes | `tool_call_update` with `status: "completed"`, or `"failed"` for a tool error or cancelled result |
 | Assistant text, alongside tool calls or as the final reply | `agent_message_chunk` with the text, in the order the response gave it |
+| A file from `send_file` | `agent_message_chunk` with a `resource_link` to the session's copy of the file [Sending files out](Media.md#sending-files-out) |
 
 Map `kind` as follows: `read_file` is `read`, `write_file` and `edit_file` are `edit`, `run_command` is `execute`, and everything else is `other`. Send no tool output in the update, because the bridge forwards updates to a chat app.
 
@@ -243,10 +245,11 @@ When a background job finishes, do not queue its message. Send the notification 
 `alyosha acp --guest` serves the guest session of one group chat. Bridges start one per group. Everything above applies, with these differences. [Group chats](#group-chats)
 
 - **Session.** `session/new` still requires an absolute `cwd`, but the session ignores it. It runs in `/var/lib/alyosha/work/guest`, created with mode `0700`, which is only the working directory of its MCP servers. It loads no dev shell and no sandbox.
-- **Tools.** Register `user_memory` and the tools of the MCP servers named in `[guest] mcp_servers`, and nothing else: no workspace, shell, Code Mode, job, `memory`, `skill`, or `ask_owner` tool. The session has no approver. `available_commands_update` lists no commands. [People's notes](Memory.md#notes-on-people) · [Configuration](reference/Configuration.md#guest)
+- **Tools.** Register `user_memory` and the tools of the MCP servers named in `[guest] mcp_servers`, and nothing else: no workspace, shell, Code Mode, job, `memory`, `skill`, `send_file`, or `ask_owner` tool. The session has no approver. `available_commands_update` lists no commands. [People's notes](Memory.md#notes-on-people) · [Configuration](reference/Configuration.md#guest)
 - **Instruction.** Use the guest instruction below instead of the normal one, with no memory or skills index. The channel line is "People write to you in a group chat through <client name>."
 - **Prompts.** Each `session/prompt` must carry the sender in `_meta`: `{"alyosha": {"sender": {"id": "telegram-123", "name": "Bob"}}}`. Refuse a prompt without a valid sender with an invalid-params error. Treat all text as a message: `/compact` and `/job` are not commands here.
 - **Startup warnings** go to the log only, never into a group.
+- **Attachments.** Images, sound, and video are prepared as usual. Other files become a line saying they are not read here, and nothing is saved. [Guests](Media.md#guests)
 
 ```text
 You are Alyosha, an assistant answering people in a group chat. Each message starts
@@ -269,7 +272,7 @@ to someone else.
 
 These run under `cargo test` with an in-process ACP client and the scripted model from the turn fixture. [Turn fixture](AgentLoop.md#verification-with-a-scripted-model-and-fake-tools)
 
-- Send `initialize`. Check protocol version `1`, `loadSession: true`, and no image, audio, or embedded-context support.
+- Send `initialize`. Check protocol version `1`, `loadSession: true`, and image, audio, and embedded-context support. The cases for attachments are on the media page. [Media verification](Media.md#verification)
 - Send `session/new` with a relative `cwd`, then one that does not exist. Check that both fail and no session starts.
 - Send `session/new` with a valid `cwd` and an `mcpServers` entry. Check that only configured servers start and that `available_commands_update` lists `compact` and `job`.
 - Script a turn that crosses the compaction threshold. Check for a `tool_call` titled **Compacting context…** with kind `think` and an `alyosha-status-` ID, then its `completed` update, before the next tool call or the reply.

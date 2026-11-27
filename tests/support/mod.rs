@@ -234,11 +234,11 @@ pub fn call(id: &str, name: &str, arguments: Value) -> AssistantPart {
 
 /// The history entry for an owner's message submitted at the fixed time.
 pub fn user(id: MessageId, text: &str) -> HistoryEntry {
-    HistoryEntry::User(UserEntry {
-        message_id: id,
-        origin: MessageOrigin::Owner,
-        text: format!("{CLOCK_LINE}\n{text}"),
-    })
+    HistoryEntry::User(UserEntry::text_only(
+        id,
+        MessageOrigin::Owner,
+        format!("{CLOCK_LINE}\n{text}"),
+    ))
 }
 
 pub fn assistant(parts: Vec<AssistantPart>) -> HistoryEntry {

@@ -101,6 +101,7 @@ async fn open(
             on_loading_dev_shell: None,
             persistence: None,
             memory: home.memory.clone(),
+            media: None,
         },
         Arc::new(FixedClock(
             Utc.with_ymd_and_hms(2026, 11, 25, 9, 2, 0).unwrap(),
@@ -839,6 +840,7 @@ async fn a_resumed_session_closes_the_turn_a_restart_cut_off() {
                 resumed: true,
             }),
             memory: home.memory.clone(),
+            media: None,
         },
         Arc::new(FixedClock(
             Utc.with_ymd_and_hms(2026, 11, 25, 9, 2, 0).unwrap(),

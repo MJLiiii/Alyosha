@@ -119,11 +119,11 @@ impl Drop for Cluster {
 
 fn sample() -> Vec<HistoryEntry> {
     vec![
-        HistoryEntry::User(UserEntry {
-            message_id: MessageId(3),
-            origin: MessageOrigin::Owner,
-            text: "[clock]\nread a".into(),
-        }),
+        HistoryEntry::User(UserEntry::text_only(
+            MessageId(3),
+            MessageOrigin::Owner,
+            "[clock]\nread a",
+        )),
         HistoryEntry::Assistant(AssistantEntry {
             parts: vec![
                 // Key order and spacing that jsonb would change.
@@ -168,7 +168,7 @@ async fn pg_store_saves_loads_and_locks() {
             "migrate",
             "select string_agg(version::text, ',' order by version) from schema_version"
         ),
-        "1,2"
+        "1,2,3"
     );
     cluster.psql("migrate", "insert into schema_version values (99)");
     let Err(StoreError::Failed(error)) =
@@ -311,14 +311,14 @@ async fn memory_files_are_imported_once_and_checked() {
         return;
     };
 
-    // Without a folder: empty tables at version 2.
+    // Without a folder: empty tables at the newest version.
     cluster.create_database("empty");
     PgStore::connect(&cluster.target("empty"), Path::new(NO_FOLDER))
         .await
         .unwrap();
     assert_eq!(
         cluster.psql("empty", "select max(version) from schema_version"),
-        "2"
+        "3"
     );
     assert_eq!(
         cluster.psql(
@@ -544,4 +544,27 @@ async fn memory_versions_hold_across_connections() {
         cluster.psql("alyosha", "select notes || '|' || version from user_notes"),
         "Studies physics. Likes tea.|2"
     );
+}
+
+#[tokio::test]
+async fn media_rows_are_kept_once_by_hash() {
+    use alyosha::media::MediaStore;
+    let Some(cluster) = Cluster::start() else {
+        return;
+    };
+    cluster.create_database("media");
+    let store = PgStore::connect(&cluster.target("media"), Path::new(NO_FOLDER))
+        .await
+        .unwrap();
+    let bytes = vec![0u8, 1, 2, 255];
+    let first = store.put_media("image/png", &bytes).await.unwrap();
+    let second = store.put_media("image/png", &bytes).await.unwrap();
+    assert_eq!(first, second);
+    assert_eq!(first, alyosha::media::sha256_hex(&bytes));
+    assert_eq!(
+        store.get_media(&first).await.unwrap(),
+        Some(("image/png".to_owned(), bytes))
+    );
+    assert_eq!(store.get_media("missing").await.unwrap(), None);
+    assert_eq!(cluster.psql("media", "select count(*) from media"), "1");
 }
