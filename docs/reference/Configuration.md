@@ -142,8 +142,7 @@ Needed only by `alyosha-qq`, which also needs the secret `qq-secret`. Its presen
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `app_id` | string | required | The bot's AppID. |
-| `owner_openid` | string | `""` | Your `user_openid` for this bot. While empty, the bridge answers nobody and logs senders' IDs. |
-| `owner_member_openids` | array of strings | `[]` | Your `member_openid` in your trusted groups, which QQ gives you in place of your `user_openid` there. The bridge logs the sender's `member_openid` of every group mention; @ the bot once in each group and copy yours. With it, the bridge marks your messages as the owner's. [People in group chats](../Memory.md#people-in-group-chats) |
+| `owner_openid` | string | `""` | Your `user_openid` for this bot, which QQ also gives you as your `member_openid` in groups, so the bridge recognizes you in trusted groups by it. While empty, the bridge answers nobody and logs senders' IDs. |
 | `reply_chunk` | integer, 200 to 4000 | `1500` | Characters per QQ message. |
 | `trusted_groups` | table of strings | `{}` | Groups whose members get your full powers through a session of their own, each as `<name> = "<group_openid>"`, with names as for Telegram. The bridge logs the `group_openid` of every mention. [Trusted groups](../Channels.md#trusted-groups) |
 

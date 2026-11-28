@@ -126,7 +126,7 @@ your private chat ───────────► bridge ──► alyosha 
 - **Media in groups.** A trusted group's session takes everything your private chat takes and saves files in its own `inbox/`. A guest session sees images, video frames, and transcripts, but not files, and cannot send files. [Guests](Media.md#guests)
 - **Cost.** Every group mention is a model request on your account. Guest groups have no allowlist and no rate limit. A limit on mentions was considered on 2026-11-28 and not wanted.
 
-A QQ user's ID is the `member_openid` QQ gives them, which may differ from group to group. If it does, a QQ user has separate notes in each group. The first check with a real QQ bot settles this. Telegram user IDs are the same everywhere.
+A QQ user's ID is the `member_openid` QQ gives them. On ms02 on 2026-11-28, the owner's `member_openid` was the same in both trusted groups and equal to their `user_openid` from the private chat. So a QQ user has the same notes in every group, and the bridge recognizes the owner by `owner_openid` there. Telegram user IDs are the same everywhere.
 
 ### Trusted groups
 

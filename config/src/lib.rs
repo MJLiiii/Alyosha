@@ -208,10 +208,6 @@ pub struct QqConfig {
     /// The owner's `user_openid`. While empty, the bridge answers nobody.
     #[serde(default)]
     pub owner_openid: String,
-    /// The owner's `member_openid` in trusted groups, which QQ gives in
-    /// place of `user_openid` there.
-    #[serde(default)]
-    pub owner_member_openids: Vec<String>,
     /// Characters per QQ message.
     #[serde(default = "default_reply_chunk")]
     pub reply_chunk: u32,
@@ -797,7 +793,6 @@ API_TOKEN = "search-token"
         assert_eq!(qq.app_id, "102000000");
         assert_eq!(qq.owner_openid, "openid-5678");
         assert_eq!(qq.reply_chunk, 1500);
-        assert!(qq.owner_member_openids.is_empty());
         assert_eq!(
             qq.trusted_groups["friends"],
             "12D5F61BED16A072D96DB3D9E04A7B3D"
@@ -813,13 +808,6 @@ API_TOKEN = "search-token"
         assert_eq!(config.media.transcribe_provider.as_deref(), Some("openai"));
         assert_eq!(config.recall.embed_provider.as_deref(), Some("openai"));
         assert_eq!(config.recall.embed_model, "text-embedding-3-small");
-    }
-
-    #[test]
-    fn the_owners_qq_group_ids_are_read() {
-        let config =
-            load_text("[qq]\napp_id = \"1\"\nowner_member_openids = [\"M1\", \"M2\"]\n").unwrap();
-        assert_eq!(config.qq.unwrap().owner_member_openids, ["M1", "M2"]);
     }
 
     #[test]
