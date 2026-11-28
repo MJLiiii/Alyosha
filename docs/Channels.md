@@ -143,7 +143,7 @@ A group that is not listed gets a guest session as before. Removing a group from
 
 ## Deferred
 
-- Images in tool results, voice replies, and the other media work deferred on its page. [Media deferred work](Media.md#deferred)
+- Voice replies and the other media work deferred on its page. [Media deferred work](Media.md#deferred)
 - Several sessions at once for you, such as one per chat thread.
 - More tools for guests, such as the browser with a profile that holds no sign-ins.
 - Commands such as `/new` and `/cancel` for a trusted group's session.
