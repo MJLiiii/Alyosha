@@ -17,7 +17,7 @@ body         The thesis lives in ~/thesis. Build it with `latexmk -pdf main.tex`
 
 The database keeps memory consistent across the sessions that share it and puts it in the daily dump with the conversations. You do not edit memories by hand. The model keeps them, and you can ask it to change or forget one. To look at them directly, run `alyosha memory list` on the host. [The host command](Deployment.md#the-host-command) [The database](SessionStore.md#the-database)
 
-The store is global. Every session sees the same memories. They hold what Alyosha knows about you. Your sessions, in your private chats, see them, and so do the sessions of group chats you list as trusted. Guest sessions in other group chats never see them; they use the notes kept for each person. [People in group chats](#people-in-group-chats)
+The store is global. Every session sees the same memories. They hold what Alyosha knows about you. Your sessions, in your private chats, see them, and so do the sessions of group chats you list as trusted. Guest sessions in other group chats never see them. In every group chat, Alyosha also keeps notes on each person. [People in group chats](#people-in-group-chats)
 
 Earlier versions kept memories and people's notes as files under `/var/lib/alyosha/memory`. The first start of the database version copies them in, once, checks the copy against the files, and leaves the files where they are. If a file cannot be copied, the bridges do not start until you fix it, so nothing is dropped unseen. [Move memory into the database](Deployment.md#move-memory-into-the-database) · [Import the old files](#import-the-old-files)
 
@@ -45,7 +45,7 @@ Only direct model calls can use `memory`. Code Mode scripts and shell commands c
 
 ## People in group chats
 
-In group chats anyone can talk to Alyosha, and it keeps notes on each person in the session database. The notes are keyed by the platform and the person's user ID, such as `telegram-123456789` or `qq-<member_openid>`, because display names change and can be copied. [Group chats](Channels.md#group-chats)
+In group chats anyone can talk to Alyosha, and it keeps notes on each person in the session database, in trusted groups and guest groups alike. A person has one set of notes for every group they write in: the same notes come up in a trusted group and in a guest group. The notes are keyed by the platform and the person's user ID, such as `telegram-123456789` or `qq-<member_openid>`, because display names change and can be copied. [Group chats](Channels.md#group-chats)
 
 ```text
 person   qq-6F0A…
@@ -56,10 +56,12 @@ notes    Prefers answers in Chinese. Studies physics in Delft.
 
 - **Whole notes, not an index.** A person's notes are short, at most 2 KiB, so there is no index. Each message from that person reaches the model with their whole notes in front of it. A message from someone without notes says so.
 - **Written only for the speaker.** The model rewrites the notes with the `user_memory` tool. Alyosha decides whose notes it writes, from the sender the bridge reports for the message being answered, so nobody can make Alyosha change another person's notes. The stored name is the person's display name at the time of the last write. If the same person's notes changed in another group since this message arrived, the write fails and returns the newer notes, and the model writes again with both. [Built-in tool contracts](reference/BuiltInTools.md#user_memory)
-- **What goes in.** The guest instruction tells the model to note what helps it answer that person later: the language they prefer, what they work on, what they asked it to remember. It never stores secrets, and the tool rejects text that looks like a credential, as the `memory` tool does.
+- **What goes in.** The guest instruction, and a line in a trusted group's, tells the model to note what helps it answer that person later: the language they prefer, what they work on, what they asked it to remember. It never stores secrets, and the tool rejects text that looks like a credential, as the `memory` tool does.
 - **Not private from the group.** Notes come from what a person said in a group, and they enter that group's conversation when the person writes. Tell people not to ask Alyosha to remember anything they would not say in the group.
 
-The notes are not mixed with your own memory in either direction.
+- **You are not one of them.** In a trusted group, the bridge recognizes your own messages: in Telegram by your `owner_id`, and in QQ by the IDs you list in `owner_member_openids`, because QQ gives you a different ID in groups than in your private chat. Your messages there carry no notes, and what the model learns about you goes into your memory as in your private chat. Guest groups do not recognize you: there you are a person with notes like anyone. [QQ IDs](QQBridge.md#configuration)
+
+In a trusted group the model has both: your memory, for you, your machines, and your projects, and the speaker's notes, for the person writing. A guest session has only the notes. Nothing moves from one to the other on its own.
 
 ## Deferred
 
@@ -174,17 +176,17 @@ The patterns are a guard against accidents, not a guarantee.
 
 ### Notes on people
 
-Guest sessions use a second store for the notes Alyosha keeps on each person in group chats. Your sessions never open it, and guest sessions never open the `owner` scope. [People in group chats](#people-in-group-chats) · [Guest mode](Channels.md#guest-mode)
+Group sessions use a second store for the notes Alyosha keeps on each person in group chats. Your private sessions never open it, and guest sessions never open the `owner` scope. [People in group chats](#people-in-group-chats) · [Guest mode](Channels.md#guest-mode)
 
 ```text
-UserNotes                        # one per guest session, on the same MemoryTables
+UserNotes                        # one per group session, on the same MemoryTables
     open(tables, today) -> UserNotes
     read(&self, user: &str) -> Result<Option<Notes>, ToolError>
     opening(&self, sender: &Sender, text: &str) -> String   # records the version shown
     write(&self, user: &str, name: &str, notes: &str) -> Result<WriteKind, ToolError>
 
 Notes { name: String, updated: Date, text: String, version: i64 }
-Sender { id: String, name: String }
+Sender { id: String, name: String, owner: bool }   // owner: only in trusted groups
 ```
 
 The same migration adds their table:
@@ -203,7 +205,7 @@ create table user_notes (
 - **Names.** The stored name is the sender's display name, cut to 64 characters with line breaks and control characters replaced by spaces.
 - **Limits and writes.** Notes hold at most 2 KiB. Check them against the credential patterns of the `memory` tool. The notes shown at the start of the turn carry their version, and `write` is guarded by it as in the owner store. When the check fails, return a tool error holding the current notes, so the model can merge and write again.
 
-The guest session's driver keeps the sender of each queued message. When a message's turn starts, the session records that sender as the **speaker**, then builds the opening user entry:
+A group session's driver keeps the sender of each queued message. When a message's turn starts, the session records that sender as the **speaker**, then builds the opening user entry:
 
 ```text
 <clock line>
@@ -213,9 +215,11 @@ Notes on this person (<id>, updated <date>):
 <name>: <text>
 ```
 
-The `user_memory` tool takes one input, `notes`, the person's complete new notes, and writes the speaker's notes with the speaker's current name. It returns `saved` and the notice **Remembered: <name>**. It returns a tool error when there is no speaker, for notes over 2 KiB, and for text that matches a credential pattern. It cannot name a person, so the model can only change the notes of the person it is answering. It is registered only in guest sessions.
+In a trusted group, a message from the owner opens with `<name> (owner): <text>` and no notes, and a message without a sender, such as a job's result or `/compact`, opens with its text alone.
 
-**Who sees which store.** Both tables are in the same database, and every session connects as the same `alyosha` role, so the database does not keep owner and guest apart. The session does, by what it opens and registers: your sessions, including trusted groups', get `MemoryStore`, the `memory` tool, and the index, and never `UserNotes`; guest sessions get `UserNotes` and `user_memory`, and never `MemoryStore`, the `memory` tool, or the index. This is the same separation the file version had, when both scopes were folders readable by `alyosha`.
+The `user_memory` tool takes one input, `notes`, the person's complete new notes, and writes the speaker's notes with the speaker's current name. It returns `saved` and the notice **Remembered: <name>**. It returns a tool error when there is no speaker, for notes over 2 KiB, and for text that matches a credential pattern. It cannot name a person, so the model can only change the notes of the person it is answering. When the speaker is the owner, it returns the tool error **This is your owner. Keep what you learn about them with the memory tool.** It is registered in guest sessions and trusted groups' sessions.
+
+**Who sees which store.** Both tables are in the same database, and every session connects as the same `alyosha` role, so the database does not keep owner and guest apart. The session does, by what it opens and registers: your private sessions get `MemoryStore`, the `memory` tool, and the index, and never `UserNotes`; trusted groups' sessions get both; guest sessions get `UserNotes` and `user_memory`, and never `MemoryStore`, the `memory` tool, or the index. This is the same separation the file version had, when both scopes were folders readable by `alyosha`.
 
 ### Import the old files
 

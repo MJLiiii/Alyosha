@@ -60,7 +60,7 @@ The `code` string contains an async JavaScript function that takes `tools` and r
 
 ### `user_memory`
 
-Only in guest sessions, which answer group chats. `notes` replaces the complete notes of the person whose message the turn answers, at most 2 KiB. The tool has no input naming the person: Alyosha takes it from the message's sender. Successful writes return a notice. [People's notes](../Memory.md#notes-on-people)
+Only in group sessions: guest groups' and trusted groups'. `notes` replaces the complete notes of the person whose message the turn answers, at most 2 KiB. The tool has no input naming the person: Alyosha takes it from the message's sender. Successful writes return a notice. [People's notes](../Memory.md#notes-on-people)
 
 ### `recall`
 
