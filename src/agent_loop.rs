@@ -197,11 +197,47 @@ struct Session {
     store: Option<(Arc<dyn SessionStore>, SessionId)>,
     /// The sequence number of `history[0]`.
     base_seq: u64,
+    /// Saves the waiting queue's rows in order, when there is a store.
+    /// See `docs/SessionStore.md#the-waiting-queue`.
+    pending: Option<mpsc::UnboundedSender<PendingWrite>>,
     executor: ToolExecutor,
     services: Arc<SessionServices>,
     clock: Arc<dyn Clock>,
     /// Ends the consumer when the session ends.
     ended: CancellationToken,
+}
+
+/// One write to the waiting queue's rows.
+enum PendingWrite {
+    Add(crate::session_store::PendingRow),
+    Remove(u64),
+}
+
+/// Runs the waiting queue's writes in order, logging failures.
+async fn write_pending(
+    store: Arc<dyn SessionStore>,
+    session: SessionId,
+    mut writes: mpsc::UnboundedReceiver<PendingWrite>,
+) {
+    while let Some(write) = writes.recv().await {
+        let result = match &write {
+            PendingWrite::Add(row) => store.add_pending(session, row).await,
+            PendingWrite::Remove(message_id) => store.remove_pending(session, *message_id).await,
+        };
+        if let Err(error) = result {
+            tracing::warn!(error = %error, "could not save the waiting queue");
+        }
+    }
+}
+
+/// A queued message as its row shows it: the text and a count of its
+/// attachments.
+fn pending_text(text: &str, attachments: usize) -> String {
+    match attachments {
+        0 => text.to_owned(),
+        count if text.is_empty() => format!("[+{count} attachments]"),
+        count => format!("{text} [+{count} attachments]"),
+    }
 }
 
 impl SessionDriver {
@@ -256,6 +292,11 @@ impl SessionDriver {
                     });
                 (persistence.store, stored.id)
             });
+            let pending = store.as_ref().map(|(store, id)| {
+                let (writes, inbox) = mpsc::unbounded_channel();
+                tokio::spawn(write_pending(store.clone(), *id, inbox));
+                writes
+            });
             Session {
                 state: Mutex::new(state),
                 last_message_id: AtomicU64::new(last_message_id),
@@ -274,6 +315,7 @@ impl SessionDriver {
                 rebuild_instruction: setup.rebuild_instruction,
                 store,
                 base_seq,
+                pending,
                 executor: ToolExecutor::new(registry, services.clone()),
                 services,
                 clock: setup.clock,
@@ -541,13 +583,21 @@ impl Session {
         let id = {
             let mut state = self.lock_state();
             let id = MessageId(self.last_message_id.fetch_add(1, Ordering::Relaxed) + 1);
+            let submitted_at = self.clock.now();
+            if let Some(pending) = &self.pending {
+                let _ = pending.send(PendingWrite::Add(crate::session_store::PendingRow {
+                    message_id: id.0,
+                    submitted_at,
+                    text: pending_text(&text, attachments.len()),
+                }));
+            }
             state.pending_messages.push_back(UserMessage {
                 id,
                 origin: MessageOrigin::Owner,
                 sender,
                 text,
                 attachments,
-                submitted_at: self.clock.now(),
+                submitted_at,
             });
             // Sent under the lock, so the front end hears of the message
             // before its turn can start.
@@ -566,6 +616,9 @@ impl Session {
             return None;
         }
         let message = state.pending_messages.pop_front()?;
+        if let Some(pending) = &self.pending {
+            let _ = pending.send(PendingWrite::Remove(message.id.0));
+        }
         let cancel = CancellationToken::new();
         state.active_work = Some(ActiveWork::Turn(ActiveTurn {
             turn_id: message.id,

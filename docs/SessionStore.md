@@ -6,9 +6,10 @@ A session's conversation survives a restart. Alyosha writes every history entry 
 
 | Saved | Lost on restart |
 | --- | --- |
-| Which session each chat is using | Messages waiting in the queue |
+| Which session each chat is using | Messages waiting in the queue, which are listed after the restart but not answered |
 | Every history entry: your messages, the model's replies and tool calls with provider replay data, and tool results | A turn in progress, which ends as stopped |
 | Each compaction's summary and where verbatim history resumes | Open approvals and `ask_owner` questions |
+| The text of each message waiting in the queue, until its turn starts | |
 | | Background jobs, MCP servers and their state, such as browser tabs, and the dev shell |
 | | Saved full outputs of shortened results (`log_path`) |
 
@@ -30,7 +31,16 @@ A bridge that starts asks to load its key's current session and starts a new one
 
 **One process per session.** A process holds a database lock on the session it runs. A second process that tries to open the same session, such as a second bridge started by hand while the service runs, stops with **This session is open in another Alyosha process.** The lock goes away with the process, so a crash never leaves it held.
 
-**Resuming.** Alyosha loads the latest summary and the entries after it. Older entries stay in the database but not in memory. If the last reply asked for tool calls that have no results, Alyosha records each as an error: *Alyosha restarted before this call finished. It may or may not have run; check before repeating it.* The first reply after a resume starts with *Resumed after a restart.*, adding *The turn in progress was stopped, and messages sent while Alyosha was down may need resending.* when a turn was interrupted.
+**Resuming.** Alyosha loads the latest summary and the entries after it. Older entries stay in the database but not in memory. If the last reply asked for tool calls that have no results, Alyosha records each as an error: *Alyosha restarted before this call finished. It may or may not have run; check before repeating it.* The first reply after a resume starts with *Resumed after a restart.*, adding *The turn in progress was stopped, and messages sent while Alyosha was down may need resending.* when a turn was interrupted. Messages that were still waiting in the queue are listed after it, with the time each was sent, so you know which to send again:
+
+```text
+Resumed after a restart. The turn in progress was stopped, and messages sent while Alyosha was down may need resending.
+Not answered before the restart:
+- Fri 10:02 "and check the logs too"
+- Fri 10:03 "also the backup"
+```
+
+Alyosha does not answer them on its own after the restart, because the conversation may have moved on, and a message such as "send it" could repeat an action. Guest sessions never show startup lines in their group, so a guest group gets no list.
 
 ## Without the nightly fresh start
 
@@ -55,7 +65,7 @@ If the database cannot be reached, `alyosha acp` stops with an error instead of 
 
 ## Deferred
 
-- Saving the message queue, so messages sent during a crash are answered after it.
+- Answering the messages that were waiting at a restart on their own, instead of listing them.
 - An archive of chat messages as the apps show them, including group messages that do not mention Alyosha.
 - Deleting old sessions. V1 keeps them all.
 - Resuming background jobs, open approvals, or saved full outputs after a restart.
@@ -167,6 +177,27 @@ Loading a session runs the normal session startup, with the loaded state in plac
 
 1. If the last entry is an `Assistant` entry whose tool calls lack results, append a `ToolResult` for each missing call, in order, through the store: `ToolOutcome::Error("Alyosha restarted before this call finished. It may or may not have run; check before repeating it.")`.
 2. Put a startup warning first: *Resumed after a restart.* If step 1 appended anything, or the last entry is a `User` entry, add *The turn in progress was stopped, and messages sent while Alyosha was down may need resending.*
+3. Take the session's rows from the `pending` table, oldest first, and delete them. If there are any, add the line *Not answered before the restart:* and one line each, `- <day> <HH:MM> "<text>"`, in the configured timezone, with the text on one line and cut to 100 characters with `…`.
+
+### The waiting queue
+
+Migration `005_pending.sql`:
+
+```sql
+create table pending (
+    session_id    bigint not null references sessions,
+    message_id    bigint not null,
+    submitted_at  timestamptz not null,
+    text          text not null,     -- the message's text, and "[+N attachments]"
+    primary key (session_id, message_id)
+);
+```
+
+`SessionStore` gains `add_pending(session, message_id, submitted_at, text)`, `remove_pending(session, message_id)`, and `take_pending(session)`, which returns the rows by `message_id` and deletes them. `MemoryStore` keeps them in a map.
+
+- **Writes in order.** Queuing a message is not async, so the session driver gives each write to one task of its own, through a channel, which runs them in order: add when a message is queued, remove when its turn starts. A failed write is logged at warn and does not stop the session.
+- **Kept at shutdown.** Ending a session, at shutdown or `session/new`, discards its queue in memory and leaves its rows. A shutdown is when they are needed. After `session/new` the old session is no longer any key's current session, so nothing loads it to list them.
+- **Text only.** A message's attachments are counted, not kept; the list says `[+2 attachments]` after its text.
 
 ### ACP
 
@@ -217,6 +248,7 @@ The scripted cases are in `tests/session_store.rs`, `tests/session.rs`, `tests/a
 - Script a compaction. Check that the store's checkpoint has `first_kept_seq = base_seq + first_kept_index`, that the next request's system instruction includes a memory written before the compaction, and that a `log_path` from a replaced result now reads as gone.
 - Resume a session with a checkpoint. Check that memory holds only entries from `first_kept_seq`, that the next turn's request matches what it would have been without the restart, and that new `MessageId`s are above every stored one.
 - Store a session whose last entry asks for two tool calls with one result. Resume it. Check for one appended error result for the second call, under its original call ID, and the stopped-turn line in the startup warning.
+- Queue two messages behind a turn that waits, with one carrying an attachment. Check two `pending` rows, then end the session without answering and resume it. Check the stopped-turn line, *Not answered before the restart:* with both messages in order, their times, and `[+1 attachments]`, and that the rows are gone. Resume again. Check no list. Let a queued message's turn start. Check that its row is removed.
 - Load a session twice from one store. Check that the second gets `Busy`.
 - Over ACP: `initialize` reports `loadSession: true`. `session/load` of an unknown key returns `-32002`. `session/new` with a key and two turns, then a new process with `session/load` of the key: check the replayed chunks without clock lines, the empty result, and that a follow-up prompt sees the earlier turns.
 - In the shared bridge crate with a fake agent, check that `open_session` falls back to `session/new` with the key and drops updates received before the load response.

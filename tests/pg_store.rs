@@ -19,7 +19,7 @@ use alyosha::{
     },
     memory::{MemoryStore, MemoryTables},
     recall::{EntryRef, RecallScope},
-    session_store::{PgStore, SessionStore, StoreError, encode},
+    session_store::{PendingRow, PgStore, SessionStore, StoreError, encode},
     user_notes::UserNotes,
 };
 use chrono::NaiveDate;
@@ -188,7 +188,7 @@ async fn pg_store_saves_loads_and_locks() {
             "migrate",
             "select string_agg(version::text, ',' order by version) from schema_version"
         ),
-        "1,2,3,4"
+        "1,2,3,4,5"
     );
     cluster.psql("migrate", "insert into schema_version values (99)");
     let Err(StoreError::Failed(error)) =
@@ -338,7 +338,7 @@ async fn memory_files_are_imported_once_and_checked() {
         .unwrap();
     assert_eq!(
         cluster.psql("empty", "select max(version) from schema_version"),
-        "4"
+        "5"
     );
     assert_eq!(
         cluster.psql(
@@ -783,4 +783,35 @@ async fn recall_migration_fills_text_and_searches_with_pgvector() {
             .unwrap()
             .is_none()
     );
+}
+
+#[tokio::test]
+async fn the_waiting_queue_is_kept_until_taken() {
+    let Some(cluster) = Cluster::start() else {
+        return;
+    };
+    cluster.create_database("pending");
+    let store = PgStore::connect(&cluster.target("pending"), Path::new(NO_FOLDER))
+        .await
+        .unwrap();
+    let session = store.create("owner:qq", Path::new("/")).await.unwrap();
+    let at = chrono::Utc::now();
+    for (id, text) in [(3, "third"), (1, "first"), (2, "second")] {
+        let row = PendingRow {
+            message_id: id,
+            submitted_at: at,
+            text: text.into(),
+        };
+        store.add_pending(session.id, &row).await.unwrap();
+    }
+    store.remove_pending(session.id, 2).await.unwrap();
+    let taken = store.take_pending(session.id).await.unwrap();
+    assert_eq!(
+        taken
+            .iter()
+            .map(|row| (row.message_id, row.text.as_str()))
+            .collect::<Vec<_>>(),
+        [(1, "first"), (3, "third")]
+    );
+    assert!(store.take_pending(session.id).await.unwrap().is_empty());
 }

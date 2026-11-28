@@ -99,6 +99,7 @@ pub enum StartupError {
 async fn prepare_persistence(
     persistence: Option<Persistence>,
     warnings: &mut Vec<String>,
+    timezone: chrono_tz::Tz,
 ) -> Result<Option<Persistence>, StartupError> {
     let Some(mut persistence) = persistence else {
         return Ok(None);
@@ -108,11 +109,17 @@ async fn prepare_persistence(
             session_store::repair(persistence.store.as_ref(), &mut persistence.stored)
                 .await
                 .map_err(|error| StartupError::Store(error.to_string()))?;
-        let line = if interrupted {
+        let mut line = if interrupted {
             format!("{RESUMED_LINE} {INTERRUPTED_LINE}")
         } else {
             RESUMED_LINE.to_owned()
         };
+        let waiting = persistence
+            .store
+            .take_pending(persistence.stored.id)
+            .await
+            .map_err(|error| StartupError::Store(error.to_string()))?;
+        line.push_str(&session_store::unanswered_lines(&waiting, timezone));
         warnings.insert(0, line);
         tracing::info!(
             key = %persistence.stored.key,
@@ -351,7 +358,8 @@ pub async fn start_with_clock(
             })
         })
     };
-    let persistence = prepare_persistence(front_end.persistence, &mut warnings).await?;
+    let persistence =
+        prepare_persistence(front_end.persistence, &mut warnings, config.timezone).await?;
     let recall = persistence.as_ref().map(|persistence| {
         Recall::for_session(
             config,
@@ -468,7 +476,7 @@ pub async fn start_guest(
         system_instruction.push_str(line);
         system_instruction.push('\n');
     }
-    let persistence = prepare_persistence(persistence, &mut warnings).await?;
+    let persistence = prepare_persistence(persistence, &mut warnings, config.timezone).await?;
     let recall = persistence.as_ref().map(|persistence| {
         Recall::for_session(
             config,

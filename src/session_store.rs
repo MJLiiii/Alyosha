@@ -45,11 +45,21 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/002_memory.sql"),
     include_str!("../migrations/003_media.sql"),
     include_str!("../migrations/004_recall.sql"),
+    include_str!("../migrations/005_pending.sql"),
 ];
 /// The migration that also imports the old memory files.
 const MEMORY_MIGRATION: i32 = 2;
 /// The migration that also fills each entry's searchable text.
 const RECALL_MIGRATION: i32 = 4;
+
+/// A message that was waiting in a session's queue.
+/// See `docs/SessionStore.md#the-waiting-queue`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingRow {
+    pub message_id: u64,
+    pub submitted_at: DateTime<Utc>,
+    pub text: String,
+}
 
 /// A stored session's database ID.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -128,6 +138,24 @@ pub trait SessionStore: Send + Sync {
     ) -> BoxFuture<'a, Result<(), StoreError>>;
     /// Releases the lock.
     fn close(&self, session: SessionId) -> BoxFuture<'_, Result<(), StoreError>>;
+
+    // The waiting queue: docs/SessionStore.md#the-waiting-queue
+
+    fn add_pending<'a>(
+        &'a self,
+        session: SessionId,
+        row: &'a PendingRow,
+    ) -> BoxFuture<'a, Result<(), StoreError>>;
+    fn remove_pending(
+        &self,
+        session: SessionId,
+        message_id: u64,
+    ) -> BoxFuture<'_, Result<(), StoreError>>;
+    /// The session's rows by message ID, which are then deleted.
+    fn take_pending(
+        &self,
+        session: SessionId,
+    ) -> BoxFuture<'_, Result<Vec<PendingRow>, StoreError>>;
 
     // Recall: docs/Recall.md#search. `current` is the searching session,
     // whose entries from its latest checkpoint on are left out.
@@ -209,6 +237,27 @@ fn message_id(entry: &HistoryEntry) -> Option<u64> {
     }
 }
 
+/// The lines that list the messages a restart left unanswered, after the
+/// resume line, or nothing. See `docs/SessionStore.md#resume`.
+pub fn unanswered_lines(waiting: &[PendingRow], timezone: chrono_tz::Tz) -> String {
+    if waiting.is_empty() {
+        return String::new();
+    }
+    let mut lines = String::from("\nNot answered before the restart:");
+    for row in waiting {
+        let one_line = row.text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let mut text: String = one_line.chars().take(100).collect();
+        if one_line.chars().count() > 100 {
+            text.push('…');
+        }
+        lines.push_str(&format!(
+            "\n- {} \"{text}\"",
+            row.submitted_at.with_timezone(&timezone).format("%a %H:%M")
+        ));
+    }
+    lines
+}
+
 /// Closes a turn a restart cut off: each tool call of the last reply that
 /// has no result gets an error result, saved through the store. Returns
 /// whether a turn was in progress, which is also the case when the last
@@ -273,6 +322,8 @@ struct MemoryInner {
     fail_appends_after: Option<usize>,
     /// Recall's vectors by session, seq, and model.
     vectors: HashMap<(i64, i64, String), Vec<f32>>,
+    /// The waiting queue's rows by session and message ID.
+    pending: std::collections::BTreeMap<(i64, u64), PendingRow>,
 }
 
 struct MemorySession {
@@ -393,6 +444,15 @@ impl MemoryStore {
     /// Releases every lock, as when the holding process dies.
     pub fn drop_locks(&self) {
         self.lock().locked.clear();
+    }
+
+    /// The waiting queue's rows of a session, by message ID.
+    pub fn pending(&self, session: SessionId) -> Vec<PendingRow> {
+        self.lock()
+            .pending
+            .range((session.0, 0)..=(session.0, u64::MAX))
+            .map(|(_, row)| row.clone())
+            .collect()
     }
 
     /// How many vectors are stored for `model`.
@@ -544,6 +604,48 @@ impl SessionStore for MemoryStore {
         Box::pin(async move {
             self.lock().locked.remove(&session.0);
             Ok(())
+        })
+    }
+
+    fn add_pending<'a>(
+        &'a self,
+        session: SessionId,
+        row: &'a PendingRow,
+    ) -> BoxFuture<'a, Result<(), StoreError>> {
+        Box::pin(async move {
+            self.lock()
+                .pending
+                .insert((session.0, row.message_id), row.clone());
+            Ok(())
+        })
+    }
+
+    fn remove_pending(
+        &self,
+        session: SessionId,
+        message_id: u64,
+    ) -> BoxFuture<'_, Result<(), StoreError>> {
+        Box::pin(async move {
+            self.lock().pending.remove(&(session.0, message_id));
+            Ok(())
+        })
+    }
+
+    fn take_pending(
+        &self,
+        session: SessionId,
+    ) -> BoxFuture<'_, Result<Vec<PendingRow>, StoreError>> {
+        Box::pin(async move {
+            let mut inner = self.lock();
+            let keys: Vec<(i64, u64)> = inner
+                .pending
+                .range((session.0, 0)..=(session.0, u64::MAX))
+                .map(|(key, _)| *key)
+                .collect();
+            Ok(keys
+                .iter()
+                .filter_map(|key| inner.pending.remove(key))
+                .collect())
         })
     }
 
@@ -1138,6 +1240,64 @@ impl SessionStore for PgStore {
                 .execute("select pg_advisory_unlock($1)", &[&session.0])
                 .await?;
             Ok(())
+        })
+    }
+
+    fn add_pending<'a>(
+        &'a self,
+        session: SessionId,
+        row: &'a PendingRow,
+    ) -> BoxFuture<'a, Result<(), StoreError>> {
+        Box::pin(async move {
+            self.client
+                .execute(
+                    "insert into pending (session_id, message_id, submitted_at, text) values ($1, $2, $3, $4)
+                     on conflict (session_id, message_id) do update set submitted_at = excluded.submitted_at, text = excluded.text",
+                    &[&session.0, &(row.message_id as i64), &row.submitted_at, &row.text],
+                )
+                .await?;
+            Ok(())
+        })
+    }
+
+    fn remove_pending(
+        &self,
+        session: SessionId,
+        message_id: u64,
+    ) -> BoxFuture<'_, Result<(), StoreError>> {
+        Box::pin(async move {
+            self.client
+                .execute(
+                    "delete from pending where session_id = $1 and message_id = $2",
+                    &[&session.0, &(message_id as i64)],
+                )
+                .await?;
+            Ok(())
+        })
+    }
+
+    fn take_pending(
+        &self,
+        session: SessionId,
+    ) -> BoxFuture<'_, Result<Vec<PendingRow>, StoreError>> {
+        Box::pin(async move {
+            let rows = self
+                .client
+                .query(
+                    "delete from pending where session_id = $1 returning message_id, submitted_at, text",
+                    &[&session.0],
+                )
+                .await?;
+            let mut rows: Vec<PendingRow> = rows
+                .iter()
+                .map(|row| PendingRow {
+                    message_id: row.get::<_, i64>(0) as u64,
+                    submitted_at: row.get(1),
+                    text: row.get(2),
+                })
+                .collect();
+            rows.sort_by_key(|row| row.message_id);
+            Ok(rows)
         })
     }
 

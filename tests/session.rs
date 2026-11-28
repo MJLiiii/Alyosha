@@ -868,3 +868,98 @@ async fn a_resumed_session_closes_the_turn_a_restart_cut_off() {
     assert_eq!(user.message_id.0, 5, "IDs continue after the stored ones");
     started.driver.end().await;
 }
+
+#[tokio::test]
+async fn messages_waiting_at_a_restart_are_listed_on_resume() {
+    use alyosha::{
+        agent_loop::Persistence,
+        agent_state::Attachment,
+        session_store::{INTERRUPTED_LINE, MemoryStore, RESUMED_LINE, SessionStore},
+    };
+    let home = home();
+    let store = MemoryStore::new();
+    let open = |stored, resumed, model: Arc<ScriptedModel>| {
+        let home = &home;
+        let store = store.clone();
+        async move {
+            session::start_with_clock(
+                &Config::default(),
+                &home.paths,
+                &home.workspace,
+                model,
+                FrontEnd {
+                    approver: None,
+                    channel_line: None,
+                    log_hint: None,
+                    on_loading_dev_shell: None,
+                    persistence: Some(Persistence {
+                        store: store as Arc<dyn SessionStore>,
+                        stored,
+                        resumed,
+                    }),
+                    memory: home.memory.clone(),
+                    media: None,
+                },
+                Arc::new(FixedClock(
+                    Utc.with_ymd_and_hms(2026, 11, 25, 9, 2, 0).unwrap(),
+                )),
+            )
+            .await
+            .unwrap()
+        }
+    };
+    let created = store
+        .create("owner:telegram", &home.workspace)
+        .await
+        .unwrap();
+    let id = created.id;
+    let model = ScriptedModel::new();
+    let gate = model.reply_gated(vec![text("never sent")]);
+    let started = open(created, false, model).await;
+    started.driver.submit("run the long build");
+    gate.started().await;
+    started.driver.submit("and check the logs\ntoo");
+    started.driver.submit_message(
+        "",
+        vec![Attachment {
+            mime: "image/png".into(),
+            name: None,
+            bytes: vec![1, 2, 3],
+        }],
+        None,
+    );
+    for _ in 0..100 {
+        if store.pending(id).len() == 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let rows = store.pending(id);
+    assert_eq!(
+        rows.iter().map(|row| row.text.as_str()).collect::<Vec<_>>(),
+        ["and check the logs\ntoo", "[+1 attachments]"],
+        "the running turn's row is gone"
+    );
+    // The process stops with the turn running and two messages waiting.
+    started.driver.end().await;
+    store.drop_locks();
+
+    let stored = store.load_current("owner:telegram").await.unwrap().unwrap();
+    let resumed = open(stored, true, ScriptedModel::new()).await;
+    assert_eq!(
+        resumed.warnings[0],
+        format!(
+            "{RESUMED_LINE} {INTERRUPTED_LINE}\nNot answered before the restart:\n- Wed 10:02 \"and check the logs too\"\n- Wed 10:02 \"[+1 attachments]\""
+        )
+    );
+    assert!(store.pending(id).is_empty(), "taken");
+    resumed.driver.end().await;
+    store.drop_locks();
+    let stored = store.load_current("owner:telegram").await.unwrap().unwrap();
+    let again = open(stored, true, ScriptedModel::new()).await;
+    assert!(
+        !again.warnings[0].contains("Not answered"),
+        "{}",
+        again.warnings[0]
+    );
+}
