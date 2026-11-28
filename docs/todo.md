@@ -49,7 +49,7 @@ Designed and written. The model sees images that `read_file`, MCP servers, and b
 
 ## 9. Downloads from the browser
 
-Designed. Playwright MCP saves each download in the session's `downloads/` folder, where the model reads it or sends it with `send_file`. Configuration only. [Downloads](Browser.md#downloads)
+Designed, and configured on ms02 since 2026-11-28. Playwright MCP saves each download in the session's `downloads/` folder, where the model reads it or sends it with `send_file`. Configuration only. [Downloads](Browser.md#downloads)
 
 Full desktop control was considered and dropped on 2026-11-28; screenshots of pages cover what was needed.
 
