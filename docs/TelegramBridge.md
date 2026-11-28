@@ -37,7 +37,7 @@ Create the bot with Telegram's @BotFather, which issues the token. Get your user
 2. Start `alyosha acp` from `PATH` with piped standard input and output. Send its standard error to the bridge's own standard error, which the journal keeps, for failures before its logging is set up. Both programs write their own log files. [Logging](reference/Logging.md)
 3. Send `initialize` with protocol version `1`, `clientInfo.name` set to `alyosha-telegram`, and no client capabilities, then open the session `owner:telegram` in `/var/lib/alyosha/work/owner`, creating it if missing, with an empty `mcpServers` list: `session/load`, or `session/new` if there is none. [Durable sessions: bridges](SessionStore.md#bridges)
 4. Call `getMe` and keep the bot's user ID and username, which group mentions name. Network errors are retried as for every call; if Telegram refuses it, as for a wrong token, exit with an error.
-5. Call `setMyCommands` with `new`, `cancel`, `compact`, `job`, and `tasks`, each with a one-line description.
+5. Call `setMyCommands` with `new`, `cancel`, `compact`, `job`, and `tasks`, each with a one-line description. For each trusted group, call it again with `new`, `cancel`, `compact`, and `job` and the scope `{"type": "chat", "chat_id": <ID>}`, so the menu appears only there.
 6. Start long polling with `getUpdates`, asking only for `message` and `callback_query` updates.
 7. Start the task runner for the `telegram` channel. [The runner](Schedule.md#the-runner)
 8. On each `_alyosha/job_finished` notification, send **⚙ Job finished:** to the chat, then send the notification's `text` as a `session/prompt`. [When a job finishes](Jobs.md#when-a-job-finishes)
@@ -55,6 +55,7 @@ For a message from the owner:
 | `/start` | Reply with a short help text listing the commands. |
 | `/new` | Send `session/new` in `/var/lib/alyosha/work/owner` with the key `owner:telegram`. Reply **New session started.** once it returns, which can take minutes while a project's dev shell builds. [Sessions](Channels.md#sessions) |
 | `/cancel` | Send `session/cancel` for the current session. |
+| `/new <name>`, `/cancel <name>` | Do the same for the trusted group `<name>` in `trusted_groups`, and reply to the owner, such as **New session started in group dev.**; reply **No trusted group named <name>.** to an unknown name. [Commands in trusted groups](Channels.md#commands-in-trusted-groups) |
 | `/compact`, `/job …` | Send it as the text of a `session/prompt`. [`/job` command](Jobs.md#job-command) |
 | `/tasks` | List scheduled tasks from the file, without the model. [`/tasks`](Schedule.md#tasks) |
 | Other text, or a message with attachments | Send it as a `session/prompt`: the text or caption as one `text` block, then a block for each attachment. [Attachments](#attachments) |
@@ -133,7 +134,7 @@ If the message cannot be sent after retries, answer the request with `cancelled`
 
 Keep the bot's privacy mode on, as @BotFather sets it, so Telegram passes the bot only group messages that mention it, reply to it, or are commands. Leave **Allow groups** on. [Group chats design](Channels.md#group-chats)
 
-A group message is a **mention** when its `entities`, or `caption_entities` for a photo or file with a caption, hold a `mention` whose text is `@` and the bot's username, ignoring case, or a `text_mention` of the bot's user ID, or when it replies to a message from the bot. Drop every other group message without a log line, including commands, which privacy mode also passes. Remove the mention text and trim. If the message replies to someone else's message, bring its text and attachments along as in [Attachments](#attachments).
+A group message is a **mention** when its `entities`, or `caption_entities` for a photo or file with a caption, hold a `mention` whose text is `@` and the bot's username, ignoring case, or a `text_mention` of the bot's user ID, or when it replies to a message from the bot. Drop every other group message without a log line, including commands, which privacy mode also passes, except a command in a trusted group. Remove the mention text and trim. If the message replies to someone else's message, bring its text and attachments along as in [Attachments](#attachments).
 
 For a mention in a group whose chat ID is in `trusted_groups`, see [Trusted groups](#trusted-groups). For any other mention:
 
@@ -152,7 +153,8 @@ For a mention in a trusted group: [Trusted groups design](Channels.md#trusted-gr
 2. Send `<display name>: <text>` as a plain prompt, without `_meta`. Typing and the reply work as for a guest group.
 3. **Approvals.** Send the request to the owner's private chat as usual, with **In group <name>:** and a blank line in front of the title. Give it a request number of its own, so a button press answers the right child. `/cancel` in the private chat cancels only the private session and its requests; a group's requests stay open until answered or expired.
 4. **Jobs.** On a finished job, send **⚙ Job finished:** to the group, prompt the group's session with the result, and send its reply to the group without `reply_parameters`.
-5. The pool never stops a trusted group's child for being idle. If it exits, log it and remove it; the next mention starts a new one.
+5. **Commands.** A message whose whole text, with any mention removed, is `/new`, `/cancel`, `/compact`, or `/job …`, or `/new@<username>` and the like without a mention, is a command for the group's session, from anyone there. `/new` sends `session/new` with the key `group:telegram:<chat ID>` in the group's folder and replies **New session started.** to the group. `/cancel` sends `session/cancel` to the group's child, answers its open requests with `cancelled`, and edits their messages in the owner's chat to end with **Cancelled.** `/compact` and `/job …` are sent as the bare text of a `session/prompt`, without the name in front. [Commands in trusted groups](Channels.md#commands-in-trusted-groups)
+6. The pool never stops a trusted group's child for being idle. If it exits, log it and remove it; the next mention starts a new one.
 
 ## Failures and shutdown
 
@@ -194,6 +196,9 @@ These run under `cargo test` with a fake Bot API server, set through `teloxide`'
 - Mention the bot in two groups. Check that each group gets its own guest agent.
 - List one group in `trusted_groups` and mention the bot there. Check that a group-mode agent starts in `/var/lib/alyosha/work/groups/<name>`, receives `<name>: <text>` without `_meta`, and that its reply goes to the group. Script an approval from it. Check that the question reaches the owner's private chat marked with the group, that the owner's button press answers the group's agent, and that the owner's agent receives nothing.
 - Let the trusted group's agent sit idle past the guest limit. Check that it keeps running.
+- In the trusted group, send `/new@<username>`, then a mention with `/compact`, then a mention with `please /compact later`. Check a `session/new` with the group's key and folder and **New session started.** in the group, a bare `/compact` prompt, and `<name>: please /compact later`. Script an approval from the group, then send `/cancel` in the group. Check `session/cancel` to the group's agent, the request answered `cancelled`, and **Cancelled.** in the owner's chat. Send `/new` in a guest group with a mention. Check that the guest agent gets it as text.
+- From the owner's chat, send `/new dev`, `/cancel dev`, and `/new nosuch`. Check `session/new` and `session/cancel` to the group's agent, the replies in the owner's chat, nothing in the group, and **No trusted group named nosuch.**
+- At startup, check a `setMyCommands` call with the chat scope for each trusted group.
 - Send an owner message. Check that the agent receives one `session/prompt` with the text and that the reply is sent with `parse_mode: "HTML"`.
 - Script a reply with bold, code, and a list. Check the HTML that is sent. Make the fake Bot API refuse a reply's HTML. Check that the same part is sent again without a parse mode and without the Markdown markers.
 - Script two tool calls, the second failing, then a reply. Check that one **Working…** message is created and edited, shows **(failed)** on the second line, and is edited no more than once every 3 seconds.

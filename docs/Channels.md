@@ -118,11 +118,11 @@ your private chat ───────────► bridge ──► alyosha 
 - **A session per group.** Each group gets its own child, started at the first mention. It keeps the group's conversation, so follow-up questions work, and survives restarts like your session. Groups never see each other's conversations or your private chat's.
 - **Trusted groups get your powers.** You list trusted groups in the bridge's section of the configuration, each under a short name you choose, with the group ID the bridge logs for every mention. Their session is a full session like yours: shell, files, your memory, skills, background jobs, every MCP server, and your browser sign-ins. Everyone in a trusted group, including people who join later, can use all of it, so list only groups where you would hand every member your computer. [Trusted groups](#trusted-groups)
 - **Other groups get guests.** A group you have not listed gets a guest session. It has no shell, no files, no background jobs, no skills, no `ask_owner`, and not your memory. Its only MCP servers are the ones `[guest]` in the configuration lists, normally just web search. Search is read-only and needs no account, so a guest cannot reach your mail, your sign-ins, or the machine. A guest session that has been quiet for an hour is stopped, so a bot added to many groups does not keep a process for each. Its conversation is saved and resumes at the next mention. [Web search](WebSearch.md) · [Configuration](reference/Configuration.md#guest)
-- **Everyone is equal in a group, you included.** The bridge does not tell you apart from other members in a group. Your private chat stays the only place for commands and approvals.
+- **Everyone is equal in a group, you included.** The bridge does not tell you apart from other members in a group. Your private chat stays the only place for approvals. In a trusted group, everyone can use its session's commands. [Commands in trusted groups](#commands-in-trusted-groups)
 - **A memory for each person, in guest sessions.** A guest session keeps notes on each person, by their platform and user ID, and shows them to the model with each of their messages. The model updates them with the `user_memory` tool, which writes only the notes of the person whose message it is answering. Trusted groups use your memory instead. [People in group chats](Memory.md#people-in-group-chats)
 - **Names are not proof.** Each message reaches the model with the sender's display name. Anyone can pick any display name, so a guest session's instruction tells the model that nobody in the group is its owner and that it acts for no one there.
 - **Replies are formatted as in private.** The reply is rendered and split like a private reply. QQ allows five replies per group message within 60 minutes, and the bridge uses at most four, as for private messages. A group reply that fails is logged and dropped, never kept for later.
-- **Nothing else in groups.** Commands, scheduled tasks, and the **Working…** message are for your private chat only.
+- **Nothing else in groups.** Scheduled tasks and the **Working…** message are for your private chat only, and commands work only in trusted groups.
 - **Media in groups.** A trusted group's session takes everything your private chat takes and saves files in its own `inbox/`. A guest session sees images, video frames, and transcripts, but not files, and cannot send files. [Guests](Media.md#guests)
 - **Cost.** Every group mention is a model request on your account. Guest groups have no allowlist and no rate limit in v1. If strangers' use becomes a problem, add a limit per group or per person.
 
@@ -137,16 +137,30 @@ A trusted group's session is `alyosha acp --group`: your normal session with a d
 - **Jobs report to the group.** When one of its background jobs finishes, the bridge gives the result to the group's session, and its answer goes to the group.
 - **It keeps running.** It is not stopped when the group is quiet, so its running jobs survive. There are only as many as you list. It stops with the bridge, and its conversation resumes when the bridge starts again.
 - **Scheduled tasks run in your private session.** The schedule belongs to the bridge, not to a group, so a task a group asks for runs and reports in your private chat.
-- **Messages carry the sender's name.** The bridge sends `<display name>: <text>`, so a member's message is never taken for a command such as `/compact`.
+- **Messages carry the sender's name.** The bridge sends `<display name>: <text>`, so a member's message is never taken for a command such as `/compact`, unless the whole message is one of the group's commands.
 
 A group that is not listed gets a guest session as before. Removing a group from the list takes effect when the bridge restarts.
+
+### Commands in trusted groups
+
+Everyone in a trusted group can use four commands, because everyone there already has your powers. A message is a command only when, after the mention is removed, its whole text is the command. In Telegram, `/new@<bot username>` works too, without a mention. In QQ the command follows an @ of the bot, since QQ passes the bot nothing else.
+
+| Command | What it does |
+| --- | --- |
+| `/new` | Starts a new session for the group in its folder and replies **New session started.** The old one stays in the database, and its background jobs stop, as for `/new` in your private chat. |
+| `/cancel` | Stops the group's running turn. The group's open approvals in your private chat end as cancelled, and their messages there say **Cancelled.** |
+| `/compact`, `/job <command>` | Go to the group's session as they are, as in your private chat. A job's result goes to the group. [`/job` command](Jobs.md#job-command) |
+
+From your private chat, `/new <name>` and `/cancel <name>` do the same for the trusted group under that name in the bridge's `trusted_groups`, such as `/new dev`. The reply, such as **New session started in group dev.**, comes to your private chat, and the group is not told. An unknown name gets **No trusted group named <name>.** Without a name, `/new` and `/cancel` act on your private session as before.
+
+Guest groups get no commands: a command there reaches the guest session as text.
 
 ## Deferred
 
 - Voice replies and the other media work deferred on its page. [Media deferred work](Media.md#deferred)
 - Several sessions at once for you, such as one per chat thread.
 - More tools for guests, such as the browser with a profile that holds no sign-ins.
-- Commands such as `/new` and `/cancel` for a trusted group's session.
+- Commands in guest groups, and `/compact <name>` and `/job <name> …` for a trusted group from your private chat.
 - Rate limits for group mentions, and an allowlist of groups.
 - Answering group messages that do not mention Alyosha.
 - Typing indicators in QQ groups.
