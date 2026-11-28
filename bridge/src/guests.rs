@@ -40,6 +40,17 @@ struct Guest {
     trusted: bool,
 }
 
+/// A trusted group's command, as `GuestPool::group_command` reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroupCommand {
+    /// `/new`: a new session for the group.
+    New,
+    /// `/cancel`: stop the group's turn and its open requests.
+    Cancel,
+    /// `/compact` or `/job …`: sent to the group's session as it is.
+    Session,
+}
+
 /// How a bridge starts its group children.
 #[derive(Clone, Default)]
 pub struct GroupSpawners {
@@ -96,6 +107,94 @@ impl GuestPool {
             .map_or(group, String::as_str)
     }
 
+    /// The ID of the trusted group under `name` in the settings.
+    pub fn trusted_named(&self, name: &str) -> Option<String> {
+        self.spawn
+            .trusted_groups
+            .iter()
+            .find(|(_, group_name)| group_name.as_str() == name)
+            .map(|(group, _)| group.clone())
+    }
+
+    /// Whether `text` is one of a trusted group's commands: `/new`,
+    /// `/cancel`, `/compact`, or `/job …`. See
+    /// `docs/Channels.md#commands-in-trusted-groups`.
+    pub fn group_command(text: &str) -> Option<GroupCommand> {
+        match text.trim() {
+            "/new" => Some(GroupCommand::New),
+            "/cancel" => Some(GroupCommand::Cancel),
+            "/compact" => Some(GroupCommand::Session),
+            text if text == "/job" || text.starts_with("/job ") => Some(GroupCommand::Session),
+            _ => None,
+        }
+    }
+
+    /// Starts a new session for a trusted group in its folder, starting its
+    /// child first if none runs.
+    pub async fn new_session(&mut self, group: &str) -> Result<(), String> {
+        self.ensure(group).await?;
+        let workspace = self.workspace(group);
+        let key = self.session_key(group);
+        let guest = self.guests.get_mut(group).expect("started above");
+        guest.last_active = Instant::now();
+        guest.bridge.new_session(&workspace, &key).await.map(drop)
+    }
+
+    /// `session/cancel` for a group's running session, then each of
+    /// `requests` answered `cancelled`. Returns false if none runs.
+    pub fn cancel(&self, group: &str, requests: &[u64]) -> bool {
+        match self.guests.get(group) {
+            Some(guest) => {
+                guest.bridge.cancel_with_requests(requests);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Sends a command such as `/compact` to a trusted group's session as
+    /// it is, without the sender's name, starting the child if needed.
+    pub async fn command(&mut self, group: &str, key: &str, text: &str) -> Result<(), String> {
+        self.ensure(group).await?;
+        let guest = self.guests.get_mut(group).expect("started above");
+        guest.last_active = Instant::now();
+        guest.bridge.prompt(key, text.trim());
+        Ok(())
+    }
+
+    async fn ensure(&mut self, group: &str) -> Result<(), String> {
+        if !self.guests.contains_key(group) {
+            let guest = self.start(group).await?;
+            self.guests.insert(group.to_owned(), guest);
+        }
+        Ok(())
+    }
+
+    /// A trusted group works in the folder named after it; a guest session
+    /// ignores its workspace, which is the guest folder.
+    fn workspace(&self, group: &str) -> PathBuf {
+        if self.is_trusted(group) {
+            self.work_dir.join("groups").join(self.name(group))
+        } else {
+            self.work_dir.join("guest")
+        }
+    }
+
+    /// `alyosha-telegram` saves its groups' sessions as
+    /// `group:telegram:<id>` or `guest:telegram:<id>`.
+    fn session_key(&self, group: &str) -> String {
+        let platform = self
+            .client_name
+            .strip_prefix("alyosha-")
+            .unwrap_or(&self.client_name);
+        let kind = if self.is_trusted(group) {
+            "group"
+        } else {
+            "guest"
+        };
+        format!("{kind}:{platform}:{group}")
+    }
+
     /// The running child of `group`, to answer its requests.
     pub fn bridge(&self, group: &str) -> Option<&Bridge> {
         self.guests.get(group).map(|guest| &guest.bridge)
@@ -113,10 +212,7 @@ impl GuestPool {
         sender_id: &str,
         sender_name: &str,
     ) -> Result<(), String> {
-        if !self.guests.contains_key(group) {
-            let guest = self.start(group).await?;
-            self.guests.insert(group.to_owned(), guest);
-        }
+        self.ensure(group).await?;
         let guest = self.guests.get_mut(group).expect("inserted above");
         guest.last_active = Instant::now();
         if guest.trusted {
@@ -152,13 +248,7 @@ impl GuestPool {
         } else {
             self.spawn.guest.as_ref().ok_or("group chats are off")?
         };
-        // A trusted group works in the folder named after it; a guest
-        // session ignores its workspace, which is the guest folder.
-        let workspace = if trusted {
-            self.work_dir.join("groups").join(self.name(group))
-        } else {
-            self.work_dir.join("guest")
-        };
+        let workspace = self.workspace(group);
         std::fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
         let (bridge, mut events) = spawn().map_err(|error| error.to_string())?;
         let number = self.next;
@@ -177,16 +267,7 @@ impl GuestPool {
                 }
             }
         });
-        // `alyosha-telegram` saves its groups' sessions as
-        // `group:telegram:<id>` or `guest:telegram:<id>`.
-        let platform = self
-            .client_name
-            .strip_prefix("alyosha-")
-            .unwrap_or(&self.client_name);
-        let key = format!(
-            "{}:{platform}:{group}",
-            if trusted { "group" } else { "guest" }
-        );
+        let key = self.session_key(group);
         let started = async {
             bridge.initialize(&self.client_name).await?;
             bridge.open_session(&workspace, &key).await
@@ -268,5 +349,126 @@ impl GuestPool {
 
     pub fn is_empty(&self) -> bool {
         self.guests.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use serde_json::{Value, json};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    use super::*;
+
+    #[test]
+    fn only_whole_commands_count() {
+        assert_eq!(GuestPool::group_command(" /new "), Some(GroupCommand::New));
+        assert_eq!(
+            GuestPool::group_command("/cancel"),
+            Some(GroupCommand::Cancel)
+        );
+        assert_eq!(
+            GuestPool::group_command("/compact"),
+            Some(GroupCommand::Session)
+        );
+        assert_eq!(
+            GuestPool::group_command("/job make test"),
+            Some(GroupCommand::Session)
+        );
+        for text in ["/new please", "please /compact", "/jobs", "/newer", "hello"] {
+            assert_eq!(GuestPool::group_command(text), None, "{text}");
+        }
+    }
+
+    /// An agent that answers `initialize`, `session/load` with not found,
+    /// and `session/new`, and logs what it receives.
+    fn spawner(log: Arc<Mutex<Vec<Value>>>) -> SpawnGuest {
+        Arc::new(move || {
+            let (ours, theirs) = tokio::io::duplex(1 << 16);
+            let (read, mut write) = tokio::io::split(ours);
+            let (bridge_read, bridge_write) = tokio::io::split(theirs);
+            let log = log.clone();
+            tokio::spawn(async move {
+                let mut lines = BufReader::new(read).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    let message: Value = serde_json::from_str(&line).unwrap();
+                    log.lock().unwrap().push(message.clone());
+                    let id = message["id"].clone();
+                    let reply = match message["method"].as_str() {
+                        Some("initialize") => {
+                            json!({"jsonrpc": "2.0", "id": id, "result": {"protocolVersion": 1}})
+                        }
+                        Some("session/load") => {
+                            json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32002, "message": "not found"}})
+                        }
+                        Some("session/new") => {
+                            json!({"jsonrpc": "2.0", "id": id, "result": {"sessionId": "s1"}})
+                        }
+                        _ => continue,
+                    };
+                    write
+                        .write_all(format!("{reply}\n").as_bytes())
+                        .await
+                        .unwrap();
+                }
+            });
+            Ok(Bridge::connect(bridge_read, bridge_write))
+        })
+    }
+
+    #[tokio::test]
+    async fn trusted_groups_start_new_sessions_cancel_and_take_commands() {
+        let root = tempfile::tempdir().unwrap();
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let (mut pool, _events) = GuestPool::new(
+            GroupSpawners {
+                guest: None,
+                trusted: Some(spawner(log.clone())),
+                trusted_groups: [("G1".to_owned(), "dev".to_owned())].into(),
+            },
+            "alyosha-qq",
+            root.path().to_owned(),
+        );
+        assert_eq!(pool.trusted_named("dev").as_deref(), Some("G1"));
+        assert_eq!(pool.trusted_named("nosuch"), None);
+        assert!(!pool.cancel("G1", &[]), "nothing runs yet");
+
+        pool.new_session("G1").await.unwrap();
+        pool.command("G1", "k1", " /compact ").await.unwrap();
+        assert!(pool.cancel("G1", &[42]));
+        // Let the writes reach the agent.
+        for _ in 0..100 {
+            if log.lock().unwrap().len() >= 7 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let log = log.lock().unwrap().clone();
+        let methods: Vec<&str> = log
+            .iter()
+            .map(|message| message["method"].as_str().unwrap_or("answer"))
+            .collect();
+        assert_eq!(
+            methods,
+            [
+                "initialize",
+                "session/load",
+                "session/new",
+                "session/new",
+                "session/prompt",
+                "session/cancel",
+                "answer"
+            ]
+        );
+        let folder = root.path().join("groups").join("dev");
+        assert_eq!(log[3]["params"]["cwd"], folder.display().to_string());
+        assert_eq!(
+            log[3]["params"]["_meta"]["alyosha"]["sessionKey"],
+            "group:qq:G1"
+        );
+        assert_eq!(log[4]["params"]["prompt"][0]["text"], "/compact");
+        assert_eq!(log[6]["id"], 42);
+        assert_eq!(log[6]["result"]["outcome"]["outcome"], "cancelled");
     }
 }

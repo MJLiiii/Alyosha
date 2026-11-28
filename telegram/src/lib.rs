@@ -17,7 +17,7 @@ use std::{
 
 use alyosha_bridge::{
     Bridge, Event, Permission,
-    guests::{GroupSpawners, GuestEvent, GuestPool, IDLE_LIMIT},
+    guests::{GroupCommand, GroupSpawners, GuestEvent, GuestPool, IDLE_LIMIT},
     split, working_text,
 };
 use alyosha_schedule::Schedule;
@@ -26,7 +26,7 @@ use chrono_tz::Tz;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
-pub const HELP: &str = "Write to Alyosha here. Commands:\n/new start a fresh session\n/cancel stop the current turn\n/compact summarize older conversation\n/job <command> start a background job\n/tasks list scheduled tasks";
+pub const HELP: &str = "Write to Alyosha here. Commands:\n/new start a fresh session\n/cancel stop the current turn\n/new <group>, /cancel <group> the same for a trusted group\n/compact summarize older conversation\n/job <command> start a background job\n/tasks list scheduled tasks";
 const PART_LIMIT: usize = 4000;
 const EDIT_EVERY: Duration = Duration::from_secs(3);
 /// How much of a replied-to message a group prompt carries.
@@ -269,6 +269,34 @@ pub enum Incoming {
     Unaddressed,
 }
 
+/// `/cancel` for a trusted group: its session's turn stops, and its open
+/// requests in the owner's chat end cancelled.
+async fn cancel_group(
+    api: &Api,
+    chat: i64,
+    pool: &GuestPool,
+    requests: &mut HashMap<u32, OpenRequest>,
+    group: &str,
+) {
+    let numbers: Vec<u32> = requests
+        .iter()
+        .filter(|(_, open)| open.group.as_deref() == Some(group))
+        .map(|(number, _)| *number)
+        .collect();
+    let theirs: Vec<OpenRequest> = numbers
+        .iter()
+        .filter_map(|number| requests.remove(number))
+        .collect();
+    let ids: Vec<u64> = theirs.iter().map(|open| open.permission.request).collect();
+    pool.cancel(group, &ids);
+    for open in theirs {
+        if let Some(message) = open.message {
+            api.edit(chat, message, &format!("{}\n\nCancelled.", open.text))
+                .await;
+        }
+    }
+}
+
 /// The sender's display name: first and last name, or the username.
 fn display_name(user: &Value) -> String {
     let full = [user["first_name"].as_str(), user["last_name"].as_str()]
@@ -304,12 +332,24 @@ fn group_message(message: &Value, bot: &Bot) -> Incoming {
             let start = usize::try_from(entity["offset"].as_u64()?).ok()?;
             let end = start + usize::try_from(entity["length"].as_u64()?).ok()?;
             let slice = units.get(start..end)?;
-            let mentioned = match entity["type"].as_str() {
-                Some("mention") => String::from_utf16_lossy(slice).eq_ignore_ascii_case(&handle),
-                Some("text_mention") => entity["user"]["id"].as_i64() == Some(bot.id),
-                _ => false,
-            };
-            mentioned.then_some((start, end))
+            match entity["type"].as_str() {
+                Some("mention") => String::from_utf16_lossy(slice)
+                    .eq_ignore_ascii_case(&handle)
+                    .then_some((start, end)),
+                Some("text_mention") => {
+                    (entity["user"]["id"].as_i64() == Some(bot.id)).then_some((start, end))
+                }
+                // `/new@<username>`: the command stays, the address goes.
+                Some("bot_command") => {
+                    let command = String::from_utf16_lossy(slice);
+                    let (_, address) = command.split_once('@')?;
+                    address.eq_ignore_ascii_case(&bot.username).then(|| {
+                        let address_units = address.encode_utf16().count() + 1;
+                        (end - address_units, end)
+                    })
+                }
+                _ => None,
+            }
         })
         .collect();
     let replied = &message["reply_to_message"];
@@ -444,6 +484,23 @@ pub async fn run(
         {"command": "tasks", "description": "List scheduled tasks"},
     ]});
     let _ = api.call("setMyCommands", commands).await;
+    // Trusted groups get their own menu, so guest groups see none.
+    // See `docs/Channels.md#commands-in-trusted-groups`.
+    for group in settings.groups.trusted_groups.keys() {
+        let Ok(group_chat) = group.parse::<i64>() else {
+            continue;
+        };
+        let group_commands = json!({
+            "commands": [
+                {"command": "new", "description": "Start a fresh session for this group"},
+                {"command": "cancel", "description": "Stop this group's current turn"},
+                {"command": "compact", "description": "Summarize older conversation"},
+                {"command": "job", "description": "Run a shell command as a background job"},
+            ],
+            "scope": {"type": "chat", "chat_id": group_chat},
+        });
+        let _ = api.call("setMyCommands", group_commands).await;
+    }
 
     let show_api = api.clone();
     let show: Arc<dyn Fn(&alyosha_schedule::DueTask) + Send + Sync> = Arc::new(move |task| {
@@ -511,6 +568,30 @@ pub async fn run(
                         let group_id = group.to_string();
                         tracing::info!(group, trusted = pool.is_trusted(&group_id), "a group mention");
                         let key = format!("g{group}:{message_id}");
+                        if pool.is_trusted(&group_id) && blocks.is_empty()
+                            && let Some(command) = GuestPool::group_command(&text)
+                        {
+                            match command {
+                                GroupCommand::New => {
+                                    let reply = match pool.new_session(&group_id).await {
+                                        Ok(()) => "New session started.".to_owned(),
+                                        Err(error) => format!("Failed: {error}"),
+                                    };
+                                    api.send_rendered(group, &reply, Some(message_id)).await;
+                                }
+                                GroupCommand::Cancel => {
+                                    cancel_group(&api, chat, &pool, &mut requests, &group_id).await;
+                                }
+                                GroupCommand::Session => {
+                                    group_replies.insert(key.clone(), (group, Some(message_id)));
+                                    if let Err(error) = pool.command(&group_id, &key, &text).await {
+                                        tracing::warn!(group, error = %error, "the group session did not start");
+                                        group_replies.remove(&key);
+                                    }
+                                }
+                            }
+                            continue;
+                        }
                         group_replies.insert(key.clone(), (group, Some(message_id)));
                         let user = format!("telegram-{sender}");
                         if let Err(error) = pool.prompt(&group_id, &key, &text, blocks, &user, &name).await {
@@ -560,6 +641,25 @@ pub async fn run(
                             continue;
                         }
                         let trimmed = text.trim();
+                        // `/new <name>` and `/cancel <name>` act on a trusted group.
+                        if let Some((command @ ("/new" | "/cancel"), name)) = trimmed.split_once(' ') {
+                            let name = name.trim();
+                            let Some(group_id) = pool.trusted_named(name) else {
+                                let _ = api.send(chat, &format!("No trusted group named {name}."), None).await;
+                                continue;
+                            };
+                            if command == "/new" {
+                                let reply = match pool.new_session(&group_id).await {
+                                    Ok(()) => format!("New session started in group {name}."),
+                                    Err(error) => format!("Failed: {error}"),
+                                };
+                                let _ = api.send(chat, &reply, None).await;
+                            } else {
+                                cancel_group(&api, chat, &pool, &mut requests, &group_id).await;
+                                let _ = api.send(chat, &format!("Cancelled in group {name}."), None).await;
+                            }
+                            continue;
+                        }
                         match trimmed {
                             "/start" => { let _ = api.send(chat, HELP, None).await; }
                             "/new" => {

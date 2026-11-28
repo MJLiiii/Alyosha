@@ -9,7 +9,7 @@ use std::{
 
 use alyosha_bridge::{
     Bridge, Event, Permission,
-    guests::{GroupSpawners, GuestEvent, GuestPool, IDLE_LIMIT},
+    guests::{GroupCommand, GroupSpawners, GuestEvent, GuestPool, IDLE_LIMIT},
 };
 use alyosha_schedule::Schedule;
 use chrono::Utc;
@@ -416,6 +416,18 @@ struct OpenRequest {
     options: Vec<String>,
 }
 
+/// `/cancel` for a trusted group: its session's turn stops and its open
+/// requests end cancelled.
+fn cancel_group(pool: &GuestPool, requests: &mut Vec<OpenRequest>, group: &str) {
+    let theirs: Vec<u64> = requests
+        .iter()
+        .filter(|open| open.group.as_deref() == Some(group))
+        .map(|open| open.permission.request)
+        .collect();
+    requests.retain(|open| open.group.as_deref() != Some(group));
+    pool.cancel(group, &theirs);
+}
+
 /// Runs the bridge until `alyosha acp` exits, the gateway fails for good, or
 /// SIGTERM. Returns the exit status.
 pub async fn run(
@@ -506,6 +518,32 @@ pub async fn run(
                         tracing::info!(group = %message.group_openid, trusted = pool.is_trusted(&message.group_openid), "a group mention");
                         last_mention.insert(message.group_openid.clone(), message.id.clone());
                         let key = format!("g{}:{}", message.group_openid, message.id);
+                        // Commands in trusted groups: docs/Channels.md#commands-in-trusted-groups
+                        if pool.is_trusted(&message.group_openid) && blocks.is_empty()
+                            && let Some(command) = GuestPool::group_command(&message.content)
+                        {
+                            let group = message.group_openid.clone();
+                            let to = ToGroup { api: api.clone(), group_openid: group.clone() };
+                            let mut reply = reply;
+                            match command {
+                                GroupCommand::New => {
+                                    let text = match pool.new_session(&group).await {
+                                        Ok(()) => "New session started.".to_owned(),
+                                        Err(error) => format!("Failed: {error}"),
+                                    };
+                                    let _ = deliver(&to, &[text], &mut reply).await;
+                                }
+                                GroupCommand::Cancel => cancel_group(&pool, &mut requests, &group),
+                                GroupCommand::Session => {
+                                    group_replies.insert(key.clone(), (group.clone(), reply));
+                                    if let Err(error) = pool.command(&group, &key, &message.content).await {
+                                        tracing::warn!(group = %group, error = %error, "the group session did not start");
+                                        group_replies.remove(&key);
+                                    }
+                                }
+                            }
+                            continue;
+                        }
                         group_replies.insert(key.clone(), (message.group_openid.clone(), reply));
                         let user = format!("qq-{}", message.member_openid);
                         if let Err(error) = pool.prompt(&message.group_openid, &key, &message.content, blocks, &user, &message.name).await {
@@ -561,6 +599,23 @@ pub async fn run(
                     if open.group.is_none() && let Some(key) = open.permission.key {
                         replies.lock().await.insert(key, reply);
                     }
+                    continue;
+                }
+                // `/new <name>` and `/cancel <name>` act on a trusted group.
+                if let Some((command @ ("/new" | "/cancel"), name)) = message.content.trim().split_once(' ') {
+                    let name = name.trim();
+                    let text = match pool.trusted_named(name) {
+                        None => format!("No trusted group named {name}."),
+                        Some(group) if command == "/new" => match pool.new_session(&group).await {
+                            Ok(()) => format!("New session started in group {name}."),
+                            Err(error) => format!("Failed: {error}"),
+                        },
+                        Some(group) => {
+                            cancel_group(&pool, &mut requests, &group);
+                            format!("Cancelled in group {name}.")
+                        }
+                    };
+                    let _ = deliver(&owner, &[text], &mut reply).await;
                     continue;
                 }
                 match message.content.as_str() {
@@ -720,6 +775,36 @@ pub async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cancelling_a_group_drops_only_its_requests() {
+        let request = |group: Option<&str>, id: u64| OpenRequest {
+            group: group.map(str::to_owned),
+            permission: Permission {
+                request: id,
+                tool_call_id: format!("c{id}"),
+                title: String::new(),
+                body: String::new(),
+                options: Vec::new(),
+                key: None,
+            },
+            options: Vec::new(),
+        };
+        let mut requests = vec![
+            request(None, 1),
+            request(Some("G1"), 2),
+            request(Some("G2"), 3),
+            request(Some("G1"), 4),
+        ];
+        let (pool, _events) =
+            GuestPool::new(GroupSpawners::default(), "alyosha-qq", std::env::temp_dir());
+        cancel_group(&pool, &mut requests, "G1");
+        let left: Vec<u64> = requests
+            .iter()
+            .map(|open| open.permission.request)
+            .collect();
+        assert_eq!(left, [1, 3]);
+    }
 
     #[test]
     fn group_mentions_carry_the_group_member_and_name() {

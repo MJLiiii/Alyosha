@@ -797,3 +797,151 @@ async fn replies_render_markdown_and_fall_back_to_plain_text() {
         .unwrap();
     assert!(plain.get("parse_mode").is_none());
 }
+
+/// The messages a log holds with `method`.
+fn with_method(log: &Mutex<Vec<Value>>, method: &str) -> Vec<Value> {
+    log.lock()
+        .unwrap()
+        .iter()
+        .filter(|message| message["method"] == method)
+        .cloned()
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn trusted_groups_take_commands_from_anyone_there() {
+    let harness = start().await;
+    let api = harness.api.clone();
+    // The menu is set for the trusted group only.
+    wait_for(|| {
+        api.calls("setMyCommands")
+            .iter()
+            .any(|body| body["scope"] == json!({"type": "chat", "chat_id": TRUSTED}))
+    })
+    .await;
+
+    // `/new@<username>` without a mention.
+    harness.api.push(json!({"update_id": 1, "message": {
+        "message_id": 1, "from": {"id": 7, "first_name": "Bob"},
+        "chat": {"id": TRUSTED, "type": "supergroup"}, "text": "/new@AlyoshaBot",
+        "entities": [{"type": "bot_command", "offset": 0, "length": 15}],
+    }}));
+    wait_for(|| {
+        api.calls("sendMessage").iter().any(|body| {
+            body["chat_id"] == TRUSTED
+                && body["text"] == "New session started."
+                && body["reply_parameters"]["message_id"] == 1
+        })
+    })
+    .await;
+    let trusted = harness.trusted.lock().unwrap()[0].clone();
+    let news = with_method(&trusted, "session/new");
+    assert_eq!(news.len(), 2, "one to start, one for /new");
+    let folder = harness._root.path().join("groups").join("friends");
+    assert_eq!(news[1]["params"]["cwd"], folder.display().to_string());
+    assert_eq!(
+        news[1]["params"]["_meta"]["alyosha"]["sessionKey"],
+        format!("group:telegram:{TRUSTED}")
+    );
+
+    // `/compact` goes as it is; a message that only mentions it does not.
+    harness
+        .api
+        .push(group_message(2, TRUSTED, 7, "@AlyoshaBot /compact", true));
+    harness.api.push(group_message(
+        3,
+        TRUSTED,
+        7,
+        "@AlyoshaBot please /compact later",
+        true,
+    ));
+    wait_for(|| prompts(&trusted).len() == 2).await;
+    assert_eq!(
+        prompts(&trusted),
+        ["/compact", "Bob: please /compact later"]
+    );
+
+    // `/cancel` stops the group's turn and its open request.
+    harness
+        .api
+        .push(group_message(4, TRUSTED, 7, "@AlyoshaBot approve", true));
+    wait_for(|| {
+        api.calls("sendMessage").iter().any(|body| {
+            body["chat_id"] == OWNER
+                && body["text"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .starts_with("In group friends:")
+        })
+    })
+    .await;
+    harness
+        .api
+        .push(group_message(5, TRUSTED, 8, "@AlyoshaBot /cancel", true));
+    wait_for(|| {
+        trusted.lock().unwrap().iter().any(|message| {
+            message["id"] == 100 && message["result"]["outcome"]["outcome"] == "cancelled"
+        })
+    })
+    .await;
+    assert_eq!(with_method(&trusted, "session/cancel").len(), 1);
+    wait_for(|| {
+        api.calls("editMessageText").iter().any(|body| {
+            body["chat_id"] == OWNER
+                && body["text"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .ends_with("\n\nCancelled.")
+        })
+    })
+    .await;
+
+    // A guest group gets the command as text.
+    harness
+        .api
+        .push(group_message(6, -100, 7, "@AlyoshaBot /new", true));
+    wait_for(|| !harness.guests.lock().unwrap().is_empty()).await;
+    let guest = harness.guests.lock().unwrap()[0].clone();
+    wait_for(|| prompts(&guest).len() == 1).await;
+    assert_eq!(prompts(&guest), ["/new"]);
+    assert!(
+        prompts(&harness.log).is_empty(),
+        "the owner's session hears nothing"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_owner_starts_and_stops_a_group_session_by_name() {
+    let harness = start().await;
+    let api = harness.api.clone();
+    let reply = |text: &'static str| {
+        let api = api.clone();
+        move || {
+            api.calls("sendMessage")
+                .iter()
+                .any(|body| body["chat_id"] == OWNER && body["text"] == text)
+        }
+    };
+    harness.api.push(message(1, OWNER, "/new friends"));
+    wait_for(reply("New session started in group friends.")).await;
+    let trusted = harness.trusted.lock().unwrap()[0].clone();
+    assert_eq!(with_method(&trusted, "session/new").len(), 2);
+    harness.api.push(message(2, OWNER, "/cancel friends"));
+    wait_for(reply("Cancelled in group friends.")).await;
+    assert_eq!(with_method(&trusted, "session/cancel").len(), 1);
+    harness.api.push(message(3, OWNER, "/new nosuch"));
+    wait_for(reply("No trusted group named nosuch.")).await;
+    assert!(
+        !api.calls("sendMessage")
+            .iter()
+            .any(|body| body["chat_id"] == TRUSTED),
+        "the group is not told"
+    );
+    assert!(prompts(&harness.log).is_empty());
+    assert_eq!(
+        with_method(&harness.log, "session/new").len(),
+        1,
+        "only the bridge's start"
+    );
+    assert!(with_method(&harness.log, "session/cancel").is_empty());
+}
