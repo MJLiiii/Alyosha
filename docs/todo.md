@@ -47,11 +47,10 @@ Designed and written. The `recall` tool searches saved sessions by the words and
 
 Designed and written. The model sees images that `read_file`, MCP servers, and browser screenshots return, on the codex, OpenAI, and Claude routes. [Images the tools return](Media.md#images-the-tools-return)
 
-## Later
+## 9. Downloads from the browser
 
-These are already deferred on their components' pages and are less urgent:
+Designed. Playwright MCP saves each download in the session's `downloads/` folder, where the model reads it or sends it with `send_file`. Configuration only. [Downloads](Browser.md#downloads)
 
-- Downloads from the browser.
-- Full desktop control. Screenshots of pages are designed. [Browser deferred work](Browser.md#deferred)
+Full desktop control was considered and dropped on 2026-11-28; screenshots of pages cover what was needed.
 
 [Architecture overview](README.md)
