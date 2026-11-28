@@ -57,7 +57,6 @@ Scheduled tasks are the first thing the model creates that acts later on its own
 ## Deferred
 
 - Running a task in a fresh session of its own instead of the chat's session.
-- Reminders sent as plain text without a model call.
 - Tasks triggered by events, such as a new email, rather than by time.
 
 ## Implementation
