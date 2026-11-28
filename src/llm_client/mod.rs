@@ -180,6 +180,36 @@ pub fn result_text(outcome: &ToolOutcome) -> String {
     }
 }
 
+/// What routes that take only text in tool results show for each image.
+pub const ROUTE_NOT_SHOWN: &str = "[image not shown: this route cannot return images from tools]";
+
+/// A tool result's images, loaded by the caller, in order. A missing one
+/// shows as `[image]`. See `docs/LLMClientGateway.md#images-in-requests`.
+pub(crate) fn result_images<'a>(
+    result: &crate::agent_state::ToolResultEntry,
+    request: &'a ModelRequest,
+) -> Vec<Piece<'a>> {
+    result
+        .images
+        .iter()
+        .map(|image| match request.media.get(&image.sha256) {
+            Some(data) => Piece::Image(data),
+            None => Piece::Text(crate::agent_state::IMAGE_PLACEHOLDER.into()),
+        })
+        .collect()
+}
+
+/// A tool result's text with a line for each image, for routes that take
+/// only text there.
+pub fn result_text_without_images(result: &crate::agent_state::ToolResultEntry) -> String {
+    let mut text = result_text(&result.outcome);
+    for _ in &result.images {
+        text.push('\n');
+        text.push_str(ROUTE_NOT_SHOWN);
+    }
+    text
+}
+
 /// How the conversation summary is introduced to the model.
 pub(crate) fn summary_text(summary: &str) -> String {
     format!("Summary of the earlier conversation, written for you to continue from:\n\n{summary}")
@@ -253,6 +283,78 @@ mod tests {
         assert_eq!(
             gemini.body["contents"][0]["parts"][1],
             json!({"inline_data": {"mime_type": "image/png", "data": "QUJD"}})
+        );
+    }
+
+    /// A call to `read_file` and its result holding the image.
+    fn result_request() -> ModelRequest {
+        use crate::agent_state::{AssistantEntry, AssistantPart, ToolCall, ToolResultEntry};
+        let mut request = request();
+        let HistoryEntry::User(user) = &request.history[0] else {
+            unreachable!()
+        };
+        let image = user.images().next().unwrap().clone();
+        request.history = vec![
+            HistoryEntry::User(UserEntry::text_only(
+                MessageId(1),
+                MessageOrigin::Owner,
+                "look",
+            )),
+            HistoryEntry::Assistant(AssistantEntry {
+                parts: vec![AssistantPart::ToolCall(ToolCall {
+                    id: "c1".into(),
+                    name: "read_file".into(),
+                    arguments: json!({"path": "a.png"}),
+                })],
+            }),
+            HistoryEntry::ToolResult(ToolResultEntry {
+                call_id: "c1".into(),
+                outcome: ToolOutcome::Success("a.png: image/png, 1×1".into()),
+                images: vec![image],
+            }),
+        ];
+        request
+    }
+
+    #[test]
+    fn result_images_follow_their_text_where_the_route_takes_them() {
+        let request = result_request();
+        let responses = responses::encode(&request, true, None);
+        assert_eq!(
+            responses.body["input"][2]["output"],
+            json!([
+                {"type": "input_text", "text": "a.png: image/png, 1×1"},
+                {"type": "input_image", "image_url": "data:image/png;base64,QUJD", "detail": "auto"},
+            ])
+        );
+        let claude = claude::encode(&request);
+        assert_eq!(
+            claude.body["messages"][2]["content"][0]["content"],
+            json!([
+                {"type": "text", "text": "a.png: image/png, 1×1"},
+                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "QUJD"}},
+            ])
+        );
+        let line = format!("a.png: image/png, 1×1\n{ROUTE_NOT_SHOWN}");
+        let chat = chat::encode(&request);
+        assert_eq!(chat.body["messages"][3]["content"], json!(line));
+        let gemini = gemini::encode(&request);
+        assert_eq!(
+            gemini.body["contents"][2]["parts"][0]["functionResponse"]["response"]["output"],
+            json!(line)
+        );
+        // Without images, a result is a string as before.
+        let mut plain = request.clone();
+        if let HistoryEntry::ToolResult(result) = &mut plain.history[2] {
+            result.images.clear();
+        }
+        assert_eq!(
+            responses::encode(&plain, true, None).body["input"][2]["output"],
+            json!("a.png: image/png, 1×1")
+        );
+        assert_eq!(
+            claude::encode(&plain).body["messages"][2]["content"][0]["content"],
+            json!("a.png: image/png, 1×1")
         );
     }
 

@@ -285,6 +285,7 @@ async fn tool_calls_and_results_are_searched() {
             HistoryEntry::ToolResult(ToolResultEntry {
                 call_id: "c1".into(),
                 outcome: ToolOutcome::Success("Anna: meet at Kalverstraat 12".into()),
+                images: Vec::new(),
             }),
         ],
     )

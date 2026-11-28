@@ -455,6 +455,7 @@ async fn call(
         Err(_) => return Err(gone()),
     };
     let text = convert(&result);
+    let images = images(&result);
     if result["isError"].as_bool() == Some(true) {
         return Err(ToolError::failed(text));
     }
@@ -465,6 +466,7 @@ async fn call(
         .map(|environment| LogCapture::new(environment.logs.clone(), text.len() as u64, "mcp"));
     Ok(ToolOutput {
         text,
+        images,
         notice: None,
         kind: OutputKind::Logged {
             status: None,
@@ -473,7 +475,26 @@ async fn call(
     })
 }
 
-/// A `tools/call` result as text.
+/// The images of a `tools/call` result, decoded from base64. One that does
+/// not decode is left empty, so preparing it reports that it could not be
+/// read. See `docs/Media.md#images-in-tool-results`.
+pub fn images(result: &Value) -> Vec<crate::media::RawImage> {
+    use base64::Engine;
+    result["content"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|block| block["type"] == "image")
+        .map(|block| crate::media::RawImage {
+            mime: block["mimeType"].as_str().unwrap_or("unknown").to_owned(),
+            bytes: base64::engine::general_purpose::STANDARD
+                .decode(block["data"].as_str().unwrap_or_default())
+                .unwrap_or_default(),
+        })
+        .collect()
+}
+
+/// A `tools/call` result as text. Images are returned apart, by `images`.
 pub fn convert(result: &Value) -> String {
     let content = result["content"].as_array().cloned().unwrap_or_default();
     if content.is_empty()
@@ -483,12 +504,9 @@ pub fn convert(result: &Value) -> String {
     }
     content
         .iter()
+        .filter(|block| block["type"] != "image")
         .map(|block| match block["type"].as_str().unwrap_or_default() {
             "text" => block["text"].as_str().unwrap_or_default().to_owned(),
-            "image" => format!(
-                "[image omitted: {}]",
-                block["mimeType"].as_str().unwrap_or("unknown")
-            ),
             "audio" => format!(
                 "[audio omitted: {}]",
                 block["mimeType"].as_str().unwrap_or("unknown")
@@ -511,6 +529,10 @@ pub fn convert(result: &Value) -> String {
 mod tests {
     use super::*;
 
+    fn images_of(result: &Value) -> Vec<u8> {
+        images(result).remove(0).bytes
+    }
+
     #[test]
     fn replies_convert_to_text() {
         let result = json!({"content": [
@@ -522,8 +544,18 @@ mod tests {
         ]});
         assert_eq!(
             convert(&result),
-            "one\n[image omitted: image/png]\n[resource: file:///a]\nembedded\n[resource omitted: file:///c]"
+            "one\n[resource: file:///a]\nembedded\n[resource omitted: file:///c]"
         );
+        let images = images(&result);
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].mime, "image/png");
+        assert!(
+            images[0].bytes.is_empty(),
+            "\"x\" is not base64 of anything"
+        );
+        let png =
+            json!({"content": [{"type": "image", "mimeType": "image/png", "data": "iVBORw0K"}]});
+        assert_eq!(images_of(&png), [0x89, b'P', b'N', b'G', 0x0d, 0x0a]);
         assert_eq!(
             convert(&json!({"content": [], "structuredContent": {"a": 1}})),
             "{\"a\":1}"

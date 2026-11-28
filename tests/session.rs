@@ -522,7 +522,8 @@ async fn mcp_tools_register_call_and_convert() {
 
     let (events, results, _) = turn(&mut started, "Use the fake server.").await;
     assert_eq!(success(&results[0].1), "hello");
-    assert_eq!(success(&results[1].1), "[image omitted: image/png]");
+    // Without media services the image is not kept.
+    assert_eq!(success(&results[1].1), alyosha::media::NOT_KEPT);
     assert_eq!(error(&results[2].1), "it broke");
     assert!(error(&results[3].1).starts_with("Invalid arguments for mcp__fake__echo"));
     assert_eq!(

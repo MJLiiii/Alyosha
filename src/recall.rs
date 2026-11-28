@@ -595,6 +595,7 @@ pub fn recall_tool() -> RegisteredTool {
                     status: None,
                     capture,
                 },
+                images: Vec::new(),
             })
         }),
     }

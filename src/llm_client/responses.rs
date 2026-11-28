@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use super::{
     ModelError, ModelRequest, Piece, TokenUsage, data_url,
     gateway::{Assembler, Encoded, arguments_text, parse_arguments, stream_error},
-    result_text,
+    result_images, result_text,
     sse::SseEvent,
     summary_text, user_pieces,
 };
@@ -62,11 +62,26 @@ pub(crate) fn encode(
                     }
                 }
             }
-            HistoryEntry::ToolResult(result) => input.push(json!({
-                "type": "function_call_output",
-                "call_id": result.call_id.0,
-                "output": result_text(&result.outcome),
-            })),
+            HistoryEntry::ToolResult(result) => {
+                let text = result_text(&result.outcome);
+                let output = if result.images.is_empty() {
+                    json!(text)
+                } else {
+                    let mut parts = vec![json!({"type": "input_text", "text": text})];
+                    for piece in result_images(result, request) {
+                        parts.push(match piece {
+                            Piece::Text(text) => json!({"type": "input_text", "text": text}),
+                            Piece::Image(data) => json!({"type": "input_image", "image_url": data_url(data), "detail": "auto"}),
+                        });
+                    }
+                    Value::Array(parts)
+                };
+                input.push(json!({
+                    "type": "function_call_output",
+                    "call_id": result.call_id.0,
+                    "output": output,
+                }));
+            }
         }
     }
     let mut body = json!({

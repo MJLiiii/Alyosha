@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use super::{
     ModelError, ModelRequest, Piece, TokenUsage, data_url,
     gateway::{Assembler, Encoded, arguments_text, parse_arguments, stream_error},
-    result_text,
+    result_text_without_images,
     sse::SseEvent,
     summary_text, user_pieces,
 };
@@ -71,7 +71,7 @@ pub(crate) fn encode(request: &ModelRequest) -> Encoded {
             HistoryEntry::ToolResult(result) => messages.push(json!({
                 "role": "tool",
                 "tool_call_id": result.call_id.0,
-                "content": result_text(&result.outcome),
+                "content": result_text_without_images(result),
             })),
         }
     }

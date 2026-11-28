@@ -294,6 +294,10 @@ pub struct ToolResultEntry {
     /// The model's original call ID.
     pub call_id: CallId,
     pub outcome: ToolOutcome,
+    /// Images the tool returned, after its text. An entry without images is
+    /// stored as before. See `docs/Media.md#images-in-tool-results`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<MediaRef>,
 }
 
 /// How a tool call ended, as recorded in history.

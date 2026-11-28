@@ -37,6 +37,30 @@ pub const INBOX: &str = "inbox";
 pub const NOT_SHOWN: &str = "[image not shown: this model cannot see images]";
 /// The status line while attachments are prepared.
 pub const READING: &str = "Reading attachments…";
+/// The most images one tool result shows.
+pub const MAX_RESULT_IMAGES: usize = 4;
+/// The largest image file `read_file` opens.
+pub const MAX_IMAGE_FILE: u64 = 20 * 1024 * 1024;
+/// What a session without a media store shows instead of a tool's image.
+pub const NOT_KEPT: &str = "[image not shown: this session cannot keep images]";
+
+/// An image a tool returned, before it is prepared.
+/// See `docs/Media.md#images-in-tool-results`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawImage {
+    pub mime: String,
+    pub bytes: Vec<u8>,
+}
+
+/// What a session without media services records for a tool's images.
+pub fn unkept_lines(images: &[RawImage]) -> Vec<String> {
+    let shown = images.len().min(MAX_RESULT_IMAGES);
+    let mut lines = vec![NOT_KEPT.to_owned(); shown];
+    if images.len() > shown {
+        lines.push(format!("[{} more images not shown]", images.len() - shown));
+    }
+    lines
+}
 
 /// What a session needs to prepare attachments.
 pub struct MediaServices {
@@ -484,6 +508,43 @@ impl MediaServices {
         let mut all = vec![UserPart::Text(line.text())];
         all.extend(parts);
         Some(all)
+    }
+
+    /// Prepares the images a tool returned: the first four are decoded,
+    /// shrunk, and stored like an attachment's. Returns their references and
+    /// the lines to add to the result's text for those that are not shown.
+    pub async fn prepare_result_images(
+        &self,
+        images: Vec<RawImage>,
+    ) -> (Vec<MediaRef>, Vec<String>) {
+        let total = images.len();
+        let mut references = Vec::new();
+        let mut lines = Vec::new();
+        for raw in images.into_iter().take(MAX_RESULT_IMAGES) {
+            if !self.images {
+                lines.push(NOT_SHOWN.to_owned());
+                continue;
+            }
+            let bytes = raw.bytes;
+            let encoded =
+                tokio::task::spawn_blocking(move || image::normalize(&bytes, image::MAX_SIDE))
+                    .await
+                    .unwrap_or_else(|error| Err(error.to_string()));
+            match encoded {
+                Ok(encoded) => match self.store_image(encoded).await {
+                    Ok(reference) => references.push(reference),
+                    Err(error) => lines.push(format!("[image could not be read: {error}]")),
+                },
+                Err(error) => lines.push(format!("[image could not be read: {error}]")),
+            }
+        }
+        if total > MAX_RESULT_IMAGES {
+            lines.push(format!(
+                "[{} more images not shown]",
+                total - MAX_RESULT_IMAGES
+            ));
+        }
+        (references, lines)
     }
 
     async fn store_image(&self, encoded: image::Encoded) -> Result<MediaRef, String> {

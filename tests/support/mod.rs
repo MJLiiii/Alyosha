@@ -249,6 +249,7 @@ pub fn tool_result(call_id: &str, outcome: ToolOutcome) -> HistoryEntry {
     HistoryEntry::ToolResult(ToolResultEntry {
         call_id: call_id.into(),
         outcome,
+        images: Vec::new(),
     })
 }
 

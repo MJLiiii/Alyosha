@@ -28,7 +28,7 @@ pub fn read_file_tool() -> RegisteredTool {
         definition: ToolDefinition {
             name: "read_file".into(),
             description: format!(
-                "Read a chunk of UTF-8 text from a file: a workspace file (relative to the working directory, or under /workspace), a session log_path, or a skill file under /skills. Returns at most max_bytes (default and maximum {READ_LIMIT}) from the byte offset (default 0). When more text remains, the result ends with next_offset; pass it as offset to continue. List folders with run_command."
+                "Read a chunk of UTF-8 text from a file: a workspace file (relative to the working directory, or under /workspace), a session log_path, or a skill file under /skills. A PNG, JPEG, GIF, or WebP file returns the image itself for you to look at. Returns at most max_bytes (default and maximum {READ_LIMIT}) from the byte offset (default 0). When more text remains, the result ends with next_offset; pass it as offset to continue. List folders with run_command."
             ),
             input_schema: json!({
                 "type": "object",
@@ -48,12 +48,75 @@ pub fn read_file_tool() -> RegisteredTool {
             let max_bytes = arguments["max_bytes"]
                 .as_u64()
                 .map_or(READ_LIMIT, |max| (max as usize).min(READ_LIMIT));
-            let file = context
-                .environment()?
-                .open_file(path, FileAccess::Read, context.scope)?;
+            let mut file =
+                context
+                    .environment()?
+                    .open_file(path, FileAccess::Read, context.scope)?;
+            if let Some(mime) = image_mime(&mut file.file, path)? {
+                return read_image(file.file, file.len, path, mime, context.scope);
+            }
             read_chunk(file.file, file.len, path, offset, max_bytes)
         }),
     }
+}
+
+/// The MIME type of an image file Alyosha decodes, from its first bytes.
+/// Leaves the file at its start.
+fn image_mime(file: &mut std::fs::File, path: &str) -> Result<Option<&'static str>, ToolError> {
+    let mut head = [0u8; 16];
+    let read = file
+        .read(&mut head)
+        .map_err(|error| ToolError::failed(format!("{path}: {error}")))?;
+    file.seek(SeekFrom::Start(0))
+        .map_err(|error| ToolError::failed(format!("{path}: {error}")))?;
+    Ok(
+        crate::media::image::format(&head[..read]).map(|format| match format {
+            image::ImageFormat::Png => "image/png",
+            image::ImageFormat::Gif => "image/gif",
+            image::ImageFormat::WebP => "image/webp",
+            _ => "image/jpeg",
+        }),
+    )
+}
+
+/// An image file as a line describing it and the image for the model.
+/// See `docs/Media.md#images-in-tool-results`.
+fn read_image(
+    mut file: std::fs::File,
+    len: u64,
+    path: &str,
+    mime: &'static str,
+    scope: Scope,
+) -> Result<ToolOutput, ToolError> {
+    if scope == Scope::CodeMode {
+        return Err(ToolError::failed(format!(
+            "{path} is an image. Code Mode reads text only."
+        )));
+    }
+    if len > crate::media::MAX_IMAGE_FILE {
+        return Err(ToolError::failed(format!("{path} is an image over 20 MB.")));
+    }
+    let mut bytes = Vec::with_capacity(len as usize);
+    file.read_to_end(&mut bytes)
+        .map_err(|error| ToolError::failed(format!("{path}: {error}")))?;
+    let size = image::ImageReader::new(std::io::Cursor::new(&bytes))
+        .with_guessed_format()
+        .ok()
+        .and_then(|reader| reader.into_dimensions().ok())
+        .map(|(width, height)| format!(", {width}×{height}"))
+        .unwrap_or_default();
+    Ok(ToolOutput {
+        text: format!(
+            "{path}: {mime}{size}, {}",
+            crate::media::size_text(bytes.len())
+        ),
+        notice: None,
+        kind: OutputKind::Plain,
+        images: vec![crate::media::RawImage {
+            mime: mime.to_owned(),
+            bytes,
+        }],
+    })
 }
 
 /// Reads whole characters starting at `offset`.
@@ -97,6 +160,7 @@ pub fn read_chunk(
         text,
         notice: None,
         kind: OutputKind::FileChunk { offset, more },
+        images: Vec::new(),
     })
 }
 
@@ -236,6 +300,7 @@ pub fn run_command_tool() -> RegisteredTool {
                     status: Some(output.status.to_string()),
                     capture: Some(capture),
                 },
+                images: Vec::new(),
             })
         }),
     }

@@ -117,7 +117,9 @@ pub fn entry_tokens(entry: &HistoryEntry) -> u64 {
                 })
                 .sum(),
             HistoryEntry::ToolResult(result) => {
-                text_tokens(&result.call_id.0) + text_tokens(&result_text(&result.outcome))
+                text_tokens(&result.call_id.0)
+                    + text_tokens(&result_text(&result.outcome))
+                    + IMAGE_TOKENS * result.images.len() as u64
             }
         }
 }
@@ -496,6 +498,10 @@ fn transcript(previous: Option<&str>, entries: &[HistoryEntry]) -> String {
                     text.push('\n');
                     text.push_str(metadata);
                 }
+                for _ in &result.images {
+                    text.push('\n');
+                    text.push_str(crate::agent_state::IMAGE_PLACEHOLDER);
+                }
                 text.push('\n');
             }
         }
@@ -663,6 +669,7 @@ mod tests {
                 offset: 0,
                 more: true,
             },
+            images: Vec::new(),
         };
         let (outcome, used, _) = record(Ok(chunk), 2);
         assert_eq!(
@@ -678,6 +685,7 @@ mod tests {
                     offset: 10,
                     more: false,
                 },
+                images: Vec::new(),
             }),
             100,
         );
@@ -696,6 +704,7 @@ mod tests {
                 status: Some("0".into()),
                 capture: Some(LogCapture::new(logs.clone(), text.len() as u64, "cmd")),
             },
+            images: Vec::new(),
         };
         let (ToolOutcome::Success(recorded), used, _) = record(Ok(output), RESULT_LIMIT) else {
             panic!()
@@ -715,6 +724,7 @@ mod tests {
                 status: Some("1".into()),
                 capture: Some(LogCapture::new(logs, 5, "cmd")),
             },
+            images: Vec::new(),
         };
         let (ToolOutcome::Success(recorded), _, _) = record(Ok(output), 0) else {
             panic!()
@@ -748,6 +758,7 @@ mod tests {
             HistoryEntry::ToolResult(ToolResultEntry {
                 call_id: CallId::from("c"),
                 outcome: ToolOutcome::Success("x".into()),
+                images: Vec::new(),
             }),
             HistoryEntry::Assistant(AssistantEntry {
                 parts: vec![AssistantPart::Text("next".into())],
@@ -780,6 +791,7 @@ mod tests {
         let entries = vec![HistoryEntry::ToolResult(ToolResultEntry {
             call_id: CallId::from("c1"),
             outcome: ToolOutcome::Success(long),
+            images: Vec::new(),
         })];
         let text = transcript(Some("before"), &entries);
         assert!(text.starts_with("Previous summary:\nbefore\n\n"));
@@ -787,5 +799,26 @@ mod tests {
         assert!(
             text.contains("[excerpt: 2048 of 5000 bytes]\n[log_path: /session-logs/cmd-1.log]")
         );
+    }
+
+    #[test]
+    fn result_images_show_as_placeholders_and_cost_an_image_each() {
+        let image = crate::agent_state::MediaRef {
+            sha256: "ab".into(),
+            mime: "image/png".into(),
+            width: 1,
+            height: 1,
+        };
+        let mut result = ToolResultEntry {
+            call_id: CallId::from("c1"),
+            outcome: ToolOutcome::Success("a.png".into()),
+            images: Vec::new(),
+        };
+        let plain = entry_tokens(&HistoryEntry::ToolResult(result.clone()));
+        result.images = vec![image.clone(), image];
+        let entry = HistoryEntry::ToolResult(result);
+        assert_eq!(entry_tokens(&entry), plain + 2 * IMAGE_TOKENS);
+        let text = transcript(None, &[entry]);
+        assert!(text.contains("a.png\n[image]\n[image]\n"), "{text}");
     }
 }

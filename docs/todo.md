@@ -45,7 +45,7 @@ Designed and written. The `recall` tool searches saved sessions by the words and
 
 ## 8. Images the tools return
 
-Designed. The model sees images that `read_file`, MCP servers, and browser screenshots return, on the codex, OpenAI, and Claude routes. [Images the tools return](Media.md#images-the-tools-return)
+Designed and written. The model sees images that `read_file`, MCP servers, and browser screenshots return, on the codex, OpenAI, and Claude routes. [Images the tools return](Media.md#images-the-tools-return)
 
 ## Later
 

@@ -5,7 +5,7 @@ use serde_json::{Map, Value, json};
 use super::{
     ModelError, ModelRequest, Piece, TokenUsage,
     gateway::{Assembler, Encoded, parse_arguments, stream_error},
-    result_text,
+    result_images, result_text,
     sse::SseEvent,
     summary_text, user_pieces,
 };
@@ -14,6 +14,29 @@ use crate::agent_state::{
 };
 
 pub(crate) const ROUTE: &str = "claude";
+
+/// A `tool_result`'s content: the text alone, or a text block and an image
+/// block per image.
+fn claude_result_content(
+    result: &crate::agent_state::ToolResultEntry,
+    request: &ModelRequest,
+) -> Value {
+    let text = result_text(&result.outcome);
+    if result.images.is_empty() {
+        return json!(text);
+    }
+    let mut blocks = vec![json!({"type": "text", "text": text})];
+    for piece in result_images(result, request) {
+        blocks.push(match piece {
+            Piece::Text(text) => json!({"type": "text", "text": text}),
+            Piece::Image(data) => json!({
+                "type": "image",
+                "source": {"type": "base64", "media_type": data.mime, "data": data.base64},
+            }),
+        });
+    }
+    Value::Array(blocks)
+}
 
 /// The Messages API requires an output limit and publishes no default, so
 /// ordinary requests reserve this much.
@@ -78,7 +101,7 @@ pub(crate) fn encode(request: &ModelRequest) -> Encoded {
                 json!({
                     "type": "tool_result",
                     "tool_use_id": result.call_id.0,
-                    "content": result_text(&result.outcome),
+                    "content": claude_result_content(result, request),
                     "is_error": !matches!(result.outcome, ToolOutcome::Success(_)),
                 }),
             ),

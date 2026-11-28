@@ -160,6 +160,7 @@ fn sample() -> Vec<HistoryEntry> {
         HistoryEntry::ToolResult(ToolResultEntry {
             call_id: "call_a".into(),
             outcome: ToolOutcome::Success("alpha".into()),
+            images: Vec::new(),
         }),
         HistoryEntry::Assistant(AssistantEntry {
             parts: vec![AssistantPart::Text("It says alpha.".into())],

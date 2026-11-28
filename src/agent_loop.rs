@@ -731,6 +731,32 @@ impl Session {
         prepared.filter(|_| !cancel.is_cancelled())
     }
 
+    /// Stores the images a tool returned and adds a line to the result's
+    /// text for each one not shown. See `docs/Media.md#images-in-tool-results`.
+    async fn prepare_result_images(
+        &self,
+        outcome: &mut ToolOutcome,
+        raw: Vec<crate::media::RawImage>,
+    ) -> Vec<crate::agent_state::MediaRef> {
+        if raw.is_empty() {
+            return Vec::new();
+        }
+        let ToolOutcome::Success(text) = outcome else {
+            return Vec::new();
+        };
+        let (references, lines) = match &self.services.media {
+            Some(media) => media.prepare_result_images(raw).await,
+            None => (Vec::new(), crate::media::unkept_lines(&raw)),
+        };
+        for line in lines {
+            if !text.is_empty() {
+                text.push('\n');
+            }
+            text.push_str(&line);
+        }
+        references
+    }
+
     /// Loads the bytes of every image the request carries. A missing row
     /// fails the turn with its hash.
     async fn load_media(&self, request: &mut ModelRequest) -> Result<(), String> {
@@ -738,11 +764,13 @@ impl Session {
         let hashes: Vec<String> = request
             .history
             .iter()
-            .filter_map(|entry| match entry {
-                HistoryEntry::User(user) => Some(user.images()),
-                _ => None,
+            .flat_map(|entry| -> Vec<&crate::agent_state::MediaRef> {
+                match entry {
+                    HistoryEntry::User(user) => user.images().collect(),
+                    HistoryEntry::ToolResult(result) => result.images.iter().collect(),
+                    HistoryEntry::Assistant(_) => Vec::new(),
+                }
             })
-            .flatten()
             .map(|image| image.sha256.clone())
             .collect();
         if hashes.is_empty() {
@@ -961,7 +989,7 @@ impl Session {
             // Name and ID only: arguments and output stay out of the log.
             tracing::info!(tool = %call.name, call_id = %call.id.0, "tool call started");
             let started = std::time::Instant::now();
-            let result = self
+            let mut result = self
                 .executor
                 .dispatch(
                     &call.name,
@@ -971,12 +999,18 @@ impl Session {
                     Some(call.id.clone()),
                 )
                 .await;
+            // A tool error carries no images.
+            let raw_images = match &mut result {
+                Ok(output) => std::mem::take(&mut output.images),
+                Err(_) => Vec::new(),
+            };
             // Keep a little room for each later result's metadata.
             let reserve = 120 * (calls.len() - index - 1);
             let allowance = context_manager::RESULT_LIMIT
                 .min(batch_left)
                 .min(room.saturating_sub(reserve));
-            let (outcome, used, notice) = context_manager::record(result, allowance);
+            let (mut outcome, used, notice) = context_manager::record(result, allowance);
+            let images = self.prepare_result_images(&mut outcome, raw_images).await;
             tracing::info!(
                 tool = %call.name,
                 call_id = %call.id.0,
@@ -991,7 +1025,13 @@ impl Session {
             batch_left = batch_left.saturating_sub(used);
             room = room.saturating_sub(used + 120);
             let ok = matches!(outcome, ToolOutcome::Success(_));
-            let saved = self.append(tool_result(&call.id, outcome)).await;
+            let saved = self
+                .append(HistoryEntry::ToolResult(ToolResultEntry {
+                    call_id: call.id.clone(),
+                    outcome,
+                    images,
+                }))
+                .await;
             set_phase(
                 &mut self.lock_state(),
                 TurnPhase::RunningTools {
@@ -1126,5 +1166,6 @@ fn tool_result(call_id: &CallId, outcome: ToolOutcome) -> HistoryEntry {
     HistoryEntry::ToolResult(ToolResultEntry {
         call_id: call_id.clone(),
         outcome,
+        images: Vec::new(),
     })
 }

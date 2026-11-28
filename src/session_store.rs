@@ -249,6 +249,7 @@ pub async fn repair(
         let entry = HistoryEntry::ToolResult(ToolResultEntry {
             call_id: call_id.clone(),
             outcome: ToolOutcome::Error(INTERRUPTED_CALL.into()),
+            images: Vec::new(),
         });
         store.append(session.id, session.next_seq, &entry).await?;
         session.next_seq += 1;
@@ -1372,6 +1373,7 @@ mod tests {
             HistoryEntry::ToolResult(ToolResultEntry {
                 call_id: "a".into(),
                 outcome: ToolOutcome::Success("alpha".into()),
+                images: Vec::new(),
             }),
         ]
     }
@@ -1383,12 +1385,34 @@ mod tests {
             .chain([HistoryEntry::ToolResult(ToolResultEntry {
                 call_id: "c".into(),
                 outcome: ToolOutcome::Cancelled,
+                images: Vec::new(),
             })])
         {
             let value = encode(&entry);
             assert_eq!(value["v"], 2);
             assert_eq!(decode(value).unwrap(), entry);
         }
+        // A result with images keeps them; one stored before has none.
+        let with_images = HistoryEntry::ToolResult(ToolResultEntry {
+            call_id: "d".into(),
+            outcome: ToolOutcome::Success("a.png".into()),
+            images: vec![MediaRef {
+                sha256: "cd".into(),
+                mime: "image/png".into(),
+                width: 3,
+                height: 4,
+            }],
+        });
+        assert_eq!(decode(encode(&with_images)).unwrap(), with_images);
+        assert!(
+            encode(&sample()[2]).get("images").is_none(),
+            "stored as before"
+        );
+        let old = json!({"v": 2, "type": "tool_result", "call_id": "e", "outcome": {"type": "success", "value": "x"}});
+        let HistoryEntry::ToolResult(old) = decode(old).unwrap() else {
+            panic!("a tool result");
+        };
+        assert!(old.images.is_empty());
         let mut future = encode(&sample()[0]);
         future["v"] = 3.into();
         assert!(decode(future).unwrap_err().contains("format 3"));

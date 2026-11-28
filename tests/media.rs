@@ -555,3 +555,196 @@ async fn send_file_copies_the_file_and_tells_the_front_end() {
     started.driver.end().await;
     assert!(!file.path.exists());
 }
+
+fn png(width: u32, height: u32) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    DynamicImage::ImageRgb8(RgbImage::from_pixel(width, height, Rgb([200, 30, 30])))
+        .write_to(
+            &mut std::io::Cursor::new(&mut bytes),
+            image::ImageFormat::Png,
+        )
+        .unwrap();
+    bytes
+}
+
+/// The recorded tool results of a session, in order.
+fn results(driver: &SessionDriver) -> Vec<alyosha::agent_state::ToolResultEntry> {
+    driver
+        .snapshot()
+        .history
+        .iter()
+        .filter_map(|entry| match entry {
+            HistoryEntry::ToolResult(result) => Some(result.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn read_file_shows_an_image_and_code_mode_refuses_it() {
+    let home = home();
+    let fakes = Fakes::new();
+    fs::write(home.workspace.join("chart.png"), png(4000, 3000)).unwrap();
+    fs::write(home.workspace.join("notes.txt"), "hello").unwrap();
+    fs::write(home.workspace.join("big.jpg"), jpeg(8, 8)).unwrap();
+    fs::File::options()
+        .write(true)
+        .open(home.workspace.join("big.jpg"))
+        .unwrap()
+        .set_len(21 * 1024 * 1024)
+        .unwrap();
+    let script = "async (tools) => { try { await tools.read_file({ path: \"chart.png\" }); return \"read\"; } catch (e) { return String(e.message || e); } }";
+    let model = ScriptedModel::new();
+    model.reply(vec![
+        call("a", "read_file", json!({"path": "chart.png"})),
+        call("b", "read_file", json!({"path": "notes.txt"})),
+        call("c", "read_file", json!({"path": "big.jpg"})),
+        call("d", "execute_code", json!({"code": script})),
+    ]);
+    model.reply(vec![text("A red chart.")]);
+    let mut started = open(&home, model.clone(), &fakes, &Config::default()).await;
+    let (_, _, outcome) = send(
+        &started.driver,
+        &mut started.events,
+        "Look at chart.png",
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(outcome, TurnOutcome::Completed);
+
+    let results = results(&started.driver);
+    let ToolOutcome::Success(line) = &results[0].outcome else {
+        panic!("{:?}", results[0]);
+    };
+    assert!(
+        line.starts_with("chart.png: image/png, 4000×3000, "),
+        "{line}"
+    );
+    assert_eq!(results[0].images.len(), 1);
+    let image = &results[0].images[0];
+    assert_eq!((image.width, image.height), (2048, 1536));
+    assert_eq!(fakes.store.len(), 1);
+    assert_eq!(results[1].outcome, ToolOutcome::Success("hello".into()));
+    assert!(results[1].images.is_empty());
+    let ToolOutcome::Error(big) = &results[2].outcome else {
+        panic!("{:?}", results[2]);
+    };
+    assert!(big.contains("big.jpg is an image over 20 MB."), "{big}");
+    let ToolOutcome::Success(code) = &results[3].outcome else {
+        panic!("{:?}", results[3]);
+    };
+    assert!(
+        code.contains("chart.png is an image. Code Mode reads text only."),
+        "{code}"
+    );
+    // The next request carries the image's bytes.
+    let request = &model.requests()[1];
+    assert_eq!(request.media[&image.sha256].mime, image.mime);
+}
+
+/// A minimal session with one tool, `pictures`, that returns `images`.
+fn picture_session(
+    model: Arc<ScriptedModel>,
+    fakes: &Fakes,
+    config: &Config,
+    images: Vec<alyosha::media::RawImage>,
+) -> (
+    SessionDriver,
+    tokio::sync::mpsc::UnboundedReceiver<SessionEvent>,
+) {
+    use alyosha::tools::{RegisteredTool, ToolDefinition, ToolOutput, handler};
+    let mut registry = ToolRegistry::new();
+    registry
+        .register(RegisteredTool {
+            definition: ToolDefinition {
+                name: "pictures".into(),
+                description: "Return pictures.".into(),
+                input_schema: json!({"type": "object"}),
+                requires_approval: false,
+            },
+            handler: handler(move |_, _| {
+                let images = images.clone();
+                async move {
+                    Ok(ToolOutput {
+                        text: "Here they are.".into(),
+                        images,
+                        ..ToolOutput::default()
+                    })
+                }
+            }),
+        })
+        .unwrap();
+    let mut setup = SessionSetup::minimal(
+        "chatgpt",
+        "test-model",
+        chrono_tz::Europe::Amsterdam,
+        model,
+        registry,
+        Arc::new(FixedClock(
+            Utc.with_ymd_and_hms(2026, 11, 25, 9, 2, 0).unwrap(),
+        )),
+    );
+    setup.services = SessionServices {
+        media: Some(fakes.setup().services(config)),
+        ..SessionServices::default()
+    };
+    SessionDriver::start(setup)
+}
+
+fn raw(bytes: Vec<u8>) -> alyosha::media::RawImage {
+    alyosha::media::RawImage {
+        mime: "image/png".into(),
+        bytes,
+    }
+}
+
+#[tokio::test]
+async fn a_result_shows_four_images_and_lines_for_the_rest() {
+    let fakes = Fakes::new();
+    let model = ScriptedModel::new();
+    model.reply(vec![call("p", "pictures", json!({}))]);
+    model.reply(vec![text("Seen.")]);
+    let mut images = vec![raw(b"not an image".to_vec())];
+    images.extend((1..=5).map(|side| raw(png(side * 10, 10))));
+    let (driver, mut events) =
+        picture_session(model.clone(), &fakes, &Config::default(), images.clone());
+    let (_, _, outcome) = send(&driver, &mut events, "Show me", Vec::new()).await;
+    assert_eq!(outcome, TurnOutcome::Completed);
+    let result = &results(&driver)[0];
+    assert_eq!(result.images.len(), 3, "the first four, one broken");
+    assert_eq!(
+        result
+            .images
+            .iter()
+            .map(|image| image.width)
+            .collect::<Vec<_>>(),
+        [10, 20, 30]
+    );
+    let ToolOutcome::Success(shown) = &result.outcome else {
+        panic!("{result:?}");
+    };
+    assert!(
+        shown.starts_with("Here they are.\n[image could not be read: "),
+        "{shown}"
+    );
+    assert!(shown.ends_with("\n[2 more images not shown]"), "{shown}");
+    assert_eq!(fakes.store.len(), 3);
+    assert_eq!(model.requests()[1].media.len(), 3);
+
+    // A model without images gets a line for each and nothing is stored.
+    let fakes = Fakes::new();
+    let model = ScriptedModel::new();
+    model.reply(vec![call("p", "pictures", json!({}))]);
+    model.reply(vec![text("Blind.")]);
+    let mut config = Config::default();
+    config.model.images = false;
+    let (driver, mut events) = picture_session(model, &fakes, &config, images[1..3].to_vec());
+    send(&driver, &mut events, "Show me", Vec::new()).await;
+    let result = &results(&driver)[0];
+    assert!(result.images.is_empty());
+    assert_eq!(
+        result.outcome,
+        ToolOutcome::Success(format!("Here they are.\n{NOT_SHOWN}\n{NOT_SHOWN}"))
+    );
+    assert!(fakes.store.is_empty());
+}

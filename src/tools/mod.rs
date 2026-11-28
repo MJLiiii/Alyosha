@@ -141,6 +141,9 @@ pub struct ToolOutput {
     /// does not see it.
     pub notice: Option<String>,
     pub kind: OutputKind,
+    /// Images for the model, which the Agent Loop prepares and stores.
+    /// See `docs/Media.md#images-in-tool-results`.
+    pub images: Vec<crate::media::RawImage>,
 }
 
 /// What the Agent Loop needs to record an output within its limits.
@@ -162,7 +165,10 @@ pub enum OutputKind {
 
 impl PartialEq for ToolOutput {
     fn eq(&self, other: &Self) -> bool {
-        self.text == other.text && self.notice == other.notice && self.kind == other.kind
+        self.text == other.text
+            && self.notice == other.notice
+            && self.kind == other.kind
+            && self.images == other.images
     }
 }
 

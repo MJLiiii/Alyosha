@@ -14,7 +14,7 @@ use serde_json::{Map, Value, json};
 use super::{
     ModelError, ModelRequest, Piece, TokenUsage,
     gateway::{Assembler, Encoded, stream_error},
-    result_text,
+    result_text, result_text_without_images,
     sse::SseEvent,
     summary_text, user_pieces,
 };
@@ -84,7 +84,9 @@ pub(crate) fn encode(request: &ModelRequest) -> Encoded {
             HistoryEntry::ToolResult(result) => {
                 let name = names.get(&result.call_id.0).cloned().unwrap_or_default();
                 let response = match &result.outcome {
-                    ToolOutcome::Success(text) => json!({"output": text}),
+                    ToolOutcome::Success(_) => {
+                        json!({"output": result_text_without_images(result)})
+                    }
                     other => json!({"error": result_text(other)}),
                 };
                 push(
