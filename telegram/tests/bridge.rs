@@ -745,8 +745,23 @@ async fn trusted_groups_get_a_full_session_that_asks_the_owner() {
         .find(|message| message["method"] == "session/prompt")
         .cloned()
         .unwrap();
-    assert_eq!(prompt["params"]["prompt"][0]["text"], "Bob: hello");
-    assert!(prompt["params"].get("_meta").is_none());
+    assert_eq!(prompt["params"]["prompt"][0]["text"], "hello");
+    assert_eq!(
+        prompt["params"]["_meta"]["alyosha"]["sender"],
+        json!({"id": "telegram-7", "name": "Bob"})
+    );
+
+    // The owner is recognized there by their user ID.
+    harness
+        .api
+        .push(group_message(9, TRUSTED, OWNER, "@AlyoshaBot hello", true));
+    wait_for(|| {
+        trusted.lock().unwrap().iter().any(|message| {
+            message["params"]["_meta"]["alyosha"]["sender"]
+                == json!({"id": format!("telegram-{OWNER}"), "name": "Bob", "owner": true})
+        })
+    })
+    .await;
 
     // Its approval goes to the owner, who answers the group's agent.
     harness
@@ -856,9 +871,15 @@ async fn trusted_groups_take_commands_from_anyone_there() {
         true,
     ));
     wait_for(|| prompts(&trusted).len() == 2).await;
+    assert_eq!(prompts(&trusted), ["/compact", "please /compact later"]);
+    let sent: Vec<Value> = with_method(&trusted, "session/prompt");
+    assert!(
+        sent[0]["params"].get("_meta").is_none(),
+        "a command has no sender"
+    );
     assert_eq!(
-        prompts(&trusted),
-        ["/compact", "Bob: please /compact later"]
+        sent[1]["params"]["_meta"]["alyosha"]["sender"]["id"],
+        "telegram-7"
     );
 
     // `/cancel` stops the group's turn and its open request.

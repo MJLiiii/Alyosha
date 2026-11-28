@@ -102,6 +102,7 @@ async fn open(
             persistence: None,
             memory: home.memory.clone(),
             media: None,
+            people_notes: false,
         },
         Arc::new(FixedClock(
             Utc.with_ymd_and_hms(2026, 11, 25, 9, 2, 0).unwrap(),
@@ -842,6 +843,7 @@ async fn a_resumed_session_closes_the_turn_a_restart_cut_off() {
             }),
             memory: home.memory.clone(),
             media: None,
+            people_notes: false,
         },
         Arc::new(FixedClock(
             Utc.with_ymd_and_hms(2026, 11, 25, 9, 2, 0).unwrap(),
@@ -899,6 +901,7 @@ async fn messages_waiting_at_a_restart_are_listed_on_resume() {
                     }),
                     memory: home.memory.clone(),
                     media: None,
+                    people_notes: false,
                 },
                 Arc::new(FixedClock(
                     Utc.with_ymd_and_hms(2026, 11, 25, 9, 2, 0).unwrap(),

@@ -201,8 +201,9 @@ impl GuestPool {
     }
 
     /// Sends a group member's message to the group's session, starting it
-    /// first if none runs. A trusted group's session gets `<name>: <text>`;
-    /// a guest session gets the sender in `_meta`.
+    /// first if none runs, with the sender in `_meta`. Only a trusted
+    /// group's session is told that the sender is the owner.
+    #[allow(clippy::too_many_arguments)]
     pub async fn prompt(
         &mut self,
         group: &str,
@@ -211,19 +212,15 @@ impl GuestPool {
         blocks: Vec<serde_json::Value>,
         sender_id: &str,
         sender_name: &str,
+        owner: bool,
     ) -> Result<(), String> {
         self.ensure(group).await?;
         let guest = self.guests.get_mut(group).expect("inserted above");
         guest.last_active = Instant::now();
-        if guest.trusted {
-            guest
-                .bridge
-                .prompt_with(key, &format!("{sender_name}: {text}"), blocks);
-        } else {
-            guest
-                .bridge
-                .prompt_from(key, text, blocks, sender_id, sender_name);
-        }
+        let owner = owner && guest.trusted;
+        guest
+            .bridge
+            .prompt_from(key, text, blocks, sender_id, sender_name, owner);
         Ok(())
     }
 

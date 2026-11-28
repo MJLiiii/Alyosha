@@ -543,6 +543,7 @@ async fn memory_versions_hold_across_connections() {
     let bob = alyosha::agent_state::Sender {
         id: "telegram-2".into(),
         name: "Bob".into(),
+        owner: false,
     };
     let here = UserNotes::open(a_tables, today.clone());
     let there = UserNotes::open(b_tables, today);

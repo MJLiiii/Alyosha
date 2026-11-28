@@ -349,7 +349,7 @@ impl Agent {
                     Mode::Owner => format!("The owner is talking to you through {name}."),
                     Mode::Guest => format!("People write to you in a group chat through {name}."),
                     Mode::Group => format!(
-                        "People in a group chat your owner trusts write to you through {name}. Each message starts with the sender's display name."
+                        "People in a group chat your owner trusts write to you through {name}. Each message starts with the sender's display name; the owner's says (owner). Use user_memory for what you learn about the person writing, and memory for what you learn about your owner, their machines, and their projects."
                     ),
                 }
             })
@@ -587,6 +587,7 @@ impl Agent {
                 persistence: Some(persistence),
                 memory: self.options.memory.clone(),
                 media: self.options.media.clone(),
+                people_notes: self.options.mode == Mode::Group,
             },
             self.options.clock.clone(),
         )
@@ -659,9 +660,32 @@ impl Agent {
                 );
                 return;
             }
+            // A guest session never knows its owner.
             let sender = Sender {
                 id: id_text.to_owned(),
                 name: sender["name"].as_str().unwrap_or_default().to_owned(),
+                owner: false,
+            };
+            let message_id = open.driver.submit_message(text, attachments, Some(sender));
+            open.prompts.push_back((id, Waiting::Turn(message_id)));
+            return;
+        }
+        // A trusted group member's message carries its sender and is never a
+        // command; one without, such as a job's result or a group command,
+        // is taken as it is. See `docs/Channels.md#group-mode`.
+        if self.options.mode == Mode::Group
+            && let Some(sender) = params["_meta"]["alyosha"].get("sender")
+        {
+            let id_text = sender["id"].as_str().unwrap_or_default();
+            if !valid_user_id(id_text) {
+                self.out
+                    .error(&id, -32602, "_meta.alyosha.sender needs a valid id");
+                return;
+            }
+            let sender = Sender {
+                id: id_text.to_owned(),
+                name: sender["name"].as_str().unwrap_or_default().to_owned(),
+                owner: sender["owner"].as_bool() == Some(true),
             };
             let message_id = open.driver.submit_message(text, attachments, Some(sender));
             open.prompts.push_back((id, Waiting::Turn(message_id)));

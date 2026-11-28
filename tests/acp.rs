@@ -698,8 +698,14 @@ async fn trusted_group_sessions_are_full_sessions_with_their_own_channel_line() 
         .map(|command| command["name"].as_str().unwrap())
         .collect();
     assert_eq!(names, ["compact", "job"]);
-    // No sender in `_meta` is needed: the bridge names the sender in the text.
-    let id = client.prompt(&session, "Bob: what is in a.txt?").await;
+    // The bridge sends the sender in `_meta`; Alyosha puts the name and the
+    // person's notes in front.
+    let id = client
+        .request(
+            "session/prompt",
+            json!({"sessionId": session, "prompt": [{"type": "text", "text": "what is in a.txt?"}], "_meta": {"alyosha": {"sender": {"id": "qq-M7", "name": "Bob"}}}}),
+        )
+        .await;
     let messages = client.until_response(id).await;
     assert_eq!(messages.last().unwrap()["result"]["stopReason"], "end_turn");
     let requests = model.requests();
@@ -710,14 +716,43 @@ async fn trusted_group_sessions_are_full_sessions_with_their_own_channel_line() 
             .any(|tool| tool.name == "read_file"),
         "a trusted group has the owner's tools"
     );
-    assert!(last_user_text(&requests[0]).ends_with("Bob: what is in a.txt?"));
+    let opening = last_user_text(&requests[0]);
+    assert!(
+        opening.contains("Notes on this person (qq-M7): No notes yet.\n\nBob: what is in a.txt?"),
+        "{opening}"
+    );
     let instruction = &requests[0].system_instruction;
     assert!(
         instruction.trim_end().ends_with(
-            "People in a group chat your owner trusts write to you through alyosha-qq. Each message starts with the sender's display name."
+            "People in a group chat your owner trusts write to you through alyosha-qq. Each message starts with the sender's display name; the owner's says (owner). Use user_memory for what you learn about the person writing, and memory for what you learn about your owner, their machines, and their projects."
         ),
         "{instruction}"
     );
+
+    // The owner's message carries no notes, and `user_memory` refuses them.
+    model.reply(vec![call(
+        "n",
+        "user_memory",
+        json!({"notes": "Owner stuff"}),
+    )]);
+    model.reply(vec![text("Ok.")]);
+    let id = client
+        .request(
+            "session/prompt",
+            json!({"sessionId": session, "prompt": [{"type": "text", "text": "remember me"}], "_meta": {"alyosha": {"sender": {"id": "qq-M1", "name": "Me", "owner": true}}}}),
+        )
+        .await;
+    client.until_response(id).await;
+    let requests = model.requests();
+    let opening = last_user_text(&requests[2]);
+    assert!(opening.ends_with("Me (owner): remember me"), "{opening}");
+    assert!(!opening.contains("Notes on this person"), "{opening}");
+    assert!(
+        format!("{:?}", requests[3])
+            .contains("This is your owner. Keep what you learn about them with the memory tool."),
+        "the tool refused"
+    );
+    assert!(client.memory.all_notes().is_empty());
 }
 
 /// Puts an owner memory and a person's notes, each holding a marker, into
@@ -816,25 +851,34 @@ async fn owner_and_guest_sessions_each_see_only_their_store() {
     assert_eq!(notes[0].notes, "GUEST-2c9d. Likes tea.");
     assert_eq!(notes[0].version, 2, "the shown version guarded the write");
 
-    // A trusted group is the owner: the index, `memory`, no `user_memory`.
+    // A trusted group has both: the owner's index and `memory`, and the
+    // speaker's notes, the same notes a guest group keeps.
     let model = ScriptedModel::new();
     model.reply(vec![text("Hi.")]);
     let mut group = Client::start_as(model.clone(), Mode::Group).await;
     put_markers(&group);
-    group.initialize(Some("alyosha-qq")).await;
+    group.initialize(Some("alyosha-telegram")).await;
     let session = group.new_session().await;
-    let id = group.prompt(&session, "Bob: hi").await;
+    let id = group
+        .request(
+            "session/prompt",
+            json!({"sessionId": session, "prompt": [{"type": "text", "text": "hi"}], "_meta": {"alyosha": {"sender": {"id": "telegram-1", "name": "Bob"}}}}),
+        )
+        .await;
     group.until_response(id).await;
     let requests = model.requests();
     let tools = tool_names(&requests[0]);
     assert!(tools.iter().any(|tool| tool == "memory"), "{tools:?}");
-    assert!(!tools.iter().any(|tool| tool == "user_memory"), "{tools:?}");
+    assert!(tools.iter().any(|tool| tool == "user_memory"), "{tools:?}");
     assert!(
         requests[0]
             .system_instruction
             .contains("- marker (2026-11-24)")
     );
-    assert!(!format!("{:?}", requests[0]).contains("GUEST-2c9d"));
+    assert!(
+        last_user_text(&requests[0]).contains("GUEST-2c9d"),
+        "the shared notes are shown"
+    );
 }
 
 #[tokio::test]

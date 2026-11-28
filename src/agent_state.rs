@@ -49,6 +49,9 @@ pub enum MessageOrigin {
 pub struct Sender {
     pub id: String,
     pub name: String,
+    /// The owner, as a trusted group's bridge recognizes them. Never set in
+    /// a guest session. See `docs/Memory.md#people-in-group-chats`.
+    pub owner: bool,
 }
 
 /// A message waiting in the queue for its turn.

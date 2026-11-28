@@ -179,6 +179,9 @@ impl UserNotes {
     /// What goes in front of a message from `sender`: their notes, then the
     /// message as `<name>: <text>`. Records the version shown.
     pub async fn opening(&self, sender: &Sender, text: &str) -> String {
+        if sender.owner {
+            return format!("{} (owner): {text}", clean_name(&sender.name));
+        }
         let notes = match self.read(&sender.id).await {
             Ok(notes) => {
                 self.seen()
@@ -232,6 +235,11 @@ pub fn user_memory_tool() -> RegisteredTool {
                 .session
                 .speaker()
                 .ok_or_else(|| ToolError::failed("This message has no sender to keep notes on."))?;
+            if speaker.owner {
+                return Err(ToolError::failed(
+                    "This is your owner. Keep what you learn about them with the memory tool.",
+                ));
+            }
             let notes = arguments["notes"].as_str().unwrap_or_default();
             store.write(&speaker.id, &speaker.name, notes).await?;
             Ok(ToolOutput::text("saved")
@@ -254,6 +262,7 @@ mod tests {
         Sender {
             id: "telegram-123".into(),
             name: "Bob".into(),
+            owner: false,
         }
     }
 

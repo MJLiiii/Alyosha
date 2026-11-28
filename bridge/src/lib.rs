@@ -357,8 +357,9 @@ impl Bridge {
         self.send_prompt(key, text, blocks, None);
     }
 
-    /// Sends a group member's prompt to a guest session, with its sender in
-    /// `_meta`. See `docs/Channels.md#guest-mode`.
+    /// Sends a group member's prompt to a group session, with its sender in
+    /// `_meta`, marked as the owner's when `owner` is set.
+    /// See `docs/Channels.md#guest-mode` and `docs/Channels.md#group-mode`.
     pub fn prompt_from(
         &self,
         key: &str,
@@ -366,8 +367,13 @@ impl Bridge {
         blocks: Vec<Value>,
         sender_id: &str,
         sender_name: &str,
+        owner: bool,
     ) {
-        let meta = json!({"alyosha": {"sender": {"id": sender_id, "name": sender_name}}});
+        let mut sender = json!({"id": sender_id, "name": sender_name});
+        if owner {
+            sender["owner"] = json!(true);
+        }
+        let meta = json!({"alyosha": {"sender": sender}});
         self.send_prompt(key, text, blocks, Some(meta));
     }
 

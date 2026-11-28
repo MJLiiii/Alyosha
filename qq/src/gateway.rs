@@ -398,6 +398,8 @@ pub fn group_message(d: &Value) -> GroupMessage {
 /// The bridge's settings, from `[qq]`.
 pub struct Settings {
     pub owner_openid: String,
+    /// The owner's `member_openid`s in trusted groups.
+    pub owner_member_openids: Vec<String>,
     /// The owner's working folder.
     pub workspace: PathBuf,
     /// Alyosha's working folders, where groups' folders are.
@@ -515,7 +517,7 @@ pub async fn run(
                         }
                         let reply = ReplyTo::message(&message.id);
                         let blocks = api.blocks(&message.attachments).await;
-                        tracing::info!(group = %message.group_openid, trusted = pool.is_trusted(&message.group_openid), "a group mention");
+                        tracing::info!(group = %message.group_openid, member_openid = %message.member_openid, trusted = pool.is_trusted(&message.group_openid), "a group mention");
                         last_mention.insert(message.group_openid.clone(), message.id.clone());
                         let key = format!("g{}:{}", message.group_openid, message.id);
                         // Commands in trusted groups: docs/Channels.md#commands-in-trusted-groups
@@ -546,7 +548,7 @@ pub async fn run(
                         }
                         group_replies.insert(key.clone(), (message.group_openid.clone(), reply));
                         let user = format!("qq-{}", message.member_openid);
-                        if let Err(error) = pool.prompt(&message.group_openid, &key, &message.content, blocks, &user, &message.name).await {
+                        if let Err(error) = pool.prompt(&message.group_openid, &key, &message.content, blocks, &user, &message.name, settings.owner_member_openids.contains(&message.member_openid)).await {
                             tracing::warn!(group = %message.group_openid, error = %error, "the group session did not start");
                             group_replies.remove(&key);
                         }

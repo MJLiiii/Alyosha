@@ -61,6 +61,7 @@ async fn open(home: &Home, model: Arc<ScriptedModel>) -> Started {
             persistence: None,
             memory: alyosha::memory::InMemoryTables::new(),
             media: None,
+            people_notes: false,
         },
         Arc::new(FixedClock(
             Utc.with_ymd_and_hms(2026, 11, 25, 9, 2, 0).unwrap(),

@@ -189,6 +189,7 @@ async fn open(home: &Home, model: Arc<ScriptedModel>, fakes: &Fakes, config: &Co
             persistence: None,
             memory: InMemoryTables::new(),
             media: Some(fakes.setup()),
+            people_notes: false,
         },
         Arc::new(FixedClock(
             Utc.with_ymd_and_hms(2026, 11, 25, 9, 2, 0).unwrap(),

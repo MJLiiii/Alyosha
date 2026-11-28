@@ -73,6 +73,7 @@ fn main() -> ExitCode {
         let gateway = tokio::spawn(async move { listen(gateway_api, messages_sender).await });
         let settings = Settings {
             owner_openid: qq.owner_openid,
+            owner_member_openids: qq.owner_member_openids,
             workspace,
             work_dir: paths.work_dir(),
             reply_chunk: qq.reply_chunk as usize,

@@ -69,6 +69,9 @@ pub struct FrontEnd {
     pub memory: Arc<dyn MemoryTables>,
     /// How attachments are read. Without it they become a line saying so.
     pub media: Option<MediaSetup>,
+    /// A trusted group's session: notes on each person and `user_memory`
+    /// besides the owner's memory. See `docs/Memory.md#people-in-group-chats`.
+    pub people_notes: bool,
 }
 
 /// A started session.
@@ -304,6 +307,9 @@ pub async fn start_with_clock(
     registry.register(skills::skill_tool())?;
     registry.register(approvals::ask_owner_tool())?;
     registry.register(send_file_tool())?;
+    if front_end.people_notes {
+        registry.register(user_memory_tool())?;
+    }
     let with_recall = front_end.persistence.is_some();
     if with_recall {
         registry.register(recall_tool())?;
@@ -388,6 +394,12 @@ pub async fn start_with_clock(
         media: front_end.media.as_ref().map(|media| media.services(config)),
         outbox: Some(Outbox::new(session_dir.join("outbox"))),
         recall,
+        users: front_end.people_notes.then(|| {
+            UserNotes::open(
+                front_end.memory.clone(),
+                Arc::new(move || Utc::now().with_timezone(&timezone).date_naive()),
+            )
+        }),
         ..SessionServices::default()
     };
     let (driver, events) = SessionDriver::start(SessionSetup {

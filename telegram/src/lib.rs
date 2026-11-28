@@ -594,7 +594,7 @@ pub async fn run(
                         }
                         group_replies.insert(key.clone(), (group, Some(message_id)));
                         let user = format!("telegram-{sender}");
-                        if let Err(error) = pool.prompt(&group_id, &key, &text, blocks, &user, &name).await {
+                        if let Err(error) = pool.prompt(&group_id, &key, &text, blocks, &user, &name, sender == settings.owner_id).await {
                             tracing::warn!(group, error = %error, "the group session did not start");
                             group_replies.remove(&key);
                         }
