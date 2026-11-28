@@ -124,7 +124,7 @@ your private chat ───────────► bridge ──► alyosha 
 - **Replies are formatted as in private.** The reply is rendered and split like a private reply. QQ allows five replies per group message within 60 minutes, and the bridge uses at most four, as for private messages. A group reply that fails is logged and dropped, never kept for later.
 - **Nothing else in groups.** Scheduled tasks and the **Working…** message are for your private chat only, and commands work only in trusted groups.
 - **Media in groups.** A trusted group's session takes everything your private chat takes and saves files in its own `inbox/`. A guest session sees images, video frames, and transcripts, but not files, and cannot send files. [Guests](Media.md#guests)
-- **Cost.** Every group mention is a model request on your account. Guest groups have no allowlist and no rate limit in v1. If strangers' use becomes a problem, add a limit per group or per person.
+- **Cost.** Every group mention is a model request on your account. Guest groups have no allowlist and no rate limit. A limit on mentions was considered on 2026-11-28 and not wanted.
 
 A QQ user's ID is the `member_openid` QQ gives them, which may differ from group to group. If it does, a QQ user has separate notes in each group. The first check with a real QQ bot settles this. Telegram user IDs are the same everywhere.
 
@@ -161,7 +161,7 @@ Guest groups get no commands: a command there reaches the guest session as text.
 - Several sessions at once for you, such as one per chat thread.
 - More tools for guests, such as the browser with a profile that holds no sign-ins.
 - Commands in guest groups, and `/compact <name>` and `/job <name> …` for a trusted group from your private chat.
-- Rate limits for group mentions, and an allowlist of groups.
+- An allowlist of guest groups.
 - Answering group messages that do not mention Alyosha.
 - Typing indicators in QQ groups.
 
